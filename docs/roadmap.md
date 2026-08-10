@@ -108,12 +108,19 @@ objects remain unsuppressed.
 
 ### Phase 2: Blocking core MVP
 
-Add vertical slices in this order:
+Status: complete.
+
+The phase was delivered as vertical slices in this order:
 
 1. `stat`, `exists`, `delete`, and `create_dir`;
 2. `Lister` and `Entry`;
 3. filesystem service end-to-end tests;
 4. basic capability inspection.
+
+Both eager and streaming listing forms now share explicit native ownership and
+terminal-state rules. Tests cover memory and filesystem services, recursive and
+shallow listing, list options, repeated end-of-stream, repeated close, native
+errors, panics, and poisoned synchronization state.
 
 ### Phase 3: Streaming and operation options
 
