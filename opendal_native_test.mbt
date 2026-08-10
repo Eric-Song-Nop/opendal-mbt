@@ -43,21 +43,6 @@ test "native memory: empty content and Unicode path roundtrip" {
 }
 
 ///|
-test "native memory: deferred read options fail before the ABI call" {
-  let operator = @opendal.Operator::new("memory", Map([]))
-  let options = @opendal.ReadOptions::new(range=From(1UL))
-  try operator.read("missing.bin", options~) catch {
-    OpenDalError(info) => {
-      assert_eq(info.kind, Unsupported)
-      assert_eq(info.operation, Read)
-      assert_eq(info.path, Some("missing.bin"))
-    }
-  } noraise {
-    _ => fail("expected non-default first-slice options to raise")
-  }
-}
-
-///|
 test "native memory: non-empty config crosses the FixedArray FFI" {
   let config : Map[String, String] = { "root": "/configured/" }
   let operator = @opendal.Operator::new("memory", config)

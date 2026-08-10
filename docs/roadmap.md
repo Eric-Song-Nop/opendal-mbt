@@ -42,8 +42,8 @@ test oracle, but is not the public or long-term ABI of this project.
   objects with finalizers.
 - Use typed MoonBit errors for operational failures; reserve `Option` for
   absence and end-of-stream.
-- Model operation options as immutable MoonBit values. Native code copies any
-  data it retains.
+- Use optional labelled parameters for operation options. Native code copies
+  any data it retains.
 - Treat async, callbacks, presigning, layers, batch operations, and the broad
   cloud-service matrix as later work.
 
@@ -64,18 +64,18 @@ Define the stable MoonBit-facing contract before committing to an ABI:
 Deliverables:
 
 - `docs/design/public-api-semantics.md`;
-- a declaration-only MoonBit API contract;
-- type-checked public API usage tests.
+- a compiler-checked MoonBit API proposal;
+- type-checked usage tests kept outside the published package surface.
 
 ### Phase 1: ABI contract and memory-service spike
 
 Status: complete for the first memory-service vertical slice.
 
 The implemented safe MoonBit path is `Operator::new`/`info` plus default
-whole-object `write` and `read`. Non-default read/write options deliberately
-raise `Unsupported` until the options slice in Phase 3. The Rust bridge fills
-the complete BASE and WHOLE_OBJECT ABI groups so the advertised feature bit
-still guarantees every function pointer in its group.
+whole-object `write` and `read`. Read/write options are intentionally absent
+from the published MoonBit API until their complete Phase 3 slices land. The
+Rust bridge fills the complete BASE and WHOLE_OBJECT ABI groups so the
+advertised feature bit still guarantees every function pointer in its group.
 
 Freeze a small, versioned C ABI and implement one complete slice:
 

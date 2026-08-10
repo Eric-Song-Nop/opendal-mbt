@@ -13,15 +13,7 @@ pub(all) suberror OpenDalError {
 } derive(Eq, @debug.Debug)
 
 // Types and methods
-pub(all) enum ByteRange {
-  Full
-  From(UInt64)
-  Range(UInt64, UInt64)
-  Suffix(UInt64)
-} derive(Eq, @debug.Debug)
-
 pub type Capability
-pub fn Capability::can_copy(Self) -> Bool
 pub fn Capability::can_create_dir(Self) -> Bool
 pub fn Capability::can_delete(Self) -> Bool
 pub fn Capability::can_list(Self) -> Bool
@@ -29,11 +21,8 @@ pub fn Capability::can_list_recursive(Self) -> Bool
 pub fn Capability::can_list_with_limit(Self) -> Bool
 pub fn Capability::can_list_with_start_after(Self) -> Bool
 pub fn Capability::can_read(Self) -> Bool
-pub fn Capability::can_read_suffix(Self) -> Bool
-pub fn Capability::can_rename(Self) -> Bool
 pub fn Capability::can_stat(Self) -> Bool
 pub fn Capability::can_write(Self) -> Bool
-pub fn Capability::can_write_append(Self) -> Bool
 
 pub struct DeleteOptions {
   version : String?
@@ -137,7 +126,6 @@ pub(all) enum Operation {
 
 pub type Operator
 pub fn Operator::check(Self) -> Unit raise OpenDalError
-pub fn Operator::copy(Self, StringView, StringView) -> Metadata raise OpenDalError
 pub fn Operator::create_dir(Self, StringView) -> Unit raise OpenDalError
 pub fn Operator::delete(Self, StringView, options? : DeleteOptions) -> Unit raise OpenDalError
 pub fn Operator::exists(Self, StringView) -> Bool raise OpenDalError
@@ -145,12 +133,9 @@ pub fn Operator::info(Self) -> OperatorInfo
 pub fn Operator::list(Self, StringView, options? : ListOptions) -> Array[Entry] raise OpenDalError
 pub fn Operator::lister(Self, StringView, options? : ListOptions) -> Lister raise OpenDalError
 pub fn Operator::new(StringView, Map[String, String]) -> Self raise OpenDalError
-pub fn Operator::read(Self, StringView, options? : ReadOptions) -> Bytes raise OpenDalError
-pub fn Operator::reader(Self, StringView, options? : ReaderOptions) -> Reader raise OpenDalError
-pub fn Operator::rename(Self, StringView, StringView) -> Unit raise OpenDalError
+pub fn Operator::read(Self, StringView) -> Bytes raise OpenDalError
 pub fn Operator::stat(Self, StringView, options? : StatOptions) -> Metadata raise OpenDalError
-pub fn Operator::write(Self, StringView, Bytes, options? : WriteOptions) -> Metadata raise OpenDalError
-pub fn Operator::writer(Self, StringView, options? : WriteOptions) -> Writer raise OpenDalError
+pub fn Operator::write(Self, StringView, Bytes) -> Metadata raise OpenDalError
 
 pub struct OperatorInfo {
   scheme : String
@@ -158,25 +143,6 @@ pub struct OperatorInfo {
   name : String
   capability : Capability
 }
-
-pub struct ReadOptions {
-  range : ByteRange?
-  version : String?
-  if_match : String?
-  if_none_match : String?
-}
-pub fn ReadOptions::new(range? : ByteRange, version? : String, if_match? : String, if_none_match? : String) -> Self
-
-pub type Reader
-pub fn Reader::close(Self) -> Unit
-pub fn Reader::read(Self, ByteRange) -> Bytes raise OpenDalError
-
-pub struct ReaderOptions {
-  version : String?
-  if_match : String?
-  if_none_match : String?
-}
-pub fn ReaderOptions::new(version? : String, if_match? : String, if_none_match? : String) -> Self
 
 pub struct StatOptions {
   version : String?
@@ -190,22 +156,6 @@ pub struct Timestamp {
   nanoseconds : Int
 } derive(Eq, @debug.Debug)
 
-pub struct WriteOptions {
-  append : Bool
-  content_type : String?
-  content_disposition : String?
-  content_encoding : String?
-  cache_control : String?
-  if_match : String?
-  if_none_match : String?
-}
-pub fn WriteOptions::new(append? : Bool, content_type? : String, content_disposition? : String, content_encoding? : String, cache_control? : String, if_match? : String, if_none_match? : String) -> Self
-
-pub type Writer
-pub fn Writer::close(Self) -> Metadata raise OpenDalError
-pub fn Writer::write(Self, Bytes) -> Unit raise OpenDalError
-
 // Type aliases
 
 // Traits
-

@@ -509,65 +509,6 @@ fn entry_from_native(
 }
 
 ///|
-fn ReadOptions::is_native_default(self : ReadOptions) -> Bool {
-  self.range is None &&
-  self.version is None &&
-  self.if_match is None &&
-  self.if_none_match is None
-}
-
-///|
-fn WriteOptions::is_native_default(self : WriteOptions) -> Bool {
-  !self.append &&
-  self.content_type is None &&
-  self.content_disposition is None &&
-  self.content_encoding is None &&
-  self.cache_control is None &&
-  self.if_match is None &&
-  self.if_none_match is None
-}
-
-///|
-pub fn ReadOptions::new(
-  range? : ByteRange,
-  version? : String,
-  if_match? : String,
-  if_none_match? : String,
-) -> ReadOptions {
-  { range, version, if_match, if_none_match }
-}
-
-///|
-pub fn ReaderOptions::new(
-  version? : String,
-  if_match? : String,
-  if_none_match? : String,
-) -> ReaderOptions {
-  { version, if_match, if_none_match }
-}
-
-///|
-pub fn WriteOptions::new(
-  append? : Bool,
-  content_type? : String,
-  content_disposition? : String,
-  content_encoding? : String,
-  cache_control? : String,
-  if_match? : String,
-  if_none_match? : String,
-) -> WriteOptions {
-  {
-    append: append.unwrap_or(false),
-    content_type,
-    content_disposition,
-    content_encoding,
-    cache_control,
-    if_match,
-    if_none_match,
-  }
-}
-
-///|
 pub fn StatOptions::new(
   version? : String,
   if_match? : String,
@@ -704,18 +645,8 @@ pub fn Operator::stat(
 pub fn Operator::read(
   self : Operator,
   path : StringView,
-  options? : ReadOptions,
 ) -> Bytes raise OpenDalError {
   let path = path.to_owned()
-  if options is Some(value) && !value.is_native_default() {
-    raise binding_error(
-      Unsupported,
-      Read,
-      "read options are not implemented by the first native slice",
-      Some(path),
-      None,
-    )
-  }
   let result = native_operator_read(self, path)
   if native_result_status(result) != 0U {
     raise error_from_native_result(result, Read, Some(path), None)
@@ -733,18 +664,8 @@ pub fn Operator::write(
   self : Operator,
   path : StringView,
   data : Bytes,
-  options? : WriteOptions,
 ) -> Metadata raise OpenDalError {
   let path = path.to_owned()
-  if options is Some(value) && !value.is_native_default() {
-    raise binding_error(
-      Unsupported,
-      Write,
-      "write options are not implemented by the first native slice",
-      Some(path),
-      None,
-    )
-  }
   let result = native_operator_write(self, path, data)
   if native_result_status(result) != 0U {
     raise error_from_native_result(result, Write, Some(path), None)
@@ -945,26 +866,6 @@ pub fn Capability::can_delete(self : Capability) -> Bool {
 ///|
 pub fn Capability::can_list(self : Capability) -> Bool {
   self.has(5)
-}
-
-///|
-pub fn Capability::can_copy(self : Capability) -> Bool {
-  self.has(6)
-}
-
-///|
-pub fn Capability::can_rename(self : Capability) -> Bool {
-  self.has(7)
-}
-
-///|
-pub fn Capability::can_read_suffix(self : Capability) -> Bool {
-  self.has(8)
-}
-
-///|
-pub fn Capability::can_write_append(self : Capability) -> Bool {
-  self.has(9)
 }
 
 ///|

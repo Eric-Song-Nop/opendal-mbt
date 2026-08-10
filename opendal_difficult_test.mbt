@@ -1,26 +1,4 @@
 ///|
-fn random_access_contract(
-  op : @opendal.Operator,
-) -> Unit raise @opendal.OpenDalError {
-  let options = @opendal.ReaderOptions::new(if_match="etag")
-  let reader = op.reader("large.bin", options~)
-  let chunk = reader.read(Range(4096UL, 1024UL))
-  ignore(chunk)
-  reader.close()
-}
-
-///|
-fn writer_contract(op : @opendal.Operator) -> Unit raise @opendal.OpenDalError {
-  let options = @opendal.WriteOptions::new(
-    content_type="application/octet-stream",
-  )
-  let writer = op.writer("large.bin", options~)
-  writer.write(Bytes::new(0))
-  let metadata = writer.close()
-  ignore(metadata)
-}
-
-///|
 fn materialized_error_contract(
   op : @opendal.Operator,
 ) -> Result[Bytes, @opendal.OpenDalError] {
@@ -41,7 +19,7 @@ fn readonly_value_contract(
     entry.metadata.content_length,
     info.scheme,
     info.capability.can_read(),
-    info.capability.can_read_suffix(),
+    info.capability.can_list(),
   )
 }
 
@@ -55,9 +33,7 @@ fn structured_error_contract(
 }
 
 ///|
-test "contract: reader, writer, and materialized errors type-check" {
-  ignore(random_access_contract)
-  ignore(writer_contract)
+test "contract: snapshots and materialized errors type-check" {
   ignore(materialized_error_contract)
   ignore(readonly_value_contract)
   ignore(structured_error_contract)
