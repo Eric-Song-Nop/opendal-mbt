@@ -1,5 +1,6 @@
-// The public contract is target-independent. Native FFI files are gated to
-// the native target while the safe API remains available to every target.
+// OpenDAL operations are currently implemented only for the native target.
+// Gate implementation and contract tests per file so other targets can still
+// resolve the package without seeing declaration-only operations.
 
 import {
   "moonbitlang/core/debug",
@@ -13,10 +14,14 @@ import {
 options(
   "native-stub": [ "opendal_stub.c" ],
   targets: {
+    "opendal_spec.mbt": [ "native" ],
     "opendal_native.mbt": [ "native" ],
+    "opendal_easy_test.mbt": [ "native" ],
+    "opendal_mid_test.mbt": [ "native" ],
+    "opendal_difficult_test.mbt": [ "native" ],
     "opendal_native_test.mbt": [ "native" ],
   },
   // The build entry point supplies the active Cargo profile through
   // LIBRARY_PATH so debug and release MoonBit tests link the matching archive.
-  link: { "native": { "cc-link-flags": "-lopendal_mbt_native" } },
+  link: { "native": { "cc-link-flags": "-lopendal_mbt_native -lm" } },
 )

@@ -1,15 +1,15 @@
 # Public API Semantics
 
-Status: Phase 0 semantic baseline, revised during the ABI audit
+Status: Phase 3 design proposal; only implemented operations are published
 
 This document defines the intended MoonBit-facing behavior of the synchronous
 OpenDAL binding. It deliberately avoids fixing the native ABI or implementation
 layout; those are Phase 1 concerns and must implement this contract.
 
-The declaration-only, compiler-checked surface lives in
-`opendal_spec.mbt`. The three `opendal_*_test.mbt` files are type-level usage
-contracts and are checked, not executed, until implementations replace the
-declarations.
+This document includes forward-looking Reader, Writer, copy, and rename
+semantics. Those sections are proposals until their complete MoonBit, C, and
+Rust slices land. The generated `pkg.generated.mbti` is the authoritative
+current public surface and contains implemented operations only.
 
 ## Design stance
 
