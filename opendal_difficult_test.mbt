@@ -4,7 +4,7 @@ fn random_access_contract(
 ) -> Unit raise @opendal.OpenDalError {
   let options = @opendal.ReaderOptions::new(if_match="etag")
   let reader = op.reader("large.bin", options~)
-  let chunk = reader.read(@opendal.Range(4096UL, 1024UL))
+  let chunk = reader.read(Range(4096UL, 1024UL))
   ignore(chunk)
   reader.close()
 }
@@ -50,8 +50,7 @@ fn structured_error_contract(
   error : @opendal.OpenDalError,
 ) -> (@opendal.ErrorKind, @opendal.Operation, String?) {
   match error {
-    @opendal.OpenDalError(info) =>
-      (info.kind, info.operation, info.destination_path)
+    OpenDalError(info) => (info.kind, info.operation, info.destination_path)
   }
 }
 

@@ -32,6 +32,7 @@ from typing import Any
 
 
 ASAN_COMPILE_FLAGS = "-g -fsanitize=address -fno-omit-frame-pointer"
+ASAN_LINK_FLAGS = "-fsanitize=address"
 
 
 def _find_brew_clang() -> str | None:
@@ -61,7 +62,14 @@ def macos_flags() -> tuple[str, dict[str, str]]:
     # Prefer Homebrew LLVM: supports both ASan and LSan (leak detection)
     brew_clang = _find_brew_clang()
     if brew_clang:
-        return (brew_clang, {"cc-flags": ASAN_COMPILE_FLAGS, "detect_leaks": "1"})
+        return (
+            brew_clang,
+            {
+                "cc-flags": ASAN_COMPILE_FLAGS,
+                "cc-link-flags": ASAN_LINK_FLAGS,
+                "detect_leaks": "1",
+            },
+        )
 
     # Fall back to system clang (Xcode 15+ supports ASan but NOT LSan)
     system_cc = shutil.which("cc") or "/usr/bin/cc"
@@ -72,7 +80,14 @@ def macos_flags() -> tuple[str, dict[str, str]]:
         capture_output=True,
     )
     if result.returncode == 0:
-        return (system_cc, {"cc-flags": ASAN_COMPILE_FLAGS, "detect_leaks": "0"})
+        return (
+            system_cc,
+            {
+                "cc-flags": ASAN_COMPILE_FLAGS,
+                "cc-link-flags": ASAN_LINK_FLAGS,
+                "detect_leaks": "0",
+            },
+        )
 
     raise Exception(
         "No ASan-capable compiler found. Install Homebrew LLVM: brew install llvm"
@@ -81,13 +96,21 @@ def macos_flags() -> tuple[str, dict[str, str]]:
 
 def linux_flags() -> tuple[str, dict[str, str]]:
     cc = shutil.which("cc") or "gcc"
-    return (cc, {"cc-flags": ASAN_COMPILE_FLAGS, "detect_leaks": "1"})
+    return (
+        cc,
+        {
+            "cc-flags": ASAN_COMPILE_FLAGS,
+            "cc-link-flags": ASAN_LINK_FLAGS,
+            "detect_leaks": "1",
+        },
+    )
 
 
 def windows_flags() -> tuple[str, dict[str, str]]:
     return ("cl", {
         "cc-flags": "/Z7 /fsanitize=address",
         "stub-cc-flags": "/Z7 /fsanitize=address",
+        "cc-link-flags": "/fsanitize=address",
         "detect_leaks": "0",
     })
 
@@ -229,6 +252,13 @@ def patch_link_native_json(
     # cc-flags: set ASan compile flags for MoonBit-generated C (entry packages only)
     if is_entry and "cc-flags" in flags:
         native["cc-flags"] = flags["cc-flags"]
+
+    # cc-link-flags: append the ASan runtime while preserving project libraries.
+    if is_entry and "cc-link-flags" in flags:
+        existing_link_flags = native.get("cc-link-flags", "")
+        native["cc-link-flags"] = " ".join(
+            part for part in (existing_link_flags, flags["cc-link-flags"]) if part
+        )
 
     # stub-cc-flags: append ASan flags to existing value (preserving -I, -D, etc.)
     existing_stub_flags = native.get("stub-cc-flags", "")
@@ -504,7 +534,19 @@ def patch_dsl_file(pkg_path: Path, flags: dict[str, str], is_entry: bool) -> str
     if is_entry and "cc-flags" in flags:
         text = _replace_or_insert_in_native(text, "cc-flags", flags["cc-flags"])
 
-    # 2. stub-cc-flags: append ASan flags (or override on Windows)
+    # 2. cc-link-flags: retain project libraries and add the ASan runtime.
+    if is_entry and "cc-link-flags" in flags:
+        existing_link_flags = _find_string_value_in_native(text, "cc-link-flags")
+        new_link_flags = " ".join(
+            part
+            for part in (existing_link_flags, flags["cc-link-flags"])
+            if part
+        )
+        text = _replace_or_insert_in_native(
+            text, "cc-link-flags", new_link_flags
+        )
+
+    # 3. stub-cc-flags: append ASan flags (or override on Windows)
     if "stub-cc-flags" in flags:
         text = _replace_or_insert_in_native(
             text, "stub-cc-flags", flags["stub-cc-flags"]
@@ -582,9 +624,9 @@ def main():
     repo_root = args.repo_root.resolve()
     if not repo_root.is_dir():
         sys.exit(f"--repo-root is not a directory: {repo_root}")
-    if not (repo_root / "moon.mod.json").is_file():
+    if not any((repo_root / name).is_file() for name in ("moon.mod", "moon.mod.json")):
         print(
-            f"Warning: no moon.mod.json found in {repo_root}. "
+            f"Warning: no moon.mod or moon.mod.json found in {repo_root}. "
             "Is --repo-root pointing at the right directory?",
             file=sys.stderr,
         )

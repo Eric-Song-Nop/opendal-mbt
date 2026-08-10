@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Quality gates
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust toolchain
+        run: rustup show active-toolchain
+      - name: Install MoonBit
+        run: |
+          curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
+          echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
+      - name: Tool versions
+        run: |
+          rustc --version
+          cargo --version
+          moon version --all
+      - name: Check formatting, lints, MoonBit, and C ABI
+        run: make check
+      - name: Verify generated public interface
+        run: |
+          moon info --target native --frozen
+          git diff --exit-code -- pkg.generated.mbti
+
+  native:
+    name: ${{ matrix.os }} / ${{ matrix.profile }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-24.04
+          - macos-15
+        profile:
+          - debug
+          - release
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust toolchain
+        run: rustup show active-toolchain
+      - name: Install MoonBit
+        run: |
+          curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
+          echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
+      - name: Run Rust and MoonBit tests
+        run: make test-profile RUST_PROFILE=${{ matrix.profile }}
+      - name: Run the C consumer
+        if: matrix.profile == 'release'
+        run: make c-example RUST_PROFILE=release
+
+  coverage:
+    name: Coverage and C/MoonBit ASan
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust toolchain
+        run: rustup show active-toolchain
+      - name: Install MoonBit
+        run: |
+          curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
+          echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
+      - name: Run coverage
+        run: make coverage
+      - name: Run AddressSanitizer
+        run: make asan

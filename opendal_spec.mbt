@@ -117,8 +117,7 @@ pub struct Entry {
 
 ///|
 /// Effective capabilities captured from an operator.
-#declaration_only
-pub type Capability
+declare pub type Capability
 
 ///|
 /// Read-only information about one configured operator.
@@ -183,51 +182,40 @@ pub struct DeleteOptions {
 
 ///|
 /// An immutable, shareable storage operator.
-#declaration_only
-pub type Operator
+declare pub type Operator
 
 ///|
 /// A stateful, fallible prefix-listing cursor.
-#declaration_only
-pub type Lister
+declare pub type Lister
 
 ///|
 /// A random-access reader. It has no implicit cursor.
-#declaration_only
-pub type Reader
+declare pub type Reader
 
 ///|
 /// A stateful writer that reports completion only after explicit close succeeds.
-#declaration_only
-pub type Writer
+declare pub type Writer
 
 ///|
 /// Construct a whole-object read options value.
-#declaration_only
-pub fn ReadOptions::new(
+declare pub fn ReadOptions::new(
   range? : ByteRange,
   version? : String,
   if_match? : String,
   if_none_match? : String,
-) -> ReadOptions {
-  ...
-}
+) -> ReadOptions
 
 ///|
 /// Construct random-access reader options.
-#declaration_only
-pub fn ReaderOptions::new(
+declare pub fn ReaderOptions::new(
   version? : String,
   if_match? : String,
   if_none_match? : String,
-) -> ReaderOptions {
-  ...
-}
+) -> ReaderOptions
 
 ///|
 /// Construct write options. All supplied strings become binding-owned values.
-#declaration_only
-pub fn WriteOptions::new(
+declare pub fn WriteOptions::new(
   append? : Bool,
   content_type? : String,
   content_disposition? : String,
@@ -235,341 +223,225 @@ pub fn WriteOptions::new(
   cache_control? : String,
   if_match? : String,
   if_none_match? : String,
-) -> WriteOptions {
-  ...
-}
+) -> WriteOptions
 
 ///|
 /// Construct stat options.
-#declaration_only
-pub fn StatOptions::new(
+declare pub fn StatOptions::new(
   version? : String,
   if_match? : String,
   if_none_match? : String,
-) -> StatOptions {
-  ...
-}
+) -> StatOptions
 
 ///|
 /// Construct list options. `limit` is a backend page/request hint, not a
 /// guaranteed maximum number of entries produced by a lister.
-#declaration_only
-pub fn ListOptions::new(
+declare pub fn ListOptions::new(
   recursive? : Bool,
   limit? : UInt64,
   start_after? : String,
-) -> ListOptions {
-  ...
-}
+) -> ListOptions
 
 ///|
 /// Construct delete options. Recursive deletion is requested here instead of
 /// through a separate `remove_all` operation.
-#declaration_only
-pub fn DeleteOptions::new(
+declare pub fn DeleteOptions::new(
   version? : String,
   recursive? : Bool,
-) -> DeleteOptions {
-  ...
-}
+) -> DeleteOptions
 
 ///|
 /// Construct an operator from a service scheme and configuration map.
 /// The map is copied and is never mutated or retained by reference.
-#declaration_only
-pub fn Operator::new(
+declare pub fn Operator::new(
   scheme : StringView,
   config : Map[String, String],
-) -> Operator raise OpenDalError {
-  ...
-}
+) -> Operator raise OpenDalError
 
 ///|
 /// Verify that the operator can perform OpenDAL's check operation.
-#declaration_only
-pub fn Operator::check(self : Operator) -> Unit raise OpenDalError {
-  ...
-}
+declare pub fn Operator::check(self : Operator) -> Unit raise OpenDalError
 
 ///|
 /// Return a read-only information and capability snapshot.
-#declaration_only
-pub fn Operator::info(self : Operator) -> OperatorInfo {
-  ...
-}
+declare pub fn Operator::info(self : Operator) -> OperatorInfo
 
 ///|
 /// Check whether a path exists. Only `NotFound` becomes false; all other
 /// failures remain errors.
-#declaration_only
-pub fn Operator::exists(
+declare pub fn Operator::exists(
   self : Operator,
   path : StringView,
-) -> Bool raise OpenDalError {
-  ...
-}
+) -> Bool raise OpenDalError
 
 ///|
 /// Fetch metadata for a path.
-#declaration_only
-pub fn Operator::stat(
+declare pub fn Operator::stat(
   self : Operator,
   path : StringView,
   options? : StatOptions,
-) -> Metadata raise OpenDalError {
-  ...
-}
+) -> Metadata raise OpenDalError
 
 ///|
 /// Read an entire path into one MoonBit Bytes value.
-#declaration_only
-pub fn Operator::read(
+declare pub fn Operator::read(
   self : Operator,
   path : StringView,
   options? : ReadOptions,
-) -> Bytes raise OpenDalError {
-  ...
-}
+) -> Bytes raise OpenDalError
 
 ///|
 /// Write an entire Bytes value and return the resulting metadata.
-#declaration_only
-pub fn Operator::write(
+declare pub fn Operator::write(
   self : Operator,
   path : StringView,
   data : Bytes,
   options? : WriteOptions,
-) -> Metadata raise OpenDalError {
-  ...
-}
+) -> Metadata raise OpenDalError
 
 ///|
 /// Create a directory recursively. A directory path must end with `/`.
-#declaration_only
-pub fn Operator::create_dir(
+declare pub fn Operator::create_dir(
   self : Operator,
   path : StringView,
-) -> Unit raise OpenDalError {
-  ...
-}
+) -> Unit raise OpenDalError
 
 ///|
 /// Delete a path. Deleting a missing path is successful.
-#declaration_only
-pub fn Operator::delete(
+declare pub fn Operator::delete(
   self : Operator,
   path : StringView,
   options? : DeleteOptions,
-) -> Unit raise OpenDalError {
-  ...
-}
+) -> Unit raise OpenDalError
 
 ///|
 /// Materialize a prefix listing into memory.
-#declaration_only
-pub fn Operator::list(
+declare pub fn Operator::list(
   self : Operator,
   path : StringView,
   options? : ListOptions,
-) -> Array[Entry] raise OpenDalError {
-  ...
-}
+) -> Array[Entry] raise OpenDalError
 
 ///|
 /// Create a streaming prefix lister.
-#declaration_only
-pub fn Operator::lister(
+declare pub fn Operator::lister(
   self : Operator,
   path : StringView,
   options? : ListOptions,
-) -> Lister raise OpenDalError {
-  ...
-}
+) -> Lister raise OpenDalError
 
 ///|
 /// Create a random-access reader with no implicit position.
-#declaration_only
-pub fn Operator::reader(
+declare pub fn Operator::reader(
   self : Operator,
   path : StringView,
   options? : ReaderOptions,
-) -> Reader raise OpenDalError {
-  ...
-}
+) -> Reader raise OpenDalError
 
 ///|
 /// Create a chunked writer. Only successful `Writer::close` reports completion.
-#declaration_only
-pub fn Operator::writer(
+declare pub fn Operator::writer(
   self : Operator,
   path : StringView,
   options? : WriteOptions,
-) -> Writer raise OpenDalError {
-  ...
-}
+) -> Writer raise OpenDalError
 
 ///|
 /// Copy one file and return destination metadata.
-#declaration_only
-pub fn Operator::copy(
+declare pub fn Operator::copy(
   self : Operator,
   from : StringView,
   to : StringView,
-) -> Metadata raise OpenDalError {
-  ...
-}
+) -> Metadata raise OpenDalError
 
 ///|
 /// Rename one file without emulating the operation as copy plus delete.
-#declaration_only
-pub fn Operator::rename(
+declare pub fn Operator::rename(
   self : Operator,
   from : StringView,
   to : StringView,
-) -> Unit raise OpenDalError {
-  ...
-}
+) -> Unit raise OpenDalError
 
 ///|
 /// Return one entry, `None` at end of listing, or raise on failure. After an
 /// error the lister is exhausted.
-#declaration_only
-pub fn Lister::next(self : Lister) -> Entry? raise OpenDalError {
-  ...
-}
+declare pub fn Lister::next(self : Lister) -> Entry? raise OpenDalError
 
 ///|
 /// Release listing resources early. Closing more than once is harmless.
-#declaration_only
-pub fn Lister::close(self : Lister) -> Unit {
-  ...
-}
+declare pub fn Lister::close(self : Lister) -> Unit
 
 ///|
 /// Read one range without changing hidden cursor state. A short result means
 /// the requested range reached the end of the object.
-#declaration_only
-pub fn Reader::read(
+declare pub fn Reader::read(
   self : Reader,
   range : ByteRange,
-) -> Bytes raise OpenDalError {
-  ...
-}
+) -> Bytes raise OpenDalError
 
 ///|
 /// Release reader resources early. Closing more than once is harmless.
-#declaration_only
-pub fn Reader::close(self : Reader) -> Unit {
-  ...
-}
+declare pub fn Reader::close(self : Reader) -> Unit
 
 ///|
 /// Append one chunk to an open writer.
 /// Any write failure is terminal; later writes and close raise
 /// `ResourceClosed`.
-#declaration_only
-pub fn Writer::write(self : Writer, data : Bytes) -> Unit raise OpenDalError {
-  ...
-}
+declare pub fn Writer::write(
+  self : Writer,
+  data : Bytes,
+) -> Unit raise OpenDalError
 
 ///|
 /// Finish the write and return metadata. The first close attempt is terminal.
 /// Drop never calls close; before close succeeds, backend effects are indeterminate.
-#declaration_only
-pub fn Writer::close(self : Writer) -> Metadata raise OpenDalError {
-  ...
-}
+declare pub fn Writer::close(self : Writer) -> Metadata raise OpenDalError
 
 ///|
 /// Return true when metadata describes a file.
-#declaration_only
-pub fn Metadata::is_file(self : Metadata) -> Bool {
-  ...
-}
+declare pub fn Metadata::is_file(self : Metadata) -> Bool
 
 ///|
 /// Return true when metadata describes a directory.
-#declaration_only
-pub fn Metadata::is_dir(self : Metadata) -> Bool {
-  ...
-}
+declare pub fn Metadata::is_dir(self : Metadata) -> Bool
 
 ///|
 /// Basic operation capabilities.
-#declaration_only
-pub fn Capability::can_stat(self : Capability) -> Bool {
-  ...
-}
+declare pub fn Capability::can_stat(self : Capability) -> Bool
 
 ///|
-#declaration_only
-pub fn Capability::can_read(self : Capability) -> Bool {
-  ...
-}
+declare pub fn Capability::can_read(self : Capability) -> Bool
 
 ///|
-#declaration_only
-pub fn Capability::can_write(self : Capability) -> Bool {
-  ...
-}
+declare pub fn Capability::can_write(self : Capability) -> Bool
 
 ///|
-#declaration_only
-pub fn Capability::can_create_dir(self : Capability) -> Bool {
-  ...
-}
+declare pub fn Capability::can_create_dir(self : Capability) -> Bool
 
 ///|
-#declaration_only
-pub fn Capability::can_delete(self : Capability) -> Bool {
-  ...
-}
+declare pub fn Capability::can_delete(self : Capability) -> Bool
 
 ///|
-#declaration_only
-pub fn Capability::can_list(self : Capability) -> Bool {
-  ...
-}
+declare pub fn Capability::can_list(self : Capability) -> Bool
 
 ///|
-#declaration_only
-pub fn Capability::can_copy(self : Capability) -> Bool {
-  ...
-}
+declare pub fn Capability::can_copy(self : Capability) -> Bool
 
 ///|
-#declaration_only
-pub fn Capability::can_rename(self : Capability) -> Bool {
-  ...
-}
+declare pub fn Capability::can_rename(self : Capability) -> Bool
 
 ///|
 /// Selected option capabilities. More accessors can be added compatibly.
-#declaration_only
-pub fn Capability::can_read_suffix(self : Capability) -> Bool {
-  ...
-}
+declare pub fn Capability::can_read_suffix(self : Capability) -> Bool
 
 ///|
-#declaration_only
-pub fn Capability::can_write_append(self : Capability) -> Bool {
-  ...
-}
+declare pub fn Capability::can_write_append(self : Capability) -> Bool
 
 ///|
-#declaration_only
-pub fn Capability::can_list_with_limit(self : Capability) -> Bool {
-  ...
-}
+declare pub fn Capability::can_list_with_limit(self : Capability) -> Bool
 
 ///|
-#declaration_only
-pub fn Capability::can_list_with_start_after(self : Capability) -> Bool {
-  ...
-}
+declare pub fn Capability::can_list_with_start_after(self : Capability) -> Bool
 
 ///|
-#declaration_only
-pub fn Capability::can_list_recursive(self : Capability) -> Bool {
-  ...
-}
+declare pub fn Capability::can_list_recursive(self : Capability) -> Bool
