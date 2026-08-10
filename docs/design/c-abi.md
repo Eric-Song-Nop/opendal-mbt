@@ -445,25 +445,27 @@ exceptions cannot be converted into normal errors.
 | `write` | `operator_write` + metadata view/free |
 | `create_dir` | `operator_create_dir` |
 | `delete` | `operator_delete` |
-| `copy` | `operator_copy` + metadata view/free |
-| `rename` | `operator_rename` |
-| `lister` | `operator_lister` |
+| proposed `copy` | `operator_copy` + metadata view/free |
+| proposed `rename` | `operator_rename` |
+| `open_lister` | `operator_lister` |
 | `list` | materialize `operator_lister` + repeated `lister_next` |
 | `Lister::next` | `lister_next` + entry views/free |
 | `Lister::close` | `lister_close` |
-| `reader` | `operator_reader` |
-| `Reader::read` | `reader_read` + buffer length/copy/free |
-| `Reader::close` | `reader_close` |
-| `writer` | `operator_writer` |
-| `Writer::write` | `writer_write` |
-| `Writer::close` | `writer_close` + metadata view/free |
+| proposed `open_reader` | `operator_reader` |
+| proposed `Reader::read` | `reader_read` + buffer length/copy/free |
+| proposed `Reader::close` | `reader_close` |
+| proposed `open_writer` | `operator_writer` |
+| proposed `Writer::write` | `writer_write` |
+| proposed `Writer::finish` | `writer_close` + metadata view/free |
 
 Materializing `list` over the native lister is not an emulation of a storage
 operation; it is the eager consumption form of the same listing primitive.
-Options constructors, `Metadata::is_file`/`is_dir`, and Capability getters are
-pure MoonBit operations. Capability getters test stable bits copied from
-OpenDAL 0.58.1's effective composed capability snapshot; the removed
-native/full split is not reconstructed from raw internals.
+Optional-argument normalization, `Metadata::is_file`/`is_dir`, and
+Capability getters are pure MoonBit operations. The C ABI retains OpenDAL
+0.58.1's complete effective composed capability snapshot. The public MoonBit
+surface exposes getters only for operations and options currently callable
+through the facade, so a true public capability always has a corresponding
+MoonBit operation.
 
 ## Resource states
 

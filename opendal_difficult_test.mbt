@@ -27,9 +27,8 @@ fn readonly_value_contract(
 fn structured_error_contract(
   error : @opendal.OpenDalError,
 ) -> (@opendal.ErrorKind, @opendal.Operation, String?) {
-  match error {
-    OpenDalError(info) => (info.kind, info.operation, info.destination_path)
-  }
+  let info = error.info()
+  (error.kind(), info.operation, info.destination_path)
 }
 
 ///|

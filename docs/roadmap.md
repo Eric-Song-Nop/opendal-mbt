@@ -119,8 +119,19 @@ The phase was delivered as vertical slices in this order:
 
 Both eager and streaming listing forms now share explicit native ownership and
 terminal-state rules. Tests cover memory and filesystem services, recursive and
-shallow listing, list options, repeated end-of-stream, repeated close, native
+shallow listing, labelled list arguments, repeated end-of-stream, repeated close, native
 errors, panics, and poisoned synchronization state.
+
+### Phase 2.5: MoonBit facade stabilization
+
+Status: in progress.
+
+- publish implemented operations only;
+- use optional labelled arguments instead of public options records;
+- accept `StringView` and `BytesView` inputs while returning owned values;
+- name managed resource constructors `open_*`;
+- expose structured error accessors and checked examples;
+- verify the public contract from a real downstream consumer.
 
 ### Phase 3: Streaming and operation options
 
@@ -128,8 +139,8 @@ Add:
 
 - random-access `Reader` range reads without a hidden cursor;
 - `Writer` with explicit `open/closed/failed` state;
-- explicit, terminal `close` semantics;
-- immutable read, write, stat, and list options;
+- explicit, terminal `finish` semantics;
+- incremental read and write options as optional labelled arguments;
 - copy and rename without semantic emulation.
 
 ### Phase 4: Distribution and service profiles
