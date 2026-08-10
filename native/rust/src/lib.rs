@@ -11,10 +11,10 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
 use std::slice;
 use std::str;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use abi::*;
-use opendal::options::{DeleteOptions, ReadOptions, StatOptions, WriteOptions};
+use opendal::options::{DeleteOptions, ListOptions, ReadOptions, StatOptions, WriteOptions};
 use opendal::{BytesRange, Capability, EntryMode, ErrorKind, Metadata};
 use tokio::runtime::Runtime;
 
@@ -24,6 +24,39 @@ const OPENDAL_VERSION: &str = "0.58.1";
 const SERVICE_PROFILE: &str = "memory,fs";
 
 static RUNTIME: OnceLock<Result<Runtime, String>> = OnceLock::new();
+
+#[cfg(test)]
+const TEST_LISTER_NEXT_ERROR: u8 = 1;
+#[cfg(test)]
+const TEST_LISTER_NEXT_PANIC: u8 = 2;
+#[cfg(test)]
+static TEST_LISTER_NEXT_TARGET: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+static TEST_LISTER_NEXT_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+#[cfg(test)]
+fn install_lister_next_test_mode(lister: *mut ListerV1, mode: u8) {
+    use std::sync::atomic::Ordering;
+
+    TEST_LISTER_NEXT_MODE.store(mode, Ordering::Relaxed);
+    TEST_LISTER_NEXT_TARGET.store(lister.addr(), Ordering::Release);
+}
+
+#[cfg(test)]
+fn take_lister_next_test_mode(lister: &ListerV1) -> u8 {
+    use std::sync::atomic::Ordering;
+
+    let address = ptr::from_ref(lister).addr();
+    if TEST_LISTER_NEXT_TARGET
+        .compare_exchange(address, 0, Ordering::Acquire, Ordering::Relaxed)
+        .is_ok()
+    {
+        TEST_LISTER_NEXT_MODE.swap(0, Ordering::Relaxed)
+    } else {
+        0
+    }
+}
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -428,6 +461,40 @@ unsafe fn parse_write_options(pointer: *const WriteOptionsV1) -> CallResult<Writ
     })
 }
 
+unsafe fn parse_list_options(pointer: *const ListOptionsV1) -> CallResult<ListOptions> {
+    if pointer.is_null() {
+        return Ok(ListOptions::default());
+    }
+    // SAFETY: non-null options are validated and copied.
+    let input = unsafe { read_input_struct(pointer)? };
+    let known_present = LIST_LIMIT_PRESENT | LIST_START_AFTER_PRESENT;
+    if input.present_bits & !known_present != 0 || input.flags & !LIST_RECURSIVE != 0 {
+        return abi_mismatch();
+    }
+    let limit = if input.present_bits & LIST_LIMIT_PRESENT != 0 {
+        Some(checked_len(input.limit)?)
+    } else {
+        if input.limit != 0 {
+            return abi_mismatch();
+        }
+        None
+    };
+    Ok(ListOptions {
+        limit,
+        // SAFETY: the copied carrier borrows only for this call and is copied.
+        start_after: unsafe {
+            optional_text(
+                input.start_after,
+                input.present_bits,
+                LIST_START_AFTER_PRESENT,
+                "list start_after",
+            )?
+        },
+        recursive: input.flags & LIST_RECURSIVE != 0,
+        ..ListOptions::default()
+    })
+}
+
 unsafe fn parse_delete_options(pointer: *const DeleteOptionsV1) -> CallResult<DeleteOptions> {
     if pointer.is_null() {
         return Ok(DeleteOptions::default());
@@ -469,6 +536,16 @@ unsafe fn clear_error_output(output: *mut *mut ErrorV1) -> CallResult<()> {
     }
     // SAFETY: non-null out_error is writable for one pointer.
     unsafe { output.write(ptr::null_mut()) };
+    Ok(())
+}
+
+fn combine_output_validation<const N: usize>(results: [CallResult<()>; N]) -> CallResult<()> {
+    // Array elements are evaluated before this function is entered, so every
+    // output slot gets an independent clear attempt even if an earlier slot is
+    // invalid. Return the first validation failure only after all attempts.
+    for result in results {
+        result?;
+    }
     Ok(())
 }
 
@@ -598,6 +675,53 @@ fn checked_metadata(metadata: Metadata) -> CallResult<MetadataV1> {
     check_output_string(metadata.etag())?;
     check_output_string(metadata.version())?;
     Ok(MetadataV1 { metadata })
+}
+
+fn checked_entry(entry: opendal::Entry) -> CallResult<EntryV1> {
+    let name = entry.name().to_owned();
+    let (path, metadata) = entry.into_parts();
+    if u64::try_from(path.len()).map_or(true, |length| length > MAX_OUTPUT_BYTES) {
+        return Err(buffer_too_large(
+            "entry path exceeds the binding output limit",
+        ));
+    }
+    if u64::try_from(name.len()).map_or(true, |length| length > MAX_OUTPUT_BYTES) {
+        return Err(buffer_too_large(
+            "entry name exceeds the binding output limit",
+        ));
+    }
+    let metadata = checked_metadata(metadata)?.metadata;
+    Ok(EntryV1 {
+        path,
+        name,
+        metadata,
+    })
+}
+
+fn lock_lister_state(lister: &ListerV1) -> std::sync::MutexGuard<'_, ListerStateV1> {
+    match lister.state.lock() {
+        Ok(state) => state,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+fn drop_blocking_lister_contained(lister: opendal::blocking::Lister) {
+    let _ = catch_unwind(AssertUnwindSafe(|| drop(lister)));
+}
+
+fn close_lister_state(lister: &ListerV1) {
+    let open = {
+        let mut state = lock_lister_state(lister);
+        let previous = std::mem::replace(&mut *state, ListerStateV1::Closed);
+        lister.state.clear_poison();
+        match previous {
+            ListerStateV1::Open(inner) => Some(inner),
+            ListerStateV1::Exhausted | ListerStateV1::Closed => None,
+        }
+    };
+    if let Some(inner) = open {
+        drop_blocking_lister_contained(inner);
+    }
 }
 
 fn metadata_output_view(metadata: &Metadata, header: StructHeaderV1) -> CallResult<MetadataViewV1> {
@@ -987,10 +1111,12 @@ unsafe extern "C" fn operator_new(
 ) -> Status {
     catch_status(|| {
         // SAFETY: required/optional outputs are validated and cleared before inputs.
-        if let Err(failure) = unsafe { clear_required_output(out_operator, ptr::null_mut()) }
-            .and_then(|_| unsafe { clear_required_output(out_info, ptr::null_mut()) })
-            .and_then(|_| unsafe { clear_error_output(out_error) })
-        {
+        let outputs = [
+            unsafe { clear_required_output(out_operator, ptr::null_mut()) },
+            unsafe { clear_required_output(out_info, ptr::null_mut()) },
+            unsafe { clear_error_output(out_error) },
+        ];
+        if let Err(failure) = combine_output_validation(outputs) {
             return unsafe { finish_failure(failure, out_error) };
         }
         let result = (|| -> CallResult<(Box<OperatorV1>, Box<OperatorInfoV1>)> {
@@ -1077,9 +1203,10 @@ unsafe extern "C" fn operator_exists(
 ) -> Status {
     catch_status(|| {
         // SAFETY: outputs are validated and cleared before input/work.
-        if let Err(failure) = unsafe { clear_required_output(out_exists, 0) }
-            .and_then(|_| unsafe { clear_error_output(out_error) })
-        {
+        let outputs = [unsafe { clear_required_output(out_exists, 0) }, unsafe {
+            clear_error_output(out_error)
+        }];
+        if let Err(failure) = combine_output_validation(outputs) {
             return unsafe { finish_failure(failure, out_error) };
         }
         let result = (|| -> CallResult<u32> {
@@ -1112,9 +1239,11 @@ unsafe extern "C" fn operator_stat(
 ) -> Status {
     catch_status(|| {
         // SAFETY: outputs are validated and cleared before input/work.
-        if let Err(failure) = unsafe { clear_required_output(out_metadata, ptr::null_mut()) }
-            .and_then(|_| unsafe { clear_error_output(out_error) })
-        {
+        let outputs = [
+            unsafe { clear_required_output(out_metadata, ptr::null_mut()) },
+            unsafe { clear_error_output(out_error) },
+        ];
+        if let Err(failure) = combine_output_validation(outputs) {
             return unsafe { finish_failure(failure, out_error) };
         }
         let result = (|| -> CallResult<Box<MetadataV1>> {
@@ -1149,9 +1278,11 @@ unsafe extern "C" fn operator_read(
 ) -> Status {
     catch_status(|| {
         // SAFETY: outputs are validated and cleared before input/work.
-        if let Err(failure) = unsafe { clear_required_output(out_buffer, ptr::null_mut()) }
-            .and_then(|_| unsafe { clear_error_output(out_error) })
-        {
+        let outputs = [
+            unsafe { clear_required_output(out_buffer, ptr::null_mut()) },
+            unsafe { clear_error_output(out_error) },
+        ];
+        if let Err(failure) = combine_output_validation(outputs) {
             return unsafe { finish_failure(failure, out_error) };
         }
         let result = (|| -> CallResult<Box<BufferV1>> {
@@ -1195,9 +1326,11 @@ unsafe extern "C" fn operator_write(
 ) -> Status {
     catch_status(|| {
         // SAFETY: outputs are validated and cleared before input/work.
-        if let Err(failure) = unsafe { clear_required_output(out_metadata, ptr::null_mut()) }
-            .and_then(|_| unsafe { clear_error_output(out_error) })
-        {
+        let outputs = [
+            unsafe { clear_required_output(out_metadata, ptr::null_mut()) },
+            unsafe { clear_error_output(out_error) },
+        ];
+        if let Err(failure) = combine_output_validation(outputs) {
             return unsafe { finish_failure(failure, out_error) };
         }
         let result = (|| -> CallResult<Box<MetadataV1>> {
@@ -1283,9 +1416,11 @@ unsafe extern "C" fn operator_copy(
 ) -> Status {
     catch_status(|| {
         // SAFETY: outputs are validated and cleared before input/work.
-        if let Err(failure) = unsafe { clear_required_output(out_metadata, ptr::null_mut()) }
-            .and_then(|_| unsafe { clear_error_output(out_error) })
-        {
+        let outputs = [
+            unsafe { clear_required_output(out_metadata, ptr::null_mut()) },
+            unsafe { clear_error_output(out_error) },
+        ];
+        if let Err(failure) = combine_output_validation(outputs) {
             return unsafe { finish_failure(failure, out_error) };
         }
         let result = (|| -> CallResult<Box<MetadataV1>> {
@@ -1338,6 +1473,175 @@ unsafe extern "C" fn operator_rename(
     })
 }
 
+unsafe extern "C" fn operator_lister(
+    operator: *mut OperatorV1,
+    path: *const BytesViewV1,
+    options: *const ListOptionsV1,
+    out_lister: *mut *mut ListerV1,
+    out_error: *mut *mut ErrorV1,
+) -> Status {
+    catch_status(|| {
+        // SAFETY: outputs are validated and cleared before input/work.
+        let outputs = [
+            unsafe { clear_required_output(out_lister, ptr::null_mut()) },
+            unsafe { clear_error_output(out_error) },
+        ];
+        if let Err(failure) = combine_output_validation(outputs) {
+            return unsafe { finish_failure(failure, out_error) };
+        }
+        let result = (|| -> CallResult<Box<ListerV1>> {
+            // SAFETY: handle/text/options are validated and copied as needed.
+            let operator = unsafe { borrow_required(operator.cast_const())? };
+            let path = unsafe { read_text(path, "path")? };
+            let options = unsafe { parse_list_options(options)? };
+            let lister = operator
+                .inner
+                .lister_options(&path, options)
+                .map_err(opendal_error)?;
+            Ok(Box::new(ListerV1 {
+                state: Mutex::new(ListerStateV1::Open(lister)),
+            }))
+        })();
+        match result {
+            Ok(lister) => {
+                // SAFETY: output was validated above.
+                unsafe { out_lister.write(Box::into_raw(lister)) };
+                STATUS_OK
+            }
+            Err(failure) => unsafe { finish_failure(failure, out_error) },
+        }
+    })
+}
+
+unsafe extern "C" fn lister_next(
+    lister: *mut ListerV1,
+    out_entry: *mut *mut EntryV1,
+    out_error: *mut *mut ErrorV1,
+) -> Status {
+    catch_status(|| {
+        // SAFETY: outputs are validated and cleared before the handle is inspected.
+        let outputs = [
+            unsafe { clear_required_output(out_entry, ptr::null_mut()) },
+            unsafe { clear_error_output(out_error) },
+        ];
+        if let Err(failure) = combine_output_validation(outputs) {
+            return unsafe { finish_failure(failure, out_error) };
+        }
+        // SAFETY: opaque handle validity is a caller lifetime obligation.
+        let lister = match unsafe { borrow_required(lister.cast_const()) } {
+            Ok(lister) => lister,
+            Err(failure) => return unsafe { finish_failure(failure, out_error) },
+        };
+        #[cfg(test)]
+        let test_mode = take_lister_next_test_mode(lister);
+        let mut state = match lister.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => {
+                let mut state = poisoned.into_inner();
+                let previous = std::mem::replace(&mut *state, ListerStateV1::Exhausted);
+                if let ListerStateV1::Open(inner) = previous {
+                    drop_blocking_lister_contained(inner);
+                }
+                // The uncertain state has been replaced with a deterministic
+                // terminal state. Clear poison so this failure is reported
+                // exactly once and later next calls return END.
+                lister.state.clear_poison();
+                drop(state);
+                return unsafe {
+                    finish_failure(
+                        binding_error(
+                            ERROR_UNEXPECTED,
+                            "Unexpected",
+                            "lister state lock was poisoned",
+                        ),
+                        out_error,
+                    )
+                };
+            }
+        };
+        let current = std::mem::replace(&mut *state, ListerStateV1::Exhausted);
+        let mut inner = match current {
+            ListerStateV1::Open(inner) => inner,
+            ListerStateV1::Exhausted => return STATUS_END,
+            ListerStateV1::Closed => {
+                *state = ListerStateV1::Closed;
+                return unsafe {
+                    finish_failure(
+                        binding_error(ERROR_RESOURCE_CLOSED, "ResourceClosed", "lister is closed"),
+                        out_error,
+                    )
+                };
+            }
+        };
+
+        // Keep ownership of the native lister outside the unwind boundary. If
+        // next, error conversion, or snapshot allocation panics, the state is
+        // already Exhausted and the lister can be dropped under its own guard.
+        let step = catch_unwind(AssertUnwindSafe(|| -> CallResult<Option<Box<EntryV1>>> {
+            #[cfg(test)]
+            match test_mode {
+                TEST_LISTER_NEXT_ERROR => {
+                    return Err(binding_error(
+                        ERROR_UNEXPECTED,
+                        "Unexpected",
+                        "injected lister error",
+                    ));
+                }
+                TEST_LISTER_NEXT_PANIC => panic!("injected lister panic"),
+                _ => {}
+            }
+            match inner.next() {
+                Some(Ok(entry)) => Ok(Some(Box::new(checked_entry(entry)?))),
+                Some(Err(error)) => Err(opendal_error(error)),
+                None => Ok(None),
+            }
+        }));
+        match step {
+            Ok(Ok(Some(entry))) => {
+                *state = ListerStateV1::Open(inner);
+                // SAFETY: the output was validated and remains exclusively writable.
+                unsafe { out_entry.write(Box::into_raw(entry)) };
+                STATUS_OK
+            }
+            Ok(Ok(None)) => {
+                drop_blocking_lister_contained(inner);
+                STATUS_END
+            }
+            Ok(Err(failure)) => {
+                drop_blocking_lister_contained(inner);
+                unsafe { finish_failure(failure, out_error) }
+            }
+            Err(_) => {
+                drop_blocking_lister_contained(inner);
+                STATUS_PANIC
+            }
+        }
+    })
+}
+
+unsafe extern "C" fn lister_close(lister: *mut ListerV1) {
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        if lister.is_null() {
+            return;
+        }
+        // SAFETY: non-null opaque handle validity is the caller's obligation.
+        let lister = unsafe { &*lister };
+        close_lister_state(lister);
+    }));
+}
+
+unsafe extern "C" fn lister_free(lister: *mut ListerV1) {
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        if lister.is_null() {
+            return;
+        }
+        // SAFETY: every non-null handle is uniquely owned and freed once.
+        let lister = unsafe { Box::from_raw(lister) };
+        close_lister_state(&lister);
+        drop(lister);
+    }));
+}
+
 fn stage_api() -> Option<ApiV1> {
     Some(ApiV1 {
         struct_size: 0,
@@ -1346,7 +1650,7 @@ fn stage_api() -> Option<ApiV1> {
         library_minor: ABI_MINOR,
         library_patch: ABI_PATCH,
         reserved0: 0,
-        feature_bits: FEATURE_BASE | FEATURE_WHOLE_OBJECT,
+        feature_bits: FEATURE_BASE | FEATURE_WHOLE_OBJECT | FEATURE_LISTING,
         max_output_bytes: MAX_OUTPUT_BYTES,
         library_info: Some(library_info),
         error_view: Some(error_view),
@@ -1372,10 +1676,10 @@ fn stage_api() -> Option<ApiV1> {
         operator_delete: Some(operator_delete),
         operator_copy: Some(operator_copy),
         operator_rename: Some(operator_rename),
-        operator_lister: None,
-        lister_next: None,
-        lister_close: None,
-        lister_free: None,
+        operator_lister: Some(operator_lister),
+        lister_next: Some(lister_next),
+        lister_close: Some(lister_close),
+        lister_free: Some(lister_free),
         operator_reader: None,
         reader_read: None,
         reader_close: None,
@@ -1441,7 +1745,12 @@ unsafe fn install_api(base: *mut u8, caller_size: usize, staged: &ApiV1) {
     install_field!(operator_delete);
     install_field!(operator_copy);
     install_field!(operator_rename);
-    // Disabled groups are intentionally left zero by the bounded clear.
+    install_field!(operator_lister);
+    install_field!(lister_next);
+    install_field!(lister_close);
+    install_field!(lister_free);
+    // Disabled Reader and Writer groups are intentionally left zero by the
+    // bounded clear.
 }
 
 /// Negotiate the stable v1 function table.
@@ -1652,15 +1961,148 @@ mod tests {
         (view.mode, view.content_length)
     }
 
+    #[derive(Debug, Eq, PartialEq)]
+    struct ListedEntry {
+        path: String,
+        name: String,
+        mode: u32,
+        content_length: u64,
+    }
+
+    fn copy_view(view: BytesViewV1) -> Vec<u8> {
+        let length = usize::try_from(view.len).expect("test view length fits usize");
+        if length == 0 {
+            return Vec::new();
+        }
+        assert!(!view.data.is_null());
+        // SAFETY: the matching owned snapshot stays live while this helper copies it.
+        unsafe { slice::from_raw_parts(view.data, length) }.to_vec()
+    }
+
+    fn take_listed_entry(api: &ApiV1, entry: *mut EntryV1) -> ListedEntry {
+        assert!(!entry.is_null());
+        let mut entry_view = EntryViewV1 {
+            struct_size: size_of::<EntryViewV1>() as u32,
+            struct_version: STRUCT_VERSION,
+            reserved0: 0,
+            path: bytes(b""),
+            name: bytes(b""),
+        };
+        let absent = bytes(b"");
+        let mut metadata_view = MetadataViewV1 {
+            struct_size: size_of::<MetadataViewV1>() as u32,
+            struct_version: STRUCT_VERSION,
+            present_bits: 0,
+            mode: ENTRY_MODE_UNKNOWN,
+            is_current: 0,
+            is_deleted: 0,
+            reserved0: 0,
+            content_length: 0,
+            last_modified: TimestampV1::default(),
+            cache_control: absent,
+            content_disposition: absent,
+            content_encoding: absent,
+            content_md5: absent,
+            content_type: absent,
+            etag: absent,
+            version: absent,
+        };
+        // SAFETY: entry is live and both views are complete writable v1 storage.
+        unsafe {
+            assert_eq!(
+                api.entry_view.expect("BASE entry view is installed")(entry, &mut entry_view),
+                STATUS_OK,
+            );
+            assert_eq!(
+                api.entry_metadata_view
+                    .expect("BASE entry metadata view is installed")(
+                    entry, &mut metadata_view
+                ),
+                STATUS_OK,
+            );
+        }
+        let listed = ListedEntry {
+            path: String::from_utf8(copy_view(entry_view.path)).expect("entry path is UTF-8"),
+            name: String::from_utf8(copy_view(entry_view.name)).expect("entry name is UTF-8"),
+            mode: metadata_view.mode,
+            content_length: metadata_view.content_length,
+        };
+        // SAFETY: this test owns the entry snapshot exactly once.
+        unsafe { api.entry_free.expect("BASE entry free is installed")(entry) };
+        listed
+    }
+
+    fn memory_lister(
+        api: &ApiV1,
+        operator: *mut OperatorV1,
+        path: &[u8],
+        options: *const ListOptionsV1,
+    ) -> *mut ListerV1 {
+        let path = bytes(path);
+        let mut lister = NonNull::<ListerV1>::dangling().as_ptr();
+        let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: all input carriers and output slots are valid for this call.
+        let status = unsafe {
+            api.operator_lister
+                .expect("LISTING constructor is installed")(
+                operator,
+                &path,
+                options,
+                &mut lister,
+                &mut error,
+            )
+        };
+        assert_eq!(status, STATUS_OK);
+        assert!(!lister.is_null());
+        assert!(error.is_null());
+        lister
+    }
+
+    fn collect_lister(api: &ApiV1, lister: *mut ListerV1) -> Vec<ListedEntry> {
+        let next = api.lister_next.expect("LISTING next is installed");
+        let mut entries = Vec::new();
+        loop {
+            let mut entry = NonNull::<EntryV1>::dangling().as_ptr();
+            let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+            // SAFETY: the lister is live and both output slots are writable.
+            let status = unsafe { next(lister, &mut entry, &mut error) };
+            match status {
+                STATUS_OK => {
+                    assert!(!entry.is_null());
+                    assert!(error.is_null());
+                    entries.push(take_listed_entry(api, entry));
+                }
+                STATUS_END => {
+                    assert!(entry.is_null());
+                    assert!(error.is_null());
+                    break;
+                }
+                STATUS_ERROR => {
+                    assert!(entry.is_null());
+                    let kind = take_error_kind(api, error);
+                    panic!("unexpected lister error kind {kind}");
+                }
+                other => panic!("unexpected lister transport status {other}"),
+            }
+        }
+        entries
+    }
+
     #[test]
     fn bootstrap_installs_complete_supported_groups() {
         let api = api();
         assert_eq!(api.library_struct_size as usize, size_of::<ApiV1>());
-        assert_eq!(api.feature_bits, FEATURE_BASE | FEATURE_WHOLE_OBJECT);
+        assert_eq!(
+            api.feature_bits,
+            FEATURE_BASE | FEATURE_WHOLE_OBJECT | FEATURE_LISTING,
+        );
         assert!(api.library_info.is_some());
         assert!(api.operator_new.is_some());
         assert!(api.operator_rename.is_some());
-        assert!(api.operator_lister.is_none());
+        assert!(api.operator_lister.is_some());
+        assert!(api.lister_next.is_some());
+        assert!(api.lister_close.is_some());
+        assert!(api.lister_free.is_some());
         assert!(api.operator_reader.is_none());
         assert!(api.operator_writer.is_none());
     }
@@ -1991,6 +2433,24 @@ mod tests {
         };
         assert_eq!(status, STATUS_ABI_MISMATCH);
         assert!(operator.is_null());
+        assert!(info.is_null());
+        assert!(error.is_null());
+
+        info = NonNull::<OperatorInfoV1>::dangling().as_ptr();
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the first required output is deliberately NULL. The other
+        // valid outputs must still be cleared before the ABI mismatch returns.
+        let status = unsafe {
+            new(
+                &scheme,
+                ptr::null(),
+                0,
+                ptr::null_mut(),
+                &mut info,
+                &mut error,
+            )
+        };
+        assert_eq!(status, STATUS_ABI_MISMATCH);
         assert!(info.is_null());
         assert!(error.is_null());
     }
@@ -2345,6 +2805,304 @@ mod tests {
     }
 
     #[test]
+    fn listing_streams_snapshots_preserves_state_and_outlives_operator() {
+        let api = api();
+        let (operator, info) = memory_operator(&api);
+        write_memory_object(&api, operator, b"listing/a.txt", b"a");
+        write_memory_object(&api, operator, b"listing/nested/b.bin", b"bb");
+        write_memory_object(&api, operator, b"listing/nested/deeper/c.txt", b"ccc");
+
+        let default_lister = memory_lister(&api, operator, b"listing/", ptr::null());
+        let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: a NULL required entry output is rejected before advancing the lister.
+        assert_eq!(
+            unsafe {
+                api.lister_next.expect("LISTING next is installed")(
+                    default_lister,
+                    ptr::null_mut(),
+                    &mut error,
+                )
+            },
+            STATUS_ABI_MISMATCH,
+        );
+        assert!(error.is_null());
+
+        let default_entries = collect_lister(&api, default_lister);
+        assert!(default_entries.iter().any(|entry| {
+            entry.path == "listing/a.txt"
+                && entry.name == "a.txt"
+                && entry.mode == ENTRY_MODE_FILE
+                && entry.content_length == 1
+        }));
+        assert!(default_entries.iter().any(|entry| {
+            entry.path == "listing/nested/"
+                && entry.name == "nested/"
+                && entry.mode == ENTRY_MODE_DIRECTORY
+        }));
+        assert!(
+            default_entries
+                .iter()
+                .all(|entry| entry.path != "listing/nested/b.bin")
+        );
+        // SAFETY: close is idempotent and free consumes the outer handle once.
+        unsafe {
+            api.lister_close.expect("LISTING close is installed")(default_lister);
+            api.lister_close.expect("LISTING close is installed")(default_lister);
+            api.lister_free.expect("LISTING free is installed")(default_lister);
+        }
+
+        let absent = bytes(b"");
+        let recursive = ListOptionsV1 {
+            struct_size: size_of::<ListOptionsV1>() as u32,
+            struct_version: STRUCT_VERSION,
+            present_bits: 0,
+            flags: LIST_RECURSIVE,
+            limit: 0,
+            start_after: absent,
+        };
+        let recursive_lister = memory_lister(&api, operator, b"listing/", &recursive);
+
+        // The OpenDAL blocking lister owns everything it needs after creation.
+        // SAFETY: the two constructor outputs are still uniquely owned here.
+        unsafe {
+            api.operator_info_free.expect("BASE info free is installed")(info);
+            api.operator_free.expect("BASE operator free is installed")(operator);
+        }
+        let recursive_entries = collect_lister(&api, recursive_lister);
+        assert!(recursive_entries.iter().any(|entry| {
+            entry.path == "listing/nested/b.bin"
+                && entry.name == "b.bin"
+                && entry.mode == ENTRY_MODE_FILE
+                && entry.content_length == 2
+        }));
+        assert!(
+            recursive_entries
+                .iter()
+                .any(|entry| entry.path == "listing/nested/deeper/c.txt")
+        );
+
+        let next = api.lister_next.expect("LISTING next is installed");
+        let mut entry = NonNull::<EntryV1>::dangling().as_ptr();
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: exhausted listers deterministically keep returning END.
+        assert_eq!(
+            unsafe { next(recursive_lister, &mut entry, &mut error) },
+            STATUS_END,
+        );
+        assert!(entry.is_null());
+        assert!(error.is_null());
+
+        // SAFETY: closing retains the outer handle for deterministic state checks.
+        unsafe {
+            api.lister_close.expect("LISTING close is installed")(recursive_lister);
+            api.lister_close.expect("LISTING close is installed")(recursive_lister);
+        }
+        entry = NonNull::<EntryV1>::dangling().as_ptr();
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: outputs are writable and the closed handle remains live.
+        assert_eq!(
+            unsafe { next(recursive_lister, &mut entry, &mut error) },
+            STATUS_ERROR,
+        );
+        assert!(entry.is_null());
+        assert_eq!(take_error_kind(&api, error), ERROR_RESOURCE_CLOSED);
+
+        // SAFETY: NULL destruction is a no-op; the live handle is freed once.
+        unsafe {
+            api.lister_close.expect("LISTING close is installed")(ptr::null_mut());
+            api.lister_free.expect("LISTING free is installed")(ptr::null_mut());
+            api.entry_free.expect("BASE entry free is installed")(ptr::null_mut());
+            api.lister_free.expect("LISTING free is installed")(recursive_lister);
+        }
+    }
+
+    #[test]
+    fn listing_options_reject_noncanonical_inputs_atomically() {
+        let api = api();
+        let (operator, info) = memory_operator(&api);
+        let constructor = api
+            .operator_lister
+            .expect("LISTING constructor is installed");
+        let path = bytes(b"listing-options/");
+        let absent = bytes(b"");
+
+        let mut required_output_error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the required lister output is deliberately NULL; the valid
+        // error slot must nevertheless be independently cleared.
+        assert_eq!(
+            unsafe {
+                constructor(
+                    operator,
+                    &path,
+                    ptr::null(),
+                    ptr::null_mut(),
+                    &mut required_output_error,
+                )
+            },
+            STATUS_ABI_MISMATCH,
+        );
+        assert!(required_output_error.is_null());
+
+        let assert_abi_mismatch = |options: &ListOptionsV1| {
+            let mut lister = NonNull::<ListerV1>::dangling().as_ptr();
+            let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+            // SAFETY: the complete carrier intentionally violates one ABI invariant.
+            assert_eq!(
+                unsafe { constructor(operator, &path, options, &mut lister, &mut error) },
+                STATUS_ABI_MISMATCH,
+            );
+            assert!(lister.is_null());
+            assert!(error.is_null());
+        };
+
+        let mut options = ListOptionsV1 {
+            struct_size: size_of::<ListOptionsV1>() as u32,
+            struct_version: STRUCT_VERSION,
+            present_bits: 1 << 63,
+            flags: 0,
+            limit: 0,
+            start_after: absent,
+        };
+        assert_abi_mismatch(&options);
+
+        options.present_bits = 0;
+        options.flags = 1 << 63;
+        assert_abi_mismatch(&options);
+
+        options.flags = 0;
+        options.limit = 1;
+        assert_abi_mismatch(&options);
+
+        options.limit = 0;
+        options.start_after = bytes(b"noncanonical-absent");
+        assert_abi_mismatch(&options);
+
+        options.present_bits = LIST_LIMIT_PRESENT;
+        options.limit = u64::MAX;
+        options.start_after = absent;
+        assert_abi_mismatch(&options);
+
+        options.present_bits = 0;
+        options.limit = 0;
+        options.struct_version = STRUCT_VERSION + 1;
+        assert_abi_mismatch(&options);
+
+        let invalid_utf8_bytes = [0xFF];
+        options.struct_version = STRUCT_VERSION;
+        options.present_bits = LIST_START_AFTER_PRESENT;
+        options.start_after = bytes(&invalid_utf8_bytes);
+        let mut lister = NonNull::<ListerV1>::dangling().as_ptr();
+        let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the start_after bytes are readable but intentionally invalid UTF-8.
+        assert_eq!(
+            unsafe { constructor(operator, &path, &options, &mut lister, &mut error) },
+            STATUS_ERROR,
+        );
+        assert!(lister.is_null());
+        assert_eq!(take_error_kind(&api, error), ERROR_INVALID_ARGUMENT);
+
+        options.present_bits = LIST_LIMIT_PRESENT | LIST_START_AFTER_PRESENT;
+        options.flags = LIST_RECURSIVE;
+        options.limit = 0;
+        options.start_after = absent;
+        let valid_lister = memory_lister(&api, operator, b"listing-options/", &options);
+        // SAFETY: the valid empty listing can be released before iteration.
+        unsafe {
+            api.lister_free.expect("LISTING free is installed")(valid_lister);
+            api.operator_info_free.expect("BASE info free is installed")(info);
+            api.operator_free.expect("BASE operator free is installed")(operator);
+        }
+    }
+
+    #[test]
+    fn listing_error_panic_and_poison_are_terminal_and_reported_once() {
+        let api = api();
+        let (operator, info) = memory_operator(&api);
+        write_memory_object(&api, operator, b"listing-terminal/item", b"value");
+        let next = api.lister_next.expect("LISTING next is installed");
+        let free = api.lister_free.expect("LISTING free is installed");
+
+        let error_lister = memory_lister(&api, operator, b"listing-terminal/", ptr::null());
+        install_lister_next_test_mode(error_lister, TEST_LISTER_NEXT_ERROR);
+        let mut entry = NonNull::<EntryV1>::dangling().as_ptr();
+        let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the test-only hook injects an ordinary fallible next result.
+        assert_eq!(
+            unsafe { next(error_lister, &mut entry, &mut error) },
+            STATUS_ERROR,
+        );
+        assert!(entry.is_null());
+        assert_eq!(take_error_kind(&api, error), ERROR_UNEXPECTED);
+        entry = NonNull::<EntryV1>::dangling().as_ptr();
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: an ordinary next error exhausts the handle after one report.
+        assert_eq!(
+            unsafe { next(error_lister, &mut entry, &mut error) },
+            STATUS_END,
+        );
+        assert!(entry.is_null());
+        assert!(error.is_null());
+
+        let panic_lister = memory_lister(&api, operator, b"listing-terminal/", ptr::null());
+        install_lister_next_test_mode(panic_lister, TEST_LISTER_NEXT_PANIC);
+        entry = NonNull::<EntryV1>::dangling().as_ptr();
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the injected panic is contained inside the ABI boundary.
+        assert_eq!(
+            unsafe { next(panic_lister, &mut entry, &mut error) },
+            STATUS_PANIC,
+        );
+        assert!(entry.is_null());
+        assert!(error.is_null());
+        entry = NonNull::<EntryV1>::dangling().as_ptr();
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: panic also leaves the handle deterministically exhausted.
+        assert_eq!(
+            unsafe { next(panic_lister, &mut entry, &mut error) },
+            STATUS_END,
+        );
+        assert!(entry.is_null());
+        assert!(error.is_null());
+
+        let poisoned_lister = memory_lister(&api, operator, b"listing-terminal/", ptr::null());
+        let poisoned = catch_unwind(AssertUnwindSafe(|| {
+            // SAFETY: this test owns the live handle and intentionally poisons
+            // its state mutex while it still contains an Open lister.
+            let lister = unsafe { &*poisoned_lister };
+            let _guard = lister.state.lock().expect("fresh lister lock is healthy");
+            panic!("intentionally poison lister state");
+        }));
+        assert!(poisoned.is_err());
+        entry = NonNull::<EntryV1>::dangling().as_ptr();
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: poisoned Open state is consumed without resuming iteration.
+        assert_eq!(
+            unsafe { next(poisoned_lister, &mut entry, &mut error) },
+            STATUS_ERROR,
+        );
+        assert!(entry.is_null());
+        assert_eq!(take_error_kind(&api, error), ERROR_UNEXPECTED);
+        entry = NonNull::<EntryV1>::dangling().as_ptr();
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: poison is cleared only after replacing Open with Exhausted.
+        assert_eq!(
+            unsafe { next(poisoned_lister, &mut entry, &mut error) },
+            STATUS_END,
+        );
+        assert!(entry.is_null());
+        assert!(error.is_null());
+
+        // SAFETY: all three listers and constructor outputs are uniquely owned.
+        unsafe {
+            free(error_lister);
+            free(panic_lister);
+            free(poisoned_lister);
+            api.operator_info_free.expect("BASE info free is installed")(info);
+            api.operator_free.expect("BASE operator free is installed")(operator);
+        }
+    }
+
+    #[test]
     fn buffer_copy_is_atomic_for_sizing_errors_and_success_tail() {
         let api = api();
         let copy = api.buffer_copy.expect("BASE buffer copy is installed");
@@ -2428,5 +3186,6 @@ mod tests {
         assert_send_sync::<MetadataV1>();
         assert_send_sync::<EntryV1>();
         assert_send_sync::<OperatorInfoV1>();
+        assert_send_sync::<ListerV1>();
     }
 }

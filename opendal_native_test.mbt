@@ -1,4 +1,9 @@
 ///|
+fn has_entry(entries : Array[@opendal.Entry], path : String) -> Bool {
+  entries.search_by(fn(entry) { entry.path == path }) is Some(_)
+}
+
+///|
 test "native memory: binary whole-object roundtrip" {
   let operator = @opendal.Operator::new("memory", Map([]))
   let payload : Bytes = [0x00, 0x01, 0x7f, 0x80, 0xff, 0x00, 0x42]
@@ -156,4 +161,93 @@ test "native fs: blocking core works against an isolated filesystem root" {
   operator.delete("目录/", options~)
   assert_false(operator.exists("目录/nested/value.bin"))
   operator.check()
+}
+
+///|
+test "native memory: eager and streaming listing return entry snapshots" {
+  let operator = @opendal.Operator::new("memory", Map([]))
+  let capability = operator.info().capability
+  assert_true(capability.can_list())
+  operator.write("listing/root.txt", b"root") |> ignore
+  operator.write("listing/目录/one.bin", b"one") |> ignore
+  operator.write("listing/目录/two.bin", b"two") |> ignore
+  let shallow = operator.list("listing/")
+  assert_true(has_entry(shallow, "listing/root.txt"))
+  assert_true(has_entry(shallow, "listing/目录/"))
+  let options = @opendal.ListOptions::new(recursive=true)
+  let recursive = operator.list("listing/", options~)
+  assert_true(has_entry(recursive, "listing/root.txt"))
+  assert_true(has_entry(recursive, "listing/目录/one.bin"))
+  assert_true(has_entry(recursive, "listing/目录/two.bin"))
+  let hinted = @opendal.ListOptions::new(
+    recursive=true,
+    limit=1UL,
+    start_after="listing/root.txt",
+  )
+  try operator.list("listing/", options=hinted) catch {
+    OpenDalError(info) => {
+      assert_eq(info.kind, Unsupported)
+      assert_true(
+        !capability.can_list_with_limit() ||
+        !capability.can_list_with_start_after(),
+      )
+    }
+  } noraise {
+    entries =>
+      if capability.can_list_with_start_after() {
+        assert_false(has_entry(entries, "listing/root.txt"))
+      }
+  }
+  let lister = operator.lister("listing/", options~)
+  let streamed : Array[@opendal.Entry] = []
+  for ;; {
+    match lister.next() {
+      Some(entry) => streamed.push(entry)
+      None => break
+    }
+  }
+  assert_eq(lister.next(), None)
+  lister.close()
+  assert_true(has_entry(streamed, "listing/目录/one.bin"))
+  for entry in streamed {
+    if entry.path == "listing/目录/one.bin" {
+      assert_eq(entry.name, "one.bin")
+      assert_true(entry.metadata.is_file())
+    }
+  }
+}
+
+///|
+test "native memory: closing a lister is idempotent and preserves context" {
+  let operator = @opendal.Operator::new("memory", Map([]))
+  let lister = operator.lister("closed-prefix/")
+  lister.close()
+  lister.close()
+  try lister.next() catch {
+    OpenDalError(info) => {
+      assert_eq(info.kind, ResourceClosed)
+      assert_eq(info.operation, List)
+      assert_eq(info.path, Some("closed-prefix/"))
+      assert_eq(info.destination_path, None)
+    }
+  } noraise {
+    _ => fail("expected next after close to raise")
+  }
+}
+
+///|
+test "native fs: recursive listing works against an isolated filesystem root" {
+  guard @env.current_dir() is Some(cwd) else {
+    fail("current working directory is unavailable")
+  }
+  let root = "\{cwd}/target/opendal-mbt-fs-listing-\{@env.now()}"
+  let operator = @opendal.Operator::new("fs", { "root": root })
+  operator.write("列表/root.txt", b"root") |> ignore
+  operator.write("列表/nested/value.bin", b"value") |> ignore
+  let options = @opendal.ListOptions::new(recursive=true)
+  let entries = operator.list("列表/", options~)
+  assert_true(has_entry(entries, "列表/root.txt"))
+  assert_true(has_entry(entries, "列表/nested/value.bin"))
+  let delete_options = @opendal.DeleteOptions::new(recursive=true)
+  operator.delete("列表/", options=delete_options)
 }

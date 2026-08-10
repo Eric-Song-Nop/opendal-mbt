@@ -96,7 +96,9 @@ pub struct ListOptions {
 }
 pub fn ListOptions::new(recursive? : Bool, limit? : UInt64, start_after? : String) -> Self
 
-pub type Lister
+pub struct Lister {
+  // private fields
+}
 pub fn Lister::close(Self) -> Unit
 pub fn Lister::next(Self) -> Entry? raise OpenDalError
 

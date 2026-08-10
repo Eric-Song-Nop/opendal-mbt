@@ -49,6 +49,7 @@ pub(crate) const RANGE_SUFFIX: u32 = 3;
 
 pub(crate) const FEATURE_BASE: u64 = 1 << 0;
 pub(crate) const FEATURE_WHOLE_OBJECT: u64 = 1 << 1;
+pub(crate) const FEATURE_LISTING: u64 = 1 << 2;
 
 pub(crate) const CAP_STAT: u64 = 1 << 0;
 pub(crate) const CAP_READ: u64 = 1 << 1;
@@ -79,6 +80,10 @@ pub(crate) const WRITE_IF_NONE_MATCH_PRESENT: u64 = 1 << 5;
 pub(crate) const STAT_VERSION_PRESENT: u64 = 1 << 0;
 pub(crate) const STAT_IF_MATCH_PRESENT: u64 = 1 << 1;
 pub(crate) const STAT_IF_NONE_MATCH_PRESENT: u64 = 1 << 2;
+
+pub(crate) const LIST_RECURSIVE: u64 = 1 << 0;
+pub(crate) const LIST_LIMIT_PRESENT: u64 = 1 << 0;
+pub(crate) const LIST_START_AFTER_PRESENT: u64 = 1 << 1;
 
 pub(crate) const DELETE_RECURSIVE: u64 = 1 << 0;
 pub(crate) const DELETE_VERSION_PRESENT: u64 = 1 << 0;
@@ -307,7 +312,13 @@ pub(crate) struct OperatorInfoV1 {
 
 #[repr(C)]
 pub(crate) struct ListerV1 {
-    _private: [u8; 0],
+    pub(crate) state: std::sync::Mutex<ListerStateV1>,
+}
+
+pub(crate) enum ListerStateV1 {
+    Open(opendal::blocking::Lister),
+    Exhausted,
+    Closed,
 }
 
 #[repr(C)]

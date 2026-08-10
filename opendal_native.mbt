@@ -8,6 +8,21 @@ pub type Operator
 pub type Capability
 
 ///|
+/// Native lister storage is a MoonBit external object finalized by the C stub.
+priv type NativeLister
+
+///|
+/// Temporary owned native entry snapshot.
+priv type NativeEntry
+
+///|
+/// Safe lister wrapper retaining the prefix used for error context.
+pub struct Lister {
+  priv native : NativeLister
+  priv path : String
+}
+
+///|
 /// Call-scoped native result. The C finalizer releases every untaken Rust
 /// handle, snapshot, error, or buffer.
 priv type NativeResult
@@ -81,6 +96,26 @@ extern "C" fn native_operator_delete(
 ) -> NativeResult = "moonbit_opendal_operator_delete"
 
 ///|
+#borrow(operator, path, start_after)
+extern "C" fn native_operator_lister(
+  operator : Operator,
+  path : String,
+  recursive : Bool,
+  has_limit : Bool,
+  limit : UInt64,
+  has_start_after : Bool,
+  start_after : String,
+) -> NativeResult = "moonbit_opendal_operator_lister"
+
+///|
+#borrow(lister)
+extern "C" fn native_lister_next(lister : NativeLister) -> NativeResult = "moonbit_opendal_lister_next"
+
+///|
+#borrow(lister)
+extern "C" fn native_lister_close(lister : NativeLister) -> Unit = "moonbit_opendal_lister_close"
+
+///|
 #borrow(result)
 extern "C" fn native_result_status(result : NativeResult) -> UInt = "moonbit_opendal_result_status"
 
@@ -106,6 +141,14 @@ extern "C" fn native_result_take_operator(result : NativeResult) -> Operator = "
 
 ///|
 #borrow(result)
+extern "C" fn native_result_take_lister(result : NativeResult) -> NativeLister = "moonbit_opendal_result_take_lister"
+
+///|
+#borrow(result)
+extern "C" fn native_result_take_entry(result : NativeResult) -> NativeEntry = "moonbit_opendal_result_take_entry"
+
+///|
+#borrow(result)
 extern "C" fn native_result_take_bool(result : NativeResult) -> Bool = "moonbit_opendal_result_take_bool"
 
 ///|
@@ -121,6 +164,22 @@ extern "C" fn native_result_take_metadata(
 ///|
 #borrow(result)
 extern "C" fn native_result_release(result : NativeResult) -> Unit = "moonbit_opendal_result_release"
+
+///|
+#borrow(entry)
+extern "C" fn native_entry_path(entry : NativeEntry) -> Bytes = "moonbit_opendal_entry_path"
+
+///|
+#borrow(entry)
+extern "C" fn native_entry_name(entry : NativeEntry) -> Bytes = "moonbit_opendal_entry_name"
+
+///|
+#borrow(entry)
+extern "C" fn native_entry_take_metadata(entry : NativeEntry) -> NativeMetadata = "moonbit_opendal_entry_take_metadata"
+
+///|
+#borrow(entry)
+extern "C" fn native_entry_release(entry : NativeEntry) -> Unit = "moonbit_opendal_entry_release"
 
 ///|
 #borrow(operator)
@@ -436,6 +495,20 @@ fn metadata_from_native(
 }
 
 ///|
+fn entry_from_native(
+  entry : NativeEntry,
+  listing_path : String,
+) -> Entry raise OpenDalError {
+  let path_bytes = native_entry_path(entry)
+  let name_bytes = native_entry_name(entry)
+  let metadata = native_entry_take_metadata(entry)
+  native_entry_release(entry)
+  let path = decode_abi_text(path_bytes, List, Some(listing_path), None)
+  let name = decode_abi_text(name_bytes, List, Some(listing_path), None)
+  { path, name, metadata: metadata_from_native(metadata, List, Some(path)) }
+}
+
+///|
 fn ReadOptions::is_native_default(self : ReadOptions) -> Bool {
   self.range is None &&
   self.version is None &&
@@ -716,6 +789,115 @@ pub fn Operator::delete(
     raise error_from_native_result(result, Delete, Some(path), None)
   }
   native_result_release(result)
+}
+
+///|
+pub fn Operator::lister(
+  self : Operator,
+  path : StringView,
+  options? : ListOptions,
+) -> Lister raise OpenDalError {
+  let path = path.to_owned()
+  let (recursive, has_limit, limit, has_start_after, start_after) = match
+    options {
+    None => (false, false, 0UL, false, "")
+    Some(value) =>
+      (
+        value.recursive,
+        value.limit is Some(_),
+        value.limit.unwrap_or(0UL),
+        value.start_after is Some(_),
+        value.start_after.unwrap_or(""),
+      )
+  }
+  let result = native_operator_lister(
+    self, path, recursive, has_limit, limit, has_start_after, start_after,
+  )
+  if native_result_status(result) != 0U {
+    raise error_from_native_result(result, List, Some(path), None)
+  }
+  let native = native_result_take_lister(result)
+  if native_result_status(result) != 0U {
+    raise error_from_native_result(result, List, Some(path), None)
+  }
+  native_result_release(result)
+  { native, path }
+}
+
+///|
+pub fn Lister::next(self : Lister) -> Entry? raise OpenDalError {
+  let result = native_lister_next(self.native)
+  match native_result_status(result) {
+    0U => {
+      let entry = native_result_take_entry(result)
+      if native_result_status(result) != 0U {
+        self.close()
+        raise error_from_native_result(result, List, Some(self.path), None)
+      }
+      native_result_release(result)
+      let converted = try entry_from_native(entry, self.path) catch {
+        error => {
+          self.close()
+          raise error
+        }
+      } noraise {
+        value => value
+      }
+      Some(converted)
+    }
+    1U => {
+      native_result_release(result)
+      None
+    }
+    _ => {
+      self.close()
+      raise error_from_native_result(result, List, Some(self.path), None)
+    }
+  }
+}
+
+///|
+pub fn Lister::close(self : Lister) -> Unit {
+  native_lister_close(self.native)
+}
+
+///|
+pub fn Operator::list(
+  self : Operator,
+  path : StringView,
+  options? : ListOptions,
+) -> Array[Entry] raise OpenDalError {
+  let path = path.to_owned()
+  let lister = self.lister(path, options?)
+  let entries : Array[Entry] = []
+  try {
+    for ;; {
+      match lister.next() {
+        Some(entry) => {
+          if entries.length() == 2147483647 {
+            raise binding_error(
+              BufferTooLarge,
+              List,
+              "list has too many entries to materialize in a MoonBit Array",
+              Some(path),
+              None,
+            )
+          }
+          entries.push(entry)
+        }
+        None => break
+      }
+    }
+    lister.close()
+    entries
+  } catch {
+    error => {
+      lister.close()
+      raise error
+    }
+  } noraise {
+    value => value
+  }
 }
 
 ///|

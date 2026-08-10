@@ -19,7 +19,16 @@ typedef struct moonbit_opendal_capability {
 
 typedef struct moonbit_opendal_metadata {
   opendal_mbt_metadata_v1_t *metadata;
+  opendal_mbt_entry_v1_t *entry;
 } moonbit_opendal_metadata_t;
+
+typedef struct moonbit_opendal_lister {
+  opendal_mbt_lister_v1_t *lister;
+} moonbit_opendal_lister_t;
+
+typedef struct moonbit_opendal_entry {
+  opendal_mbt_entry_v1_t *entry;
+} moonbit_opendal_entry_t;
 
 typedef struct moonbit_opendal_result {
   opendal_mbt_status_t status;
@@ -34,6 +43,8 @@ typedef struct moonbit_opendal_result {
   opendal_mbt_operator_info_v1_t *info;
   opendal_mbt_buffer_v1_t *buffer;
   opendal_mbt_metadata_v1_t *metadata;
+  opendal_mbt_lister_v1_t *lister;
+  opendal_mbt_entry_v1_t *entry;
 } moonbit_opendal_result_t;
 
 typedef struct owned_utf8 {
@@ -66,9 +77,10 @@ static opendal_mbt_status_t load_api(opendal_mbt_api_v1_t *api,
       !API_HAS(api, error_view) || !API_HAS(api, error_free) ||
       !API_HAS(api, buffer_len) || !API_HAS(api, buffer_copy) ||
       !API_HAS(api, buffer_free) || !API_HAS(api, metadata_view) ||
-      !API_HAS(api, metadata_free) || !API_HAS(api, operator_info_view) ||
-      !API_HAS(api, operator_info_free) || !API_HAS(api, operator_new) ||
-      !API_HAS(api, operator_free)) {
+      !API_HAS(api, metadata_free) || !API_HAS(api, entry_view) ||
+      !API_HAS(api, entry_metadata_view) || !API_HAS(api, entry_free) ||
+      !API_HAS(api, operator_info_view) || !API_HAS(api, operator_info_free) ||
+      !API_HAS(api, operator_new) || !API_HAS(api, operator_free)) {
     return OPENDAL_MBT_STATUS_ABI_MISMATCH;
   }
   if (require_whole_object &&
@@ -78,6 +90,19 @@ static opendal_mbt_status_t load_api(opendal_mbt_api_v1_t *api,
        !API_HAS(api, operator_write) || !API_HAS(api, operator_create_dir) ||
        !API_HAS(api, operator_delete) || !API_HAS(api, operator_copy) ||
        !API_HAS(api, operator_rename))) {
+    return OPENDAL_MBT_STATUS_ABI_MISMATCH;
+  }
+  return OPENDAL_MBT_STATUS_OK;
+}
+
+static opendal_mbt_status_t load_listing_api(opendal_mbt_api_v1_t *api) {
+  opendal_mbt_status_t status = load_api(api, false);
+  if (status != OPENDAL_MBT_STATUS_OK) {
+    return status;
+  }
+  if ((api->feature_bits & OPENDAL_MBT_FEATURE_LISTING) == 0 ||
+      !API_HAS(api, operator_lister) || !API_HAS(api, lister_next) ||
+      !API_HAS(api, lister_close) || !API_HAS(api, lister_free)) {
     return OPENDAL_MBT_STATUS_ABI_MISMATCH;
   }
   return OPENDAL_MBT_STATUS_OK;
@@ -291,6 +316,14 @@ static void release_result_payload(moonbit_opendal_result_t *result) {
     api.metadata_free(result->metadata);
     result->metadata = NULL;
   }
+  if (result->entry != NULL) {
+    api.entry_free(result->entry);
+    result->entry = NULL;
+  }
+  if (result->lister != NULL && API_HAS(&api, lister_free)) {
+    api.lister_free(result->lister);
+    result->lister = NULL;
+  }
   if (result->info != NULL) {
     api.operator_info_free(result->info);
     result->info = NULL;
@@ -342,10 +375,15 @@ static moonbit_opendal_operator_t *operator_new_external(void) {
 static void metadata_finalize(void *payload) {
   moonbit_opendal_metadata_t *metadata = (moonbit_opendal_metadata_t *)payload;
   opendal_mbt_api_v1_t api;
-  if (metadata->metadata != NULL &&
-      load_api(&api, false) == OPENDAL_MBT_STATUS_OK) {
-    api.metadata_free(metadata->metadata);
-    metadata->metadata = NULL;
+  if (load_api(&api, false) == OPENDAL_MBT_STATUS_OK) {
+    if (metadata->metadata != NULL) {
+      api.metadata_free(metadata->metadata);
+      metadata->metadata = NULL;
+    }
+    if (metadata->entry != NULL) {
+      api.entry_free(metadata->entry);
+      metadata->entry = NULL;
+    }
   }
 }
 
@@ -353,8 +391,44 @@ static moonbit_opendal_metadata_t *metadata_new_external(void) {
   moonbit_opendal_metadata_t *metadata =
       (moonbit_opendal_metadata_t *)moonbit_make_external_object(
           metadata_finalize, (uint32_t)sizeof(moonbit_opendal_metadata_t));
-  metadata->metadata = NULL;
+  memset(metadata, 0, sizeof(*metadata));
   return metadata;
+}
+
+static void lister_finalize(void *payload) {
+  moonbit_opendal_lister_t *lister = (moonbit_opendal_lister_t *)payload;
+  opendal_mbt_api_v1_t api;
+  if (lister->lister != NULL &&
+      load_listing_api(&api) == OPENDAL_MBT_STATUS_OK) {
+    api.lister_free(lister->lister);
+    lister->lister = NULL;
+  }
+}
+
+static moonbit_opendal_lister_t *lister_new_external(void) {
+  moonbit_opendal_lister_t *lister =
+      (moonbit_opendal_lister_t *)moonbit_make_external_object(
+          lister_finalize, (uint32_t)sizeof(moonbit_opendal_lister_t));
+  lister->lister = NULL;
+  return lister;
+}
+
+static void entry_finalize(void *payload) {
+  moonbit_opendal_entry_t *entry = (moonbit_opendal_entry_t *)payload;
+  opendal_mbt_api_v1_t api;
+  if (entry->entry != NULL &&
+      load_api(&api, false) == OPENDAL_MBT_STATUS_OK) {
+    api.entry_free(entry->entry);
+    entry->entry = NULL;
+  }
+}
+
+static moonbit_opendal_entry_t *entry_new_external(void) {
+  moonbit_opendal_entry_t *entry =
+      (moonbit_opendal_entry_t *)moonbit_make_external_object(
+          entry_finalize, (uint32_t)sizeof(moonbit_opendal_entry_t));
+  entry->entry = NULL;
+  return entry;
 }
 
 static void capability_finalize(void *payload) { (void)payload; }
@@ -412,7 +486,8 @@ static bool valid_optional_text(opendal_mbt_bytes_view_v1_t value,
          valid_utf8(value.data, value.len);
 }
 
-static bool validate_metadata_snapshot(opendal_mbt_metadata_v1_t *metadata) {
+static bool validate_metadata_view(
+    const opendal_mbt_metadata_view_v1_t *view) {
   const uint64_t known_present_bits =
       OPENDAL_MBT_METADATA_IS_CURRENT_PRESENT |
       OPENDAL_MBT_METADATA_LAST_MODIFIED_PRESENT |
@@ -423,6 +498,57 @@ static bool validate_metadata_snapshot(opendal_mbt_metadata_v1_t *metadata) {
       OPENDAL_MBT_METADATA_CONTENT_TYPE_PRESENT |
       OPENDAL_MBT_METADATA_ETAG_PRESENT |
       OPENDAL_MBT_METADATA_VERSION_PRESENT;
+  if ((view->present_bits & ~known_present_bits) != 0 ||
+      (view->is_current != OPENDAL_MBT_FALSE &&
+       view->is_current != OPENDAL_MBT_TRUE) ||
+      (view->is_deleted != OPENDAL_MBT_FALSE &&
+       view->is_deleted != OPENDAL_MBT_TRUE) ||
+      view->reserved0 != 0) {
+    return false;
+  }
+  if ((view->present_bits & OPENDAL_MBT_METADATA_IS_CURRENT_PRESENT) == 0 &&
+      view->is_current != OPENDAL_MBT_FALSE) {
+    return false;
+  }
+  if ((view->present_bits & OPENDAL_MBT_METADATA_LAST_MODIFIED_PRESENT) != 0) {
+    if (view->last_modified.nanoseconds >= UINT32_C(1000000000) ||
+        view->last_modified.reserved0 != 0) {
+      return false;
+    }
+  } else if (view->last_modified.unix_seconds != 0 ||
+             view->last_modified.nanoseconds != 0 ||
+             view->last_modified.reserved0 != 0) {
+    return false;
+  }
+  return valid_optional_text(
+             view->cache_control,
+             (view->present_bits & OPENDAL_MBT_METADATA_CACHE_CONTROL_PRESENT) !=
+                 0) &&
+         valid_optional_text(
+             view->content_disposition,
+             (view->present_bits &
+              OPENDAL_MBT_METADATA_CONTENT_DISPOSITION_PRESENT) != 0) &&
+         valid_optional_text(
+             view->content_encoding,
+             (view->present_bits &
+              OPENDAL_MBT_METADATA_CONTENT_ENCODING_PRESENT) != 0) &&
+         valid_optional_text(
+             view->content_md5,
+             (view->present_bits & OPENDAL_MBT_METADATA_CONTENT_MD5_PRESENT) !=
+                 0) &&
+         valid_optional_text(
+             view->content_type,
+             (view->present_bits & OPENDAL_MBT_METADATA_CONTENT_TYPE_PRESENT) !=
+                 0) &&
+         valid_optional_text(
+             view->etag,
+             (view->present_bits & OPENDAL_MBT_METADATA_ETAG_PRESENT) != 0) &&
+         valid_optional_text(
+             view->version,
+             (view->present_bits & OPENDAL_MBT_METADATA_VERSION_PRESENT) != 0);
+}
+
+static bool validate_metadata_snapshot(opendal_mbt_metadata_v1_t *metadata) {
   opendal_mbt_api_v1_t api;
   opendal_mbt_metadata_view_v1_t view;
   if (metadata == NULL || load_api(&api, false) != OPENDAL_MBT_STATUS_OK) {
@@ -431,68 +557,64 @@ static bool validate_metadata_snapshot(opendal_mbt_metadata_v1_t *metadata) {
   memset(&view, 0, sizeof(view));
   view.struct_size = (uint32_t)sizeof(view);
   view.struct_version = OPENDAL_MBT_STRUCT_VERSION_V1;
-  if (api.metadata_view(metadata, &view) != OPENDAL_MBT_STATUS_OK ||
-      (view.present_bits & ~known_present_bits) != 0 ||
-      (view.is_current != OPENDAL_MBT_FALSE &&
-       view.is_current != OPENDAL_MBT_TRUE) ||
-      (view.is_deleted != OPENDAL_MBT_FALSE &&
-       view.is_deleted != OPENDAL_MBT_TRUE) ||
-      view.reserved0 != 0) {
-    return false;
-  }
-  if ((view.present_bits & OPENDAL_MBT_METADATA_IS_CURRENT_PRESENT) == 0 &&
-      view.is_current != OPENDAL_MBT_FALSE) {
-    return false;
-  }
-  if ((view.present_bits & OPENDAL_MBT_METADATA_LAST_MODIFIED_PRESENT) != 0) {
-    if (view.last_modified.nanoseconds >= UINT32_C(1000000000) ||
-        view.last_modified.reserved0 != 0) {
-      return false;
-    }
-  } else if (view.last_modified.unix_seconds != 0 ||
-             view.last_modified.nanoseconds != 0 ||
-             view.last_modified.reserved0 != 0) {
-    return false;
-  }
-  return valid_optional_text(
-             view.cache_control,
-             (view.present_bits & OPENDAL_MBT_METADATA_CACHE_CONTROL_PRESENT) !=
-                 0) &&
-         valid_optional_text(
-             view.content_disposition,
-             (view.present_bits &
-              OPENDAL_MBT_METADATA_CONTENT_DISPOSITION_PRESENT) != 0) &&
-         valid_optional_text(
-             view.content_encoding,
-             (view.present_bits &
-              OPENDAL_MBT_METADATA_CONTENT_ENCODING_PRESENT) != 0) &&
-         valid_optional_text(
-             view.content_md5,
-             (view.present_bits & OPENDAL_MBT_METADATA_CONTENT_MD5_PRESENT) !=
-                 0) &&
-         valid_optional_text(
-             view.content_type,
-             (view.present_bits & OPENDAL_MBT_METADATA_CONTENT_TYPE_PRESENT) !=
-                 0) &&
-         valid_optional_text(
-             view.etag,
-             (view.present_bits & OPENDAL_MBT_METADATA_ETAG_PRESENT) != 0) &&
-         valid_optional_text(
-             view.version,
-             (view.present_bits & OPENDAL_MBT_METADATA_VERSION_PRESENT) != 0);
+  return api.metadata_view(metadata, &view) == OPENDAL_MBT_STATUS_OK &&
+         validate_metadata_view(&view);
 }
 
-static bool fill_metadata_view(const moonbit_opendal_metadata_t *metadata,
-                               opendal_mbt_metadata_view_v1_t *view) {
+static bool fill_entry_view(const moonbit_opendal_entry_t *entry,
+                            opendal_mbt_entry_view_v1_t *view) {
   opendal_mbt_api_v1_t api;
-  if (metadata == NULL || metadata->metadata == NULL ||
+  if (entry == NULL || entry->entry == NULL ||
       load_api(&api, false) != OPENDAL_MBT_STATUS_OK) {
     return false;
   }
   memset(view, 0, sizeof(*view));
   view->struct_size = (uint32_t)sizeof(*view);
   view->struct_version = OPENDAL_MBT_STRUCT_VERSION_V1;
-  return api.metadata_view(metadata->metadata, view) ==
+  return api.entry_view(entry->entry, view) == OPENDAL_MBT_STATUS_OK;
+}
+
+static bool validate_entry_snapshot(opendal_mbt_entry_v1_t *entry) {
+  opendal_mbt_api_v1_t api;
+  opendal_mbt_entry_view_v1_t entry_view;
+  opendal_mbt_metadata_view_v1_t metadata_view;
+  if (entry == NULL || load_api(&api, false) != OPENDAL_MBT_STATUS_OK) {
+    return false;
+  }
+  memset(&entry_view, 0, sizeof(entry_view));
+  entry_view.struct_size = (uint32_t)sizeof(entry_view);
+  entry_view.struct_version = OPENDAL_MBT_STRUCT_VERSION_V1;
+  memset(&metadata_view, 0, sizeof(metadata_view));
+  metadata_view.struct_size = (uint32_t)sizeof(metadata_view);
+  metadata_view.struct_version = OPENDAL_MBT_STRUCT_VERSION_V1;
+  return api.entry_view(entry, &entry_view) == OPENDAL_MBT_STATUS_OK &&
+         entry_view.reserved0 == 0 &&
+         entry_view.path.len <= (uint64_t)INT32_MAX &&
+         entry_view.name.len <= (uint64_t)INT32_MAX &&
+         valid_utf8(entry_view.path.data, entry_view.path.len) &&
+         valid_utf8(entry_view.name.data, entry_view.name.len) &&
+         api.entry_metadata_view(entry, &metadata_view) ==
+             OPENDAL_MBT_STATUS_OK &&
+         validate_metadata_view(&metadata_view);
+}
+
+static bool fill_metadata_view(const moonbit_opendal_metadata_t *metadata,
+                               opendal_mbt_metadata_view_v1_t *view) {
+  opendal_mbt_api_v1_t api;
+  if (metadata == NULL ||
+      (metadata->metadata == NULL && metadata->entry == NULL) ||
+      (metadata->metadata != NULL && metadata->entry != NULL) ||
+      load_api(&api, false) != OPENDAL_MBT_STATUS_OK) {
+    return false;
+  }
+  memset(view, 0, sizeof(*view));
+  view->struct_size = (uint32_t)sizeof(*view);
+  view->struct_version = OPENDAL_MBT_STRUCT_VERSION_V1;
+  if (metadata->metadata != NULL) {
+    return api.metadata_view(metadata->metadata, view) ==
+           OPENDAL_MBT_STATUS_OK;
+  }
+  return api.entry_metadata_view(metadata->entry, view) ==
          OPENDAL_MBT_STATUS_OK;
 }
 
@@ -956,6 +1078,120 @@ cleanup:
   return result;
 }
 
+MOONBIT_FFI_EXPORT moonbit_opendal_result_t *moonbit_opendal_operator_lister(
+    moonbit_opendal_operator_t *operator_, moonbit_string_t path,
+    int32_t recursive, int32_t has_limit, uint64_t limit,
+    int32_t has_start_after, moonbit_string_t start_after) {
+  moonbit_opendal_result_t *result = result_new();
+  opendal_mbt_api_v1_t api;
+  owned_utf8_t path_utf8 = {0};
+  owned_utf8_t start_after_utf8 = {0};
+  opendal_mbt_list_options_v1_t options;
+  utf16_result_t conversion;
+  if ((recursive != 0 && recursive != 1) ||
+      (has_limit != 0 && has_limit != 1) ||
+      (has_start_after != 0 && has_start_after != 1)) {
+    result->status = OPENDAL_MBT_STATUS_ABI_MISMATCH;
+    return result;
+  }
+  result->status = load_listing_api(&api);
+  if (result->status != OPENDAL_MBT_STATUS_OK) {
+    return result;
+  }
+  if (operator_ == NULL || operator_->operator_ == NULL) {
+    result_set_local_error(result, OPENDAL_MBT_ERROR_RESOURCE_CLOSED,
+                           "ResourceClosed", "operator is closed");
+    return result;
+  }
+  conversion = utf16_to_utf8(path, &path_utf8);
+  if (conversion != UTF16_OK) {
+    result_set_local_error(
+        result,
+        conversion == UTF16_INVALID ? OPENDAL_MBT_ERROR_INVALID_ARGUMENT
+                                    : OPENDAL_MBT_ERROR_UNEXPECTED,
+        conversion == UTF16_INVALID ? "InvalidArgument" : "Unexpected",
+        conversion == UTF16_INVALID ? "path contains invalid UTF-16"
+                                    : "unable to allocate UTF-8 path");
+    goto cleanup;
+  }
+  if (!convert_optional_utf8(
+          result, has_start_after != 0, start_after,
+          "list start_after contains invalid UTF-16",
+          "unable to allocate UTF-8 list start_after", &start_after_utf8)) {
+    goto cleanup;
+  }
+  memset(&options, 0, sizeof(options));
+  options.struct_size = (uint32_t)sizeof(options);
+  options.struct_version = OPENDAL_MBT_STRUCT_VERSION_V1;
+  if (recursive != 0) {
+    options.flags = OPENDAL_MBT_LIST_RECURSIVE;
+  }
+  if (has_limit != 0) {
+    options.present_bits |= OPENDAL_MBT_LIST_LIMIT_PRESENT;
+    options.limit = limit;
+  }
+  if (has_start_after != 0) {
+    options.present_bits |= OPENDAL_MBT_LIST_START_AFTER_PRESENT;
+    options.start_after = owned_utf8_view(&start_after_utf8);
+  }
+  {
+    opendal_mbt_bytes_view_v1_t path_view = owned_utf8_view(&path_utf8);
+    result->status = api.operator_lister(operator_->operator_, &path_view,
+                                         &options, &result->lister,
+                                         &result->error);
+  }
+  if (result->status == OPENDAL_MBT_STATUS_OK) {
+    if (result->lister == NULL || result->error != NULL) {
+      result->status = OPENDAL_MBT_STATUS_ABI_MISMATCH;
+    }
+  } else if (result->lister != NULL) {
+    result->status = OPENDAL_MBT_STATUS_ABI_MISMATCH;
+  }
+
+cleanup:
+  owned_utf8_free(&path_utf8);
+  owned_utf8_free(&start_after_utf8);
+  return result;
+}
+
+MOONBIT_FFI_EXPORT moonbit_opendal_result_t *moonbit_opendal_lister_next(
+    moonbit_opendal_lister_t *lister) {
+  moonbit_opendal_result_t *result = result_new();
+  opendal_mbt_api_v1_t api;
+  result->status = load_listing_api(&api);
+  if (result->status != OPENDAL_MBT_STATUS_OK) {
+    return result;
+  }
+  if (lister == NULL || lister->lister == NULL) {
+    result_set_local_error(result, OPENDAL_MBT_ERROR_RESOURCE_CLOSED,
+                           "ResourceClosed", "lister is closed");
+    return result;
+  }
+  result->status =
+      api.lister_next(lister->lister, &result->entry, &result->error);
+  if (result->status == OPENDAL_MBT_STATUS_OK) {
+    if (result->entry == NULL || result->error != NULL) {
+      result->status = OPENDAL_MBT_STATUS_ABI_MISMATCH;
+    }
+  } else if (result->status == OPENDAL_MBT_STATUS_END) {
+    if (result->entry != NULL || result->error != NULL) {
+      result->status = OPENDAL_MBT_STATUS_ABI_MISMATCH;
+    }
+  } else if (result->entry != NULL) {
+    result->status = OPENDAL_MBT_STATUS_ABI_MISMATCH;
+  }
+  return result;
+}
+
+MOONBIT_FFI_EXPORT void moonbit_opendal_lister_close(
+    moonbit_opendal_lister_t *lister) {
+  opendal_mbt_api_v1_t api;
+  if (lister != NULL && lister->lister != NULL &&
+      load_listing_api(&api) == OPENDAL_MBT_STATUS_OK) {
+    api.lister_close(lister->lister);
+  }
+}
+
 MOONBIT_FFI_EXPORT uint32_t
 moonbit_opendal_result_status(moonbit_opendal_result_t *result) {
   return result == NULL ? OPENDAL_MBT_STATUS_ABI_MISMATCH : result->status;
@@ -1055,6 +1291,36 @@ moonbit_opendal_result_take_operator(moonbit_opendal_result_t *result) {
   return operator_;
 }
 
+MOONBIT_FFI_EXPORT moonbit_opendal_lister_t *
+moonbit_opendal_result_take_lister(moonbit_opendal_result_t *result) {
+  moonbit_opendal_lister_t *lister = lister_new_external();
+  if (result == NULL || result->status != OPENDAL_MBT_STATUS_OK ||
+      result->lister == NULL) {
+    if (result != NULL) {
+      result->status = OPENDAL_MBT_STATUS_ABI_MISMATCH;
+    }
+    return lister;
+  }
+  lister->lister = result->lister;
+  result->lister = NULL;
+  return lister;
+}
+
+MOONBIT_FFI_EXPORT moonbit_opendal_entry_t *
+moonbit_opendal_result_take_entry(moonbit_opendal_result_t *result) {
+  moonbit_opendal_entry_t *entry = entry_new_external();
+  if (result == NULL || result->status != OPENDAL_MBT_STATUS_OK ||
+      result->entry == NULL || !validate_entry_snapshot(result->entry)) {
+    if (result != NULL) {
+      result->status = OPENDAL_MBT_STATUS_ABI_MISMATCH;
+    }
+    return entry;
+  }
+  entry->entry = result->entry;
+  result->entry = NULL;
+  return entry;
+}
+
 MOONBIT_FFI_EXPORT moonbit_bytes_t
 moonbit_opendal_result_take_bytes(moonbit_opendal_result_t *result) {
   opendal_mbt_api_v1_t api;
@@ -1124,6 +1390,39 @@ MOONBIT_FFI_EXPORT void
 moonbit_opendal_result_release(moonbit_opendal_result_t *result) {
   if (result != NULL) {
     release_result_payload(result);
+  }
+}
+
+MOONBIT_FFI_EXPORT moonbit_bytes_t
+moonbit_opendal_entry_path(moonbit_opendal_entry_t *entry) {
+  opendal_mbt_entry_view_v1_t view;
+  return fill_entry_view(entry, &view)
+             ? copy_bytes(view.path.data, view.path.len)
+             : moonbit_make_bytes(0, 0);
+}
+
+MOONBIT_FFI_EXPORT moonbit_bytes_t
+moonbit_opendal_entry_name(moonbit_opendal_entry_t *entry) {
+  opendal_mbt_entry_view_v1_t view;
+  return fill_entry_view(entry, &view)
+             ? copy_bytes(view.name.data, view.name.len)
+             : moonbit_make_bytes(0, 0);
+}
+
+MOONBIT_FFI_EXPORT moonbit_opendal_metadata_t *
+moonbit_opendal_entry_take_metadata(moonbit_opendal_entry_t *entry) {
+  moonbit_opendal_metadata_t *metadata = metadata_new_external();
+  if (entry != NULL && entry->entry != NULL) {
+    metadata->entry = entry->entry;
+    entry->entry = NULL;
+  }
+  return metadata;
+}
+
+MOONBIT_FFI_EXPORT void
+moonbit_opendal_entry_release(moonbit_opendal_entry_t *entry) {
+  if (entry != NULL) {
+    entry_finalize(entry);
   }
 }
 
