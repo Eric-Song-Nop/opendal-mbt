@@ -43,6 +43,7 @@ pub(all) enum Operation {
   NewOperator
   Check
   Info
+  Exists
   CreateDir
   Read
   Write
@@ -71,6 +72,7 @@ pub struct ErrorInfo {
   message : String
   operation : Operation
   path : String?
+  destination_path : String?
 } derive(Eq, @debug.Debug)
 
 ///|
@@ -114,7 +116,7 @@ pub struct Entry {
 } derive(Eq, @debug.Debug)
 
 ///|
-/// Effective or native capabilities captured from an operator.
+/// Effective capabilities captured from an operator.
 #declaration_only
 pub type Capability
 
@@ -124,8 +126,7 @@ pub struct OperatorInfo {
   scheme : String
   root : String
   name : String
-  native_capability : Capability
-  full_capability : Capability
+  capability : Capability
 }
 
 ///|
@@ -196,7 +197,7 @@ pub type Lister
 pub type Reader
 
 ///|
-/// A stateful writer that commits only after a successful explicit close.
+/// A stateful writer that reports completion only after explicit close succeeds.
 #declaration_only
 pub type Writer
 
@@ -397,7 +398,7 @@ pub fn Operator::reader(
 }
 
 ///|
-/// Create a chunked writer. The caller must call `Writer::close` to commit.
+/// Create a chunked writer. Only successful `Writer::close` reports completion.
 #declaration_only
 pub fn Operator::writer(
   self : Operator,
@@ -464,14 +465,16 @@ pub fn Reader::close(self : Reader) -> Unit {
 
 ///|
 /// Append one chunk to an open writer.
+/// Any write failure is terminal; later writes and close raise
+/// `ResourceClosed`.
 #declaration_only
 pub fn Writer::write(self : Writer, data : Bytes) -> Unit raise OpenDalError {
   ...
 }
 
 ///|
-/// Commit all data and return metadata. The first close attempt is terminal;
-/// dropping a writer without a successful close never counts as a commit.
+/// Finish the write and return metadata. The first close attempt is terminal.
+/// Drop never calls close; before close succeeds, backend effects are indeterminate.
 #declaration_only
 pub fn Writer::close(self : Writer) -> Metadata raise OpenDalError {
   ...
@@ -543,7 +546,7 @@ pub fn Capability::can_rename(self : Capability) -> Bool {
 ///|
 /// Selected option capabilities. More accessors can be added compatibly.
 #declaration_only
-pub fn Capability::can_read_range(self : Capability) -> Bool {
+pub fn Capability::can_read_suffix(self : Capability) -> Bool {
   ...
 }
 

@@ -1,6 +1,6 @@
 # Public API Semantics
 
-Status: draft for review
+Status: Phase 0 semantic baseline, revised during the ABI audit
 
 This document defines the intended MoonBit-facing behavior of the synchronous
 OpenDAL binding. It deliberately avoids fixing the native ABI or implementation
@@ -38,7 +38,7 @@ It is not a transliteration of either Rust or OCaml:
 | Read-only snapshots | `Metadata`, `Entry`, `ErrorInfo`, `OperatorInfo`, `Timestamp` | Fields are readable but values are produced by the binding |
 | Algebraic values | `EntryMode`, `ErrorKind`, `ErrorStatus`, `Operation`, `ByteRange` | Public constructors and exhaustive pattern matching, with explicit unknown cases where upstream can grow |
 | Immutable inputs | `ReadOptions`, `ReaderOptions`, `WriteOptions`, `StatOptions`, `ListOptions`, `DeleteOptions` | Built with optional labelled arguments; native code copies retained strings |
-| Extensible query object | `Capability` | Opaque snapshot with getter methods so new capabilities can be added compatibly |
+| Extensible query object | `Capability` | Opaque effective-capability snapshot with getter methods so new capabilities can be added compatibly |
 
 `Operator` is logically immutable and shareable. `Lister` and `Writer` are
 stateful. `Reader` is a random-access reader without an implicit cursor.
@@ -82,7 +82,14 @@ only when an error must become data.
 - the mutually exclusive OpenDAL `ErrorStatus` (`Permanent`, `Temporary`, or
   `Persistent`);
 - a human-readable message;
-- the binding operation and optional path captured at the call site.
+- the binding operation and optional path captured at the call site;
+- an optional destination path, populated only for two-path operations such as
+  copy and rename.
+
+The path values are the caller's original OpenDAL-relative inputs. For copy and
+rename, `path` is the source and `destination_path` is the destination. For
+one-path operations the destination is absent; construction and check errors
+have no path.
 
 `ErrorKind` includes all current OpenDAL categories plus binding-local
 `InvalidArgument`, `ResourceClosed`, `BufferTooLarge`, and `AbiMismatch`.
@@ -205,6 +212,10 @@ Every returned value must fit in one MoonBit `Bytes`. Requests or whole-object
 reads exceeding that representable length raise `BufferTooLarge`; callers read
 large objects in bounded ranges.
 
+The same checked-allocation rule applies to native output strings and
+materialized entry arrays. The wrapper releases any partially converted native
+snapshots before raising `BufferTooLarge`.
+
 ## Writer
 
 ```moonbit
@@ -215,16 +226,22 @@ let metadata = writer.close()
 ```
 
 - `write` writes an entire supplied chunk or raises.
-- a successful explicit `close` is the only operation that counts as commit;
+- any `write` failure is terminal and moves the Writer to `Failed`;
+- only a successful explicit `close` lets the binding report the Writer as
+  successfully completed;
 - the first close attempt is terminal: success produces `Closed`, failure
   produces `Failed`;
 - later `write` or `close` calls raise `ResourceClosed`;
-- dropping/finalizing an open Writer never silently commits and cannot report
-  an error.
+- dropping/finalizing an open or failed Writer never calls `close` and reports
+  neither success nor an error.
 
 No public `abort` is frozen yet. OpenDAL's blocking Writer does not expose a
-reliable abort operation. An abort API can be added only if the Rust shim owns
-an async Writer and can define its synchronous failure behavior precisely.
+reliable abort operation. Before close succeeds, a write/close failure or drop
+can therefore leave visible partial data or orphan multipart state depending
+on the backend. The binding promises neither rollback nor “no partial
+effects”; callers treat only a successful `close` as completed. An abort API
+can be added only if the Rust shim owns an async Writer and can define its
+synchronous failure behavior precisely.
 
 ## Metadata and entries
 
@@ -253,17 +270,28 @@ options constructor, omitted booleans are `false`, optional strings and limits
 are absent, an omitted read range means `Full`, and recursive deletion/listing
 is disabled.
 
-Capability values are read-only snapshots. `OperatorInfo` exposes both:
-
-- `native_capability`: operations implemented by the underlying service;
-- `full_capability`: effective operations after layers or OpenDAL-provided
-  composition.
+Capability values are read-only snapshots. `OperatorInfo.capability` exposes
+the effective operations of the composed service stack. OpenDAL 0.58 removed
+the older native/full split from its public `OperatorInfo`; this binding does
+not reconstruct or fabricate it from raw internals.
 
 Capability getters are introspection. They do not imply that the binding can
 prevalidate every backend request, and OpenDAL may ignore, degrade, or reject
 unsupported options according to the operation and service. The MoonBit layer
 must not claim a stricter universal policy unless it implements and documents
 one.
+
+`can_read` covers ordinary full/from/offset-length reads. Suffix reads have a
+separate `can_read_suffix` accessor because OpenDAL 0.58.1 exposes that
+capability independently; the binding does not invent a broader
+`can_read_range` flag that upstream cannot supply.
+
+## Retry policy
+
+The first binding version does not install a retry layer. This keeps failures
+and latency faithful to the configured service and avoids inheriting the
+upstream experimental C binding's policy. A future retry API must be explicit
+in the MoonBit surface and must document idempotency and Writer behavior.
 
 ## Check semantics
 

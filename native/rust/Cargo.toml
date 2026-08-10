@@ -1,0 +1,17 @@
+[package]
+name = "opendal-mbt-native"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+opendal = { version = "=0.58.1", default-features = false, features = ["blocking", "services-fs"] }
+tokio = { version = "=1.52.0", features = ["rt-multi-thread", "fs"] }
+
+[dev-dependencies]
+static_assertions = "1.1"

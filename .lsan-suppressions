@@ -1,0 +1,4 @@
+# macOS dyld retains one TLS termination record for each long-lived Tokio
+# worker at process teardown. Keep this scoped to the system allocation frame;
+# project-owned OpenDAL, C-stub, and MoonBit allocations remain visible.
+leak:dyld::ThreadLocalVariables::addTermFunc

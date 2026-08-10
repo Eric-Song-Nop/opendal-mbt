@@ -16,8 +16,8 @@ fn writer_contract(op : @opendal.Operator) -> Unit raise @opendal.OpenDalError {
   )
   let writer = op.writer("large.bin", options~)
   writer.write(Bytes::new(0))
-  let committed = writer.close()
-  ignore(committed)
+  let metadata = writer.close()
+  ignore(metadata)
 }
 
 ///|
@@ -35,21 +35,23 @@ fn materialized_error_contract(
 fn readonly_value_contract(
   entry : @opendal.Entry,
   info : @opendal.OperatorInfo,
-) -> (@opendal.EntryMode, UInt64, String, Bool) {
+) -> (@opendal.EntryMode, UInt64, String, Bool, Bool) {
   (
     entry.metadata.mode,
     entry.metadata.content_length,
     info.scheme,
-    info.full_capability.can_read(),
+    info.capability.can_read(),
+    info.capability.can_read_suffix(),
   )
 }
 
 ///|
 fn structured_error_contract(
   error : @opendal.OpenDalError,
-) -> (@opendal.ErrorKind, @opendal.Operation) {
+) -> (@opendal.ErrorKind, @opendal.Operation, String?) {
   match error {
-    @opendal.OpenDalError(info) => (info.kind, info.operation)
+    @opendal.OpenDalError(info) =>
+      (info.kind, info.operation, info.destination_path)
   }
 }
 

@@ -49,7 +49,7 @@ test oracle, but is not the public or long-term ABI of this project.
 
 ## Delivery order
 
-### Phase 0: Public semantics (complete, awaiting API review)
+### Phase 0: Public semantics (complete)
 
 Define the stable MoonBit-facing contract before committing to an ABI:
 
@@ -69,6 +69,14 @@ Deliverables:
 
 ### Phase 1: ABI contract and memory-service spike
 
+Status: complete for the first memory-service vertical slice.
+
+The implemented safe MoonBit path is `Operator::new`/`info` plus default
+whole-object `write` and `read`. Non-default read/write options deliberately
+raise `Unsupported` until the options slice in Phase 3. The Rust bridge fills
+the complete BASE and WHOLE_OBJECT ABI groups so the advertised feature bit
+still guarantees every function pointer in its group.
+
 Freeze a small, versioned C ABI and implement one complete slice:
 
 - ABI/version query;
@@ -81,11 +89,22 @@ Before implementation, document every function's pointer validity, ownership,
 allocation/free pair, nullability, error behavior, panic boundary, and thread
 contract.
 
+ABI design deliverables:
+
+- `docs/design/c-abi.md`;
+- `native/include/opendal_mbt.h`;
+- warning-clean C11 and C++17 header smoke tests.
+
 Exit criteria:
 
 - Rust ABI tests, C smoke tests, and MoonBit tests pass;
 - native debug and release builds pass;
 - AddressSanitizer/LeakSanitizer find no binding-owned leaks or invalid access.
+
+All three criteria are satisfied for the memory slice. The macOS sanitizer
+run uses a symbol-scoped suppression for dyld's per-worker TLS termination
+records; project-owned Rust handles, C temporaries, and MoonBit external
+objects remain unsuppressed.
 
 ### Phase 2: Blocking core MVP
 
@@ -131,16 +150,18 @@ cross-thread callbacks, and exactly-once completion.
   streaming remains available for larger objects.
 - Tests cover empty and binary content, embedded NUL bytes, Unicode paths,
   invalid UTF-8 at native boundaries, missing objects, unsupported operations,
-  overflow, early garbage collection, repeated close/abort, and failure paths.
+  overflow, early garbage collection, repeated close/free, and failure paths.
 - Public API changes are reviewed through generated interface diffs.
 - Each feature lands as a complete vertical slice rather than as a large batch
   of unwrapped native functions.
 
 ## Open design decisions
 
-- Exact public type and method names.
+- Make `max_output_len` a hard bound on native read allocation, not only on
+  the returned/flattened buffer. OpenDAL's blocking whole-object read may
+  materialize its segmented `Buffer` before the bridge can inspect its length;
+  a bounded streaming implementation must preserve Full/From/Range/Suffix and
+  conditional-read semantics across backends.
 - A reliable public Writer abort operation, which requires an async-writer
   implementation in the Rust shim rather than OpenDAL's blocking Writer.
-- Default retry policy; it must not be inherited accidentally from another
-  binding.
 - Source-build and prebuilt-library installation contract.
