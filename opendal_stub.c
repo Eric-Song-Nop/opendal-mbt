@@ -1,0 +1,947 @@
+#include <moonbit.h>
+
+#include "native/include/opendal_mbt.h"
+
+#include <limits.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+
+typedef struct moonbit_opendal_operator {
+  opendal_mbt_operator_v1_t *operator_;
+  opendal_mbt_operator_info_v1_t *info;
+} moonbit_opendal_operator_t;
+
+typedef struct moonbit_opendal_capability {
+  uint64_t words[4];
+} moonbit_opendal_capability_t;
+
+typedef struct moonbit_opendal_metadata {
+  opendal_mbt_metadata_v1_t *metadata;
+} moonbit_opendal_metadata_t;
+
+typedef struct moonbit_opendal_result {
+  opendal_mbt_status_t status;
+  opendal_mbt_error_kind_t local_kind;
+  opendal_mbt_error_status_t local_error_status;
+  const char *local_kind_name;
+  const char *local_message;
+  opendal_mbt_error_v1_t *error;
+  opendal_mbt_operator_v1_t *operator_;
+  opendal_mbt_operator_info_v1_t *info;
+  opendal_mbt_buffer_v1_t *buffer;
+  opendal_mbt_metadata_v1_t *metadata;
+} moonbit_opendal_result_t;
+
+typedef struct owned_utf8 {
+  uint8_t *data;
+  uint64_t len;
+} owned_utf8_t;
+
+typedef enum utf16_result {
+  UTF16_OK = 0,
+  UTF16_INVALID = 1,
+  UTF16_NO_MEMORY = 2,
+} utf16_result_t;
+
+#define API_HAS(api, field)                                                   \
+  ((api)->struct_size >= OPENDAL_MBT_API_V1_FIELD_END(field) &&              \
+   (api)->library_struct_size >= OPENDAL_MBT_API_V1_FIELD_END(field) &&      \
+   (api)->field != NULL)
+
+static opendal_mbt_status_t load_api(opendal_mbt_api_v1_t *api,
+                                     bool require_whole_object) {
+  opendal_mbt_status_t status;
+  memset(api, 0, sizeof(*api));
+  api->struct_size = OPENDAL_MBT_API_V1_SIZE;
+  api->requested_major = OPENDAL_MBT_ABI_V1_MAJOR;
+  status = opendal_mbt_get_api(api);
+  if (status != OPENDAL_MBT_STATUS_OK) {
+    return status;
+  }
+  if ((api->feature_bits & OPENDAL_MBT_FEATURE_BASE) == 0 ||
+      !API_HAS(api, error_view) || !API_HAS(api, error_free) ||
+      !API_HAS(api, buffer_len) || !API_HAS(api, buffer_copy) ||
+      !API_HAS(api, buffer_free) || !API_HAS(api, metadata_view) ||
+      !API_HAS(api, metadata_free) || !API_HAS(api, operator_info_view) ||
+      !API_HAS(api, operator_info_free) || !API_HAS(api, operator_new) ||
+      !API_HAS(api, operator_free)) {
+    return OPENDAL_MBT_STATUS_ABI_MISMATCH;
+  }
+  if (require_whole_object &&
+      ((api->feature_bits & OPENDAL_MBT_FEATURE_WHOLE_OBJECT) == 0 ||
+       !API_HAS(api, operator_read) || !API_HAS(api, operator_write))) {
+    return OPENDAL_MBT_STATUS_ABI_MISMATCH;
+  }
+  return OPENDAL_MBT_STATUS_OK;
+}
+
+static void result_set_local_error(moonbit_opendal_result_t *result,
+                                   opendal_mbt_error_kind_t kind,
+                                   const char *kind_name,
+                                   const char *message) {
+  result->status = OPENDAL_MBT_STATUS_ERROR;
+  result->local_kind = kind;
+  result->local_error_status = OPENDAL_MBT_ERROR_STATUS_PERMANENT;
+  result->local_kind_name = kind_name;
+  result->local_message = message;
+}
+
+static moonbit_bytes_t copy_bytes(const uint8_t *data, uint64_t len) {
+  moonbit_bytes_t output;
+  if (len > (uint64_t)INT32_MAX || (len != 0 && data == NULL)) {
+    return moonbit_make_bytes(0, 0);
+  }
+  output = moonbit_make_bytes((int32_t)len, 0);
+  if (len != 0) {
+    memcpy(output, data, (size_t)len);
+  }
+  return output;
+}
+
+static moonbit_bytes_t copy_c_string(const char *text) {
+  if (text == NULL) {
+    return moonbit_make_bytes(0, 0);
+  }
+  return copy_bytes((const uint8_t *)text, (uint64_t)strlen(text));
+}
+
+static bool valid_utf8(const uint8_t *data, uint64_t len) {
+  uint64_t i = 0;
+  if (len != 0 && data == NULL) {
+    return false;
+  }
+  while (i < len) {
+    uint8_t first = data[i];
+    uint32_t codepoint;
+    uint64_t width;
+    if (first <= UINT8_C(0x7f)) {
+      i += 1;
+      continue;
+    }
+    if (first >= UINT8_C(0xc2) && first <= UINT8_C(0xdf)) {
+      codepoint = (uint32_t)(first & UINT8_C(0x1f));
+      width = 2;
+    } else if (first >= UINT8_C(0xe0) && first <= UINT8_C(0xef)) {
+      codepoint = (uint32_t)(first & UINT8_C(0x0f));
+      width = 3;
+    } else if (first >= UINT8_C(0xf0) && first <= UINT8_C(0xf4)) {
+      codepoint = (uint32_t)(first & UINT8_C(0x07));
+      width = 4;
+    } else {
+      return false;
+    }
+    if (width > len - i) {
+      return false;
+    }
+    for (uint64_t j = 1; j < width; ++j) {
+      uint8_t next = data[i + j];
+      if ((next & UINT8_C(0xc0)) != UINT8_C(0x80)) {
+        return false;
+      }
+      codepoint = (codepoint << 6) | (uint32_t)(next & UINT8_C(0x3f));
+    }
+    if ((width == 2 && codepoint < UINT32_C(0x80)) ||
+        (width == 3 && codepoint < UINT32_C(0x800)) ||
+        (width == 4 && codepoint < UINT32_C(0x10000)) ||
+        (codepoint >= UINT32_C(0xd800) && codepoint <= UINT32_C(0xdfff)) ||
+        codepoint > UINT32_C(0x10ffff)) {
+      return false;
+    }
+    i += width;
+  }
+  return true;
+}
+
+static utf16_result_t utf16_to_utf8(moonbit_string_t input,
+                                     owned_utf8_t *output) {
+  int32_t input_len;
+  uint64_t capacity;
+  uint64_t written = 0;
+  output->data = NULL;
+  output->len = 0;
+  if (input == NULL) {
+    return UTF16_INVALID;
+  }
+  input_len = Moonbit_array_length(input);
+  if (input_len < 0) {
+    return UTF16_INVALID;
+  }
+  capacity = (uint64_t)(uint32_t)input_len * UINT64_C(3);
+  if (capacity > (uint64_t)SIZE_MAX) {
+    return UTF16_NO_MEMORY;
+  }
+  if (capacity != 0) {
+    output->data = (uint8_t *)malloc((size_t)capacity);
+    if (output->data == NULL) {
+      return UTF16_NO_MEMORY;
+    }
+  }
+  for (int32_t i = 0; i < input_len; ++i) {
+    uint32_t codepoint = input[i];
+    if (codepoint >= UINT32_C(0xd800) && codepoint <= UINT32_C(0xdbff)) {
+      uint32_t low;
+      if (i + 1 >= input_len) {
+        free(output->data);
+        output->data = NULL;
+        return UTF16_INVALID;
+      }
+      low = input[i + 1];
+      if (low < UINT32_C(0xdc00) || low > UINT32_C(0xdfff)) {
+        free(output->data);
+        output->data = NULL;
+        return UTF16_INVALID;
+      }
+      codepoint = UINT32_C(0x10000) +
+                  ((codepoint - UINT32_C(0xd800)) << 10) +
+                  (low - UINT32_C(0xdc00));
+      i += 1;
+    } else if (codepoint >= UINT32_C(0xdc00) &&
+               codepoint <= UINT32_C(0xdfff)) {
+      free(output->data);
+      output->data = NULL;
+      return UTF16_INVALID;
+    }
+    if (codepoint <= UINT32_C(0x7f)) {
+      output->data[written++] = (uint8_t)codepoint;
+    } else if (codepoint <= UINT32_C(0x7ff)) {
+      output->data[written++] =
+          (uint8_t)(UINT32_C(0xc0) | (codepoint >> 6));
+      output->data[written++] =
+          (uint8_t)(UINT32_C(0x80) | (codepoint & UINT32_C(0x3f)));
+    } else if (codepoint <= UINT32_C(0xffff)) {
+      output->data[written++] =
+          (uint8_t)(UINT32_C(0xe0) | (codepoint >> 12));
+      output->data[written++] = (uint8_t)(
+          UINT32_C(0x80) | ((codepoint >> 6) & UINT32_C(0x3f)));
+      output->data[written++] =
+          (uint8_t)(UINT32_C(0x80) | (codepoint & UINT32_C(0x3f)));
+    } else {
+      output->data[written++] =
+          (uint8_t)(UINT32_C(0xf0) | (codepoint >> 18));
+      output->data[written++] = (uint8_t)(
+          UINT32_C(0x80) | ((codepoint >> 12) & UINT32_C(0x3f)));
+      output->data[written++] = (uint8_t)(
+          UINT32_C(0x80) | ((codepoint >> 6) & UINT32_C(0x3f)));
+      output->data[written++] =
+          (uint8_t)(UINT32_C(0x80) | (codepoint & UINT32_C(0x3f)));
+    }
+  }
+  output->len = written;
+  return UTF16_OK;
+}
+
+static void owned_utf8_free(owned_utf8_t *value) {
+  free(value->data);
+  value->data = NULL;
+  value->len = 0;
+}
+
+static opendal_mbt_bytes_view_v1_t owned_utf8_view(
+    const owned_utf8_t *value) {
+  opendal_mbt_bytes_view_v1_t view;
+  view.data = value->data;
+  view.len = value->len;
+  return view;
+}
+
+static void release_result_payload(moonbit_opendal_result_t *result) {
+  opendal_mbt_api_v1_t api;
+  if (load_api(&api, false) != OPENDAL_MBT_STATUS_OK) {
+    return;
+  }
+  if (result->error != NULL) {
+    api.error_free(result->error);
+    result->error = NULL;
+  }
+  if (result->buffer != NULL) {
+    api.buffer_free(result->buffer);
+    result->buffer = NULL;
+  }
+  if (result->metadata != NULL) {
+    api.metadata_free(result->metadata);
+    result->metadata = NULL;
+  }
+  if (result->info != NULL) {
+    api.operator_info_free(result->info);
+    result->info = NULL;
+  }
+  if (result->operator_ != NULL) {
+    api.operator_free(result->operator_);
+    result->operator_ = NULL;
+  }
+}
+
+static void result_finalize(void *payload) {
+  release_result_payload((moonbit_opendal_result_t *)payload);
+}
+
+static moonbit_opendal_result_t *result_new(void) {
+  moonbit_opendal_result_t *result =
+      (moonbit_opendal_result_t *)moonbit_make_external_object(
+          result_finalize, (uint32_t)sizeof(moonbit_opendal_result_t));
+  memset(result, 0, sizeof(*result));
+  result->status = OPENDAL_MBT_STATUS_ABI_MISMATCH;
+  return result;
+}
+
+static void operator_finalize(void *payload) {
+  moonbit_opendal_operator_t *operator_ =
+      (moonbit_opendal_operator_t *)payload;
+  opendal_mbt_api_v1_t api;
+  if (load_api(&api, false) != OPENDAL_MBT_STATUS_OK) {
+    return;
+  }
+  if (operator_->info != NULL) {
+    api.operator_info_free(operator_->info);
+    operator_->info = NULL;
+  }
+  if (operator_->operator_ != NULL) {
+    api.operator_free(operator_->operator_);
+    operator_->operator_ = NULL;
+  }
+}
+
+static moonbit_opendal_operator_t *operator_new_external(void) {
+  moonbit_opendal_operator_t *operator_ =
+      (moonbit_opendal_operator_t *)moonbit_make_external_object(
+          operator_finalize, (uint32_t)sizeof(moonbit_opendal_operator_t));
+  memset(operator_, 0, sizeof(*operator_));
+  return operator_;
+}
+
+static void metadata_finalize(void *payload) {
+  moonbit_opendal_metadata_t *metadata = (moonbit_opendal_metadata_t *)payload;
+  opendal_mbt_api_v1_t api;
+  if (metadata->metadata != NULL &&
+      load_api(&api, false) == OPENDAL_MBT_STATUS_OK) {
+    api.metadata_free(metadata->metadata);
+    metadata->metadata = NULL;
+  }
+}
+
+static moonbit_opendal_metadata_t *metadata_new_external(void) {
+  moonbit_opendal_metadata_t *metadata =
+      (moonbit_opendal_metadata_t *)moonbit_make_external_object(
+          metadata_finalize, (uint32_t)sizeof(moonbit_opendal_metadata_t));
+  metadata->metadata = NULL;
+  return metadata;
+}
+
+static void capability_finalize(void *payload) { (void)payload; }
+
+static moonbit_opendal_capability_t *capability_new_external(void) {
+  moonbit_opendal_capability_t *capability =
+      (moonbit_opendal_capability_t *)moonbit_make_external_object(
+          capability_finalize,
+          (uint32_t)sizeof(moonbit_opendal_capability_t));
+  memset(capability, 0, sizeof(*capability));
+  return capability;
+}
+
+static bool fill_operator_info_view(
+    const moonbit_opendal_operator_t *operator_,
+    opendal_mbt_operator_info_view_v1_t *view) {
+  opendal_mbt_api_v1_t api;
+  if (operator_ == NULL || operator_->info == NULL ||
+      load_api(&api, false) != OPENDAL_MBT_STATUS_OK) {
+    return false;
+  }
+  memset(view, 0, sizeof(*view));
+  view->struct_size = (uint32_t)sizeof(*view);
+  view->struct_version = OPENDAL_MBT_STRUCT_VERSION_V1;
+  return api.operator_info_view(operator_->info, view) ==
+         OPENDAL_MBT_STATUS_OK;
+}
+
+static bool validate_operator_info(opendal_mbt_operator_info_v1_t *info) {
+  opendal_mbt_api_v1_t api;
+  opendal_mbt_operator_info_view_v1_t view;
+  if (info == NULL || load_api(&api, false) != OPENDAL_MBT_STATUS_OK) {
+    return false;
+  }
+  memset(&view, 0, sizeof(view));
+  view.struct_size = (uint32_t)sizeof(view);
+  view.struct_version = OPENDAL_MBT_STRUCT_VERSION_V1;
+  if (api.operator_info_view(info, &view) != OPENDAL_MBT_STATUS_OK) {
+    return false;
+  }
+  return view.scheme.len <= (uint64_t)INT32_MAX &&
+         view.root.len <= (uint64_t)INT32_MAX &&
+         view.name.len <= (uint64_t)INT32_MAX &&
+         valid_utf8(view.scheme.data, view.scheme.len) &&
+         valid_utf8(view.root.data, view.root.len) &&
+         valid_utf8(view.name.data, view.name.len);
+}
+
+static bool valid_optional_text(opendal_mbt_bytes_view_v1_t value,
+                                bool present) {
+  if (!present) {
+    return value.data == NULL && value.len == 0;
+  }
+  return value.len <= (uint64_t)INT32_MAX &&
+         valid_utf8(value.data, value.len);
+}
+
+static bool validate_metadata_snapshot(opendal_mbt_metadata_v1_t *metadata) {
+  const uint64_t known_present_bits =
+      OPENDAL_MBT_METADATA_IS_CURRENT_PRESENT |
+      OPENDAL_MBT_METADATA_LAST_MODIFIED_PRESENT |
+      OPENDAL_MBT_METADATA_CACHE_CONTROL_PRESENT |
+      OPENDAL_MBT_METADATA_CONTENT_DISPOSITION_PRESENT |
+      OPENDAL_MBT_METADATA_CONTENT_ENCODING_PRESENT |
+      OPENDAL_MBT_METADATA_CONTENT_MD5_PRESENT |
+      OPENDAL_MBT_METADATA_CONTENT_TYPE_PRESENT |
+      OPENDAL_MBT_METADATA_ETAG_PRESENT |
+      OPENDAL_MBT_METADATA_VERSION_PRESENT;
+  opendal_mbt_api_v1_t api;
+  opendal_mbt_metadata_view_v1_t view;
+  if (metadata == NULL || load_api(&api, false) != OPENDAL_MBT_STATUS_OK) {
+    return false;
+  }
+  memset(&view, 0, sizeof(view));
+  view.struct_size = (uint32_t)sizeof(view);
+  view.struct_version = OPENDAL_MBT_STRUCT_VERSION_V1;
+  if (api.metadata_view(metadata, &view) != OPENDAL_MBT_STATUS_OK ||
+      (view.present_bits & ~known_present_bits) != 0 ||
+      (view.is_current != OPENDAL_MBT_FALSE &&
+       view.is_current != OPENDAL_MBT_TRUE) ||
+      (view.is_deleted != OPENDAL_MBT_FALSE &&
+       view.is_deleted != OPENDAL_MBT_TRUE) ||
+      view.reserved0 != 0) {
+    return false;
+  }
+  if ((view.present_bits & OPENDAL_MBT_METADATA_IS_CURRENT_PRESENT) == 0 &&
+      view.is_current != OPENDAL_MBT_FALSE) {
+    return false;
+  }
+  if ((view.present_bits & OPENDAL_MBT_METADATA_LAST_MODIFIED_PRESENT) != 0) {
+    if (view.last_modified.nanoseconds >= UINT32_C(1000000000) ||
+        view.last_modified.reserved0 != 0) {
+      return false;
+    }
+  } else if (view.last_modified.unix_seconds != 0 ||
+             view.last_modified.nanoseconds != 0 ||
+             view.last_modified.reserved0 != 0) {
+    return false;
+  }
+  return valid_optional_text(
+             view.cache_control,
+             (view.present_bits & OPENDAL_MBT_METADATA_CACHE_CONTROL_PRESENT) !=
+                 0) &&
+         valid_optional_text(
+             view.content_disposition,
+             (view.present_bits &
+              OPENDAL_MBT_METADATA_CONTENT_DISPOSITION_PRESENT) != 0) &&
+         valid_optional_text(
+             view.content_encoding,
+             (view.present_bits &
+              OPENDAL_MBT_METADATA_CONTENT_ENCODING_PRESENT) != 0) &&
+         valid_optional_text(
+             view.content_md5,
+             (view.present_bits & OPENDAL_MBT_METADATA_CONTENT_MD5_PRESENT) !=
+                 0) &&
+         valid_optional_text(
+             view.content_type,
+             (view.present_bits & OPENDAL_MBT_METADATA_CONTENT_TYPE_PRESENT) !=
+                 0) &&
+         valid_optional_text(
+             view.etag,
+             (view.present_bits & OPENDAL_MBT_METADATA_ETAG_PRESENT) != 0) &&
+         valid_optional_text(
+             view.version,
+             (view.present_bits & OPENDAL_MBT_METADATA_VERSION_PRESENT) != 0);
+}
+
+static bool fill_metadata_view(const moonbit_opendal_metadata_t *metadata,
+                               opendal_mbt_metadata_view_v1_t *view) {
+  opendal_mbt_api_v1_t api;
+  if (metadata == NULL || metadata->metadata == NULL ||
+      load_api(&api, false) != OPENDAL_MBT_STATUS_OK) {
+    return false;
+  }
+  memset(view, 0, sizeof(*view));
+  view->struct_size = (uint32_t)sizeof(*view);
+  view->struct_version = OPENDAL_MBT_STRUCT_VERSION_V1;
+  return api.metadata_view(metadata->metadata, view) ==
+         OPENDAL_MBT_STATUS_OK;
+}
+
+static bool fill_error_view(const moonbit_opendal_result_t *result,
+                            opendal_mbt_error_view_v1_t *view) {
+  opendal_mbt_api_v1_t api;
+  if (result == NULL || result->error == NULL ||
+      load_api(&api, false) != OPENDAL_MBT_STATUS_OK) {
+    return false;
+  }
+  memset(view, 0, sizeof(*view));
+  view->struct_size = (uint32_t)sizeof(*view);
+  view->struct_version = OPENDAL_MBT_STRUCT_VERSION_V1;
+  return api.error_view(result->error, view) == OPENDAL_MBT_STATUS_OK;
+}
+
+MOONBIT_FFI_EXPORT moonbit_opendal_result_t *moonbit_opendal_operator_new(
+    moonbit_string_t scheme, moonbit_string_t *keys,
+    moonbit_string_t *values) {
+  moonbit_opendal_result_t *result = result_new();
+  opendal_mbt_api_v1_t api;
+  owned_utf8_t scheme_utf8 = {0};
+  owned_utf8_t *config_text = NULL;
+  opendal_mbt_kv_v1_t *config = NULL;
+  int32_t key_count;
+  int32_t value_count;
+  utf16_result_t conversion;
+  result->status = load_api(&api, false);
+  if (result->status != OPENDAL_MBT_STATUS_OK) {
+    return result;
+  }
+  if (keys == NULL || values == NULL) {
+    result_set_local_error(result, OPENDAL_MBT_ERROR_INVALID_ARGUMENT,
+                           "InvalidArgument", "configuration arrays are NULL");
+    return result;
+  }
+  key_count = Moonbit_array_length(keys);
+  value_count = Moonbit_array_length(values);
+  if (key_count < 0 || value_count != key_count) {
+    result_set_local_error(result, OPENDAL_MBT_ERROR_INVALID_ARGUMENT,
+                           "InvalidArgument",
+                           "configuration key/value lengths differ");
+    return result;
+  }
+  conversion = utf16_to_utf8(scheme, &scheme_utf8);
+  if (conversion != UTF16_OK) {
+    result_set_local_error(
+        result,
+        conversion == UTF16_INVALID ? OPENDAL_MBT_ERROR_INVALID_ARGUMENT
+                                    : OPENDAL_MBT_ERROR_UNEXPECTED,
+        conversion == UTF16_INVALID ? "InvalidArgument" : "Unexpected",
+        conversion == UTF16_INVALID ? "scheme contains invalid UTF-16"
+                                    : "unable to allocate UTF-8 scheme");
+    return result;
+  }
+  if (key_count != 0) {
+    size_t count = (size_t)(uint32_t)key_count;
+    if (count > SIZE_MAX / (2 * sizeof(*config_text)) ||
+        count > SIZE_MAX / sizeof(*config)) {
+      result_set_local_error(result, OPENDAL_MBT_ERROR_UNEXPECTED,
+                             "Unexpected", "configuration is too large");
+      owned_utf8_free(&scheme_utf8);
+      return result;
+    }
+    config_text = (owned_utf8_t *)calloc(count * 2, sizeof(*config_text));
+    config = (opendal_mbt_kv_v1_t *)calloc(count, sizeof(*config));
+    if (config_text == NULL || config == NULL) {
+      result_set_local_error(result, OPENDAL_MBT_ERROR_UNEXPECTED,
+                             "Unexpected",
+                             "unable to allocate configuration conversion");
+      free(config_text);
+      free(config);
+      owned_utf8_free(&scheme_utf8);
+      return result;
+    }
+    for (int32_t i = 0; i < key_count; ++i) {
+      utf16_result_t key_result =
+          utf16_to_utf8(keys[i], &config_text[(size_t)i * 2]);
+      utf16_result_t value_result =
+          utf16_to_utf8(values[i], &config_text[(size_t)i * 2 + 1]);
+      if (key_result != UTF16_OK || value_result != UTF16_OK) {
+        result_set_local_error(
+            result,
+            key_result == UTF16_INVALID || value_result == UTF16_INVALID
+                ? OPENDAL_MBT_ERROR_INVALID_ARGUMENT
+                : OPENDAL_MBT_ERROR_UNEXPECTED,
+            key_result == UTF16_INVALID || value_result == UTF16_INVALID
+                ? "InvalidArgument"
+                : "Unexpected",
+            key_result == UTF16_INVALID || value_result == UTF16_INVALID
+                ? "configuration contains invalid UTF-16"
+                : "unable to allocate UTF-8 configuration");
+        for (int32_t j = 0; j <= i; ++j) {
+          owned_utf8_free(&config_text[(size_t)j * 2]);
+          owned_utf8_free(&config_text[(size_t)j * 2 + 1]);
+        }
+        free(config_text);
+        free(config);
+        owned_utf8_free(&scheme_utf8);
+        return result;
+      }
+      config[i].key = owned_utf8_view(&config_text[(size_t)i * 2]);
+      config[i].value = owned_utf8_view(&config_text[(size_t)i * 2 + 1]);
+    }
+  }
+  {
+    opendal_mbt_bytes_view_v1_t scheme_view = owned_utf8_view(&scheme_utf8);
+    result->status = api.operator_new(
+        &scheme_view, config, (uint64_t)(uint32_t)key_count, &result->operator_,
+        &result->info, &result->error);
+  }
+  for (int32_t i = 0; i < key_count; ++i) {
+    owned_utf8_free(&config_text[(size_t)i * 2]);
+    owned_utf8_free(&config_text[(size_t)i * 2 + 1]);
+  }
+  free(config_text);
+  free(config);
+  owned_utf8_free(&scheme_utf8);
+  if (result->status == OPENDAL_MBT_STATUS_OK &&
+      !validate_operator_info(result->info)) {
+    result->status = OPENDAL_MBT_STATUS_ABI_MISMATCH;
+  }
+  return result;
+}
+
+MOONBIT_FFI_EXPORT moonbit_opendal_result_t *moonbit_opendal_operator_read(
+    moonbit_opendal_operator_t *operator_, moonbit_string_t path) {
+  moonbit_opendal_result_t *result = result_new();
+  opendal_mbt_api_v1_t api;
+  owned_utf8_t path_utf8 = {0};
+  utf16_result_t conversion;
+  result->status = load_api(&api, true);
+  if (result->status != OPENDAL_MBT_STATUS_OK) {
+    return result;
+  }
+  if (operator_ == NULL || operator_->operator_ == NULL) {
+    result_set_local_error(result, OPENDAL_MBT_ERROR_RESOURCE_CLOSED,
+                           "ResourceClosed", "operator is closed");
+    return result;
+  }
+  conversion = utf16_to_utf8(path, &path_utf8);
+  if (conversion != UTF16_OK) {
+    result_set_local_error(
+        result,
+        conversion == UTF16_INVALID ? OPENDAL_MBT_ERROR_INVALID_ARGUMENT
+                                    : OPENDAL_MBT_ERROR_UNEXPECTED,
+        conversion == UTF16_INVALID ? "InvalidArgument" : "Unexpected",
+        conversion == UTF16_INVALID ? "path contains invalid UTF-16"
+                                    : "unable to allocate UTF-8 path");
+    return result;
+  }
+  {
+    opendal_mbt_bytes_view_v1_t path_view = owned_utf8_view(&path_utf8);
+    result->status = api.operator_read(
+        operator_->operator_, &path_view, NULL, (uint64_t)INT32_MAX,
+        &result->buffer, &result->error);
+  }
+  owned_utf8_free(&path_utf8);
+  return result;
+}
+
+MOONBIT_FFI_EXPORT moonbit_opendal_result_t *moonbit_opendal_operator_write(
+    moonbit_opendal_operator_t *operator_, moonbit_string_t path,
+    moonbit_bytes_t data) {
+  moonbit_opendal_result_t *result = result_new();
+  opendal_mbt_api_v1_t api;
+  owned_utf8_t path_utf8 = {0};
+  utf16_result_t conversion;
+  int32_t data_len;
+  result->status = load_api(&api, true);
+  if (result->status != OPENDAL_MBT_STATUS_OK) {
+    return result;
+  }
+  if (operator_ == NULL || operator_->operator_ == NULL) {
+    result_set_local_error(result, OPENDAL_MBT_ERROR_RESOURCE_CLOSED,
+                           "ResourceClosed", "operator is closed");
+    return result;
+  }
+  if (data == NULL || (data_len = Moonbit_array_length(data)) < 0) {
+    result_set_local_error(result, OPENDAL_MBT_ERROR_INVALID_ARGUMENT,
+                           "InvalidArgument", "data is invalid");
+    return result;
+  }
+  conversion = utf16_to_utf8(path, &path_utf8);
+  if (conversion != UTF16_OK) {
+    result_set_local_error(
+        result,
+        conversion == UTF16_INVALID ? OPENDAL_MBT_ERROR_INVALID_ARGUMENT
+                                    : OPENDAL_MBT_ERROR_UNEXPECTED,
+        conversion == UTF16_INVALID ? "InvalidArgument" : "Unexpected",
+        conversion == UTF16_INVALID ? "path contains invalid UTF-16"
+                                    : "unable to allocate UTF-8 path");
+    return result;
+  }
+  {
+    opendal_mbt_bytes_view_v1_t path_view = owned_utf8_view(&path_utf8);
+    opendal_mbt_bytes_view_v1_t data_view = {
+        .data = data,
+        .len = (uint64_t)(uint32_t)data_len,
+    };
+    result->status = api.operator_write(operator_->operator_, &path_view,
+                                        &data_view, NULL, &result->metadata,
+                                        &result->error);
+  }
+  owned_utf8_free(&path_utf8);
+  return result;
+}
+
+MOONBIT_FFI_EXPORT uint32_t
+moonbit_opendal_result_status(moonbit_opendal_result_t *result) {
+  return result == NULL ? OPENDAL_MBT_STATUS_ABI_MISMATCH : result->status;
+}
+
+MOONBIT_FFI_EXPORT uint32_t
+moonbit_opendal_result_error_kind(moonbit_opendal_result_t *result) {
+  opendal_mbt_error_view_v1_t view;
+  if (result != NULL && result->local_kind != 0) {
+    return result->local_kind;
+  }
+  if (fill_error_view(result, &view)) {
+    return view.kind;
+  }
+  if (result != NULL && result->status == OPENDAL_MBT_STATUS_ABI_MISMATCH) {
+    return OPENDAL_MBT_ERROR_ABI_MISMATCH;
+  }
+  return OPENDAL_MBT_ERROR_UNEXPECTED;
+}
+
+MOONBIT_FFI_EXPORT uint32_t
+moonbit_opendal_result_error_status(moonbit_opendal_result_t *result) {
+  opendal_mbt_error_view_v1_t view;
+  if (result != NULL && result->local_error_status != 0) {
+    return result->local_error_status;
+  }
+  if (fill_error_view(result, &view)) {
+    return view.status;
+  }
+  return OPENDAL_MBT_ERROR_STATUS_PERMANENT;
+}
+
+MOONBIT_FFI_EXPORT moonbit_bytes_t
+moonbit_opendal_result_error_kind_name(moonbit_opendal_result_t *result) {
+  opendal_mbt_error_view_v1_t view;
+  if (result != NULL && result->local_kind_name != NULL) {
+    return copy_c_string(result->local_kind_name);
+  }
+  if (fill_error_view(result, &view)) {
+    return copy_bytes(view.kind_name.data, view.kind_name.len);
+  }
+  if (result != NULL && result->status == OPENDAL_MBT_STATUS_ABI_MISMATCH) {
+    return copy_c_string("AbiMismatch");
+  }
+  return copy_c_string("Unexpected");
+}
+
+MOONBIT_FFI_EXPORT moonbit_bytes_t
+moonbit_opendal_result_error_message(moonbit_opendal_result_t *result) {
+  opendal_mbt_error_view_v1_t view;
+  if (result != NULL && result->local_message != NULL) {
+    return copy_c_string(result->local_message);
+  }
+  if (fill_error_view(result, &view)) {
+    return copy_bytes(view.message.data, view.message.len);
+  }
+  if (result != NULL && result->status == OPENDAL_MBT_STATUS_PANIC) {
+    return copy_c_string("native OpenDAL bridge panicked");
+  }
+  if (result != NULL && result->status == OPENDAL_MBT_STATUS_ABI_MISMATCH) {
+    return copy_c_string("native OpenDAL ABI mismatch");
+  }
+  return copy_c_string("native OpenDAL bridge failed without error detail");
+}
+
+MOONBIT_FFI_EXPORT moonbit_opendal_operator_t *
+moonbit_opendal_result_take_operator(moonbit_opendal_result_t *result) {
+  moonbit_opendal_operator_t *operator_ = operator_new_external();
+  if (result == NULL || result->status != OPENDAL_MBT_STATUS_OK ||
+      result->operator_ == NULL || result->info == NULL) {
+    if (result != NULL) {
+      result->status = OPENDAL_MBT_STATUS_ABI_MISMATCH;
+    }
+    return operator_;
+  }
+  operator_->operator_ = result->operator_;
+  operator_->info = result->info;
+  result->operator_ = NULL;
+  result->info = NULL;
+  return operator_;
+}
+
+MOONBIT_FFI_EXPORT moonbit_bytes_t
+moonbit_opendal_result_take_bytes(moonbit_opendal_result_t *result) {
+  opendal_mbt_api_v1_t api;
+  uint64_t len = 0;
+  uint64_t required = 0;
+  moonbit_bytes_t bytes;
+  opendal_mbt_status_t status;
+  if (result == NULL || result->status != OPENDAL_MBT_STATUS_OK ||
+      result->buffer == NULL) {
+    if (result != NULL) {
+      result->status = OPENDAL_MBT_STATUS_ABI_MISMATCH;
+    }
+    return moonbit_make_bytes(0, 0);
+  }
+  status = load_api(&api, false);
+  if (status != OPENDAL_MBT_STATUS_OK) {
+    result->status = status;
+    return moonbit_make_bytes(0, 0);
+  }
+  status = api.buffer_len(result->buffer, &len);
+  if (status != OPENDAL_MBT_STATUS_OK || len > (uint64_t)INT32_MAX) {
+    result->status = status == OPENDAL_MBT_STATUS_OK
+                         ? OPENDAL_MBT_STATUS_ABI_MISMATCH
+                         : status;
+    return moonbit_make_bytes(0, 0);
+  }
+  if (len == 0) {
+    status = api.buffer_copy(result->buffer, NULL, 0, &required);
+    if (status != OPENDAL_MBT_STATUS_OK || required != 0) {
+      result->status = OPENDAL_MBT_STATUS_ABI_MISMATCH;
+      return moonbit_make_bytes(0, 0);
+    }
+    bytes = moonbit_make_bytes(0, 0);
+  } else {
+    bytes = moonbit_make_bytes((int32_t)len, 0);
+    status = api.buffer_copy(result->buffer, bytes, len, &required);
+    if (status != OPENDAL_MBT_STATUS_OK || required != len) {
+      moonbit_decref(bytes);
+      result->status = status == OPENDAL_MBT_STATUS_OK
+                           ? OPENDAL_MBT_STATUS_ABI_MISMATCH
+                           : status;
+      return moonbit_make_bytes(0, 0);
+    }
+  }
+  api.buffer_free(result->buffer);
+  result->buffer = NULL;
+  return bytes;
+}
+
+MOONBIT_FFI_EXPORT moonbit_opendal_metadata_t *
+moonbit_opendal_result_take_metadata(moonbit_opendal_result_t *result) {
+  moonbit_opendal_metadata_t *metadata = metadata_new_external();
+  if (result == NULL || result->status != OPENDAL_MBT_STATUS_OK ||
+      result->metadata == NULL ||
+      !validate_metadata_snapshot(result->metadata)) {
+    if (result != NULL) {
+      result->status = OPENDAL_MBT_STATUS_ABI_MISMATCH;
+    }
+    return metadata;
+  }
+  metadata->metadata = result->metadata;
+  result->metadata = NULL;
+  return metadata;
+}
+
+MOONBIT_FFI_EXPORT void
+moonbit_opendal_result_release(moonbit_opendal_result_t *result) {
+  if (result != NULL) {
+    release_result_payload(result);
+  }
+}
+
+MOONBIT_FFI_EXPORT moonbit_bytes_t moonbit_opendal_operator_info_scheme(
+    moonbit_opendal_operator_t *operator_) {
+  opendal_mbt_operator_info_view_v1_t view;
+  return fill_operator_info_view(operator_, &view)
+             ? copy_bytes(view.scheme.data, view.scheme.len)
+             : moonbit_make_bytes(0, 0);
+}
+
+MOONBIT_FFI_EXPORT moonbit_bytes_t moonbit_opendal_operator_info_root(
+    moonbit_opendal_operator_t *operator_) {
+  opendal_mbt_operator_info_view_v1_t view;
+  return fill_operator_info_view(operator_, &view)
+             ? copy_bytes(view.root.data, view.root.len)
+             : moonbit_make_bytes(0, 0);
+}
+
+MOONBIT_FFI_EXPORT moonbit_bytes_t moonbit_opendal_operator_info_name(
+    moonbit_opendal_operator_t *operator_) {
+  opendal_mbt_operator_info_view_v1_t view;
+  return fill_operator_info_view(operator_, &view)
+             ? copy_bytes(view.name.data, view.name.len)
+             : moonbit_make_bytes(0, 0);
+}
+
+MOONBIT_FFI_EXPORT moonbit_opendal_capability_t *
+moonbit_opendal_operator_info_capability(
+    moonbit_opendal_operator_t *operator_) {
+  moonbit_opendal_capability_t *capability = capability_new_external();
+  opendal_mbt_operator_info_view_v1_t view;
+  if (fill_operator_info_view(operator_, &view)) {
+    memcpy(capability->words, view.capability.words, sizeof(capability->words));
+  }
+  return capability;
+}
+
+MOONBIT_FFI_EXPORT uint64_t moonbit_opendal_capability_word(
+    moonbit_opendal_capability_t *capability, int32_t index) {
+  if (capability == NULL || index < 0 || index >= 4) {
+    return 0;
+  }
+  return capability->words[index];
+}
+
+MOONBIT_FFI_EXPORT uint64_t moonbit_opendal_metadata_present_bits(
+    moonbit_opendal_metadata_t *metadata) {
+  opendal_mbt_metadata_view_v1_t view;
+  return fill_metadata_view(metadata, &view) ? view.present_bits : 0;
+}
+
+MOONBIT_FFI_EXPORT uint32_t moonbit_opendal_metadata_mode(
+    moonbit_opendal_metadata_t *metadata) {
+  opendal_mbt_metadata_view_v1_t view;
+  return fill_metadata_view(metadata, &view) ? view.mode
+                                             : OPENDAL_MBT_ENTRY_MODE_UNKNOWN;
+}
+
+MOONBIT_FFI_EXPORT uint64_t moonbit_opendal_metadata_content_length(
+    moonbit_opendal_metadata_t *metadata) {
+  opendal_mbt_metadata_view_v1_t view;
+  return fill_metadata_view(metadata, &view) ? view.content_length : 0;
+}
+
+MOONBIT_FFI_EXPORT int32_t moonbit_opendal_metadata_is_current(
+    moonbit_opendal_metadata_t *metadata) {
+  opendal_mbt_metadata_view_v1_t view;
+  return fill_metadata_view(metadata, &view) &&
+                 view.is_current == OPENDAL_MBT_TRUE
+             ? 1
+             : 0;
+}
+
+MOONBIT_FFI_EXPORT int32_t moonbit_opendal_metadata_is_deleted(
+    moonbit_opendal_metadata_t *metadata) {
+  opendal_mbt_metadata_view_v1_t view;
+  return fill_metadata_view(metadata, &view) &&
+                 view.is_deleted == OPENDAL_MBT_TRUE
+             ? 1
+             : 0;
+}
+
+MOONBIT_FFI_EXPORT int64_t moonbit_opendal_metadata_last_modified_seconds(
+    moonbit_opendal_metadata_t *metadata) {
+  opendal_mbt_metadata_view_v1_t view;
+  return fill_metadata_view(metadata, &view)
+             ? view.last_modified.unix_seconds
+             : 0;
+}
+
+MOONBIT_FFI_EXPORT uint32_t
+moonbit_opendal_metadata_last_modified_nanoseconds(
+    moonbit_opendal_metadata_t *metadata) {
+  opendal_mbt_metadata_view_v1_t view;
+  return fill_metadata_view(metadata, &view)
+             ? view.last_modified.nanoseconds
+             : 0;
+}
+
+#define DEFINE_METADATA_TEXT_GETTER(name, field)                              \
+  MOONBIT_FFI_EXPORT moonbit_bytes_t moonbit_opendal_metadata_##name(         \
+      moonbit_opendal_metadata_t *metadata) {                                 \
+    opendal_mbt_metadata_view_v1_t view;                                      \
+    return fill_metadata_view(metadata, &view)                                \
+               ? copy_bytes(view.field.data, view.field.len)                  \
+               : moonbit_make_bytes(0, 0);                                    \
+  }
+
+DEFINE_METADATA_TEXT_GETTER(cache_control, cache_control)
+DEFINE_METADATA_TEXT_GETTER(content_disposition, content_disposition)
+DEFINE_METADATA_TEXT_GETTER(content_encoding, content_encoding)
+DEFINE_METADATA_TEXT_GETTER(content_md5, content_md5)
+DEFINE_METADATA_TEXT_GETTER(content_type, content_type)
+DEFINE_METADATA_TEXT_GETTER(etag, etag)
+DEFINE_METADATA_TEXT_GETTER(version, version)
+
+MOONBIT_FFI_EXPORT void
+moonbit_opendal_metadata_release(moonbit_opendal_metadata_t *metadata) {
+  metadata_finalize(metadata);
+}

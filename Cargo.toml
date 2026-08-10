@@ -1,0 +1,6 @@
+[workspace]
+members = ["native/rust"]
+resolver = "3"
+
+[profile.release]
+panic = "unwind"

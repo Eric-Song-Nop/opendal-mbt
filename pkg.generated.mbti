@@ -29,7 +29,7 @@ pub fn Capability::can_list_recursive(Self) -> Bool
 pub fn Capability::can_list_with_limit(Self) -> Bool
 pub fn Capability::can_list_with_start_after(Self) -> Bool
 pub fn Capability::can_read(Self) -> Bool
-pub fn Capability::can_read_range(Self) -> Bool
+pub fn Capability::can_read_suffix(Self) -> Bool
 pub fn Capability::can_rename(Self) -> Bool
 pub fn Capability::can_stat(Self) -> Bool
 pub fn Capability::can_write(Self) -> Bool
@@ -59,6 +59,7 @@ pub struct ErrorInfo {
   message : String
   operation : Operation
   path : String?
+  destination_path : String?
 } derive(Eq, @debug.Debug)
 
 pub(all) enum ErrorKind {
@@ -120,6 +121,7 @@ pub(all) enum Operation {
   NewOperator
   Check
   Info
+  Exists
   CreateDir
   Read
   Write
@@ -152,8 +154,7 @@ pub struct OperatorInfo {
   scheme : String
   root : String
   name : String
-  native_capability : Capability
-  full_capability : Capability
+  capability : Capability
 }
 
 pub struct ReadOptions {
