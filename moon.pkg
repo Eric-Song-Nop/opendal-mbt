@@ -14,8 +14,14 @@ import {
 options(
   "native-stub": [ "opendal_stub.c" ],
   targets: {
-    "opendal_spec.mbt": [ "native" ],
-    "opendal_native.mbt": [ "native" ],
+    "opendal_types.mbt": [ "native" ],
+    "native_ffi.mbt": [ "native" ],
+    "operator.mbt": [ "native" ],
+    "listing.mbt": [ "native" ],
+    "metadata.mbt": [ "native" ],
+    "capability.mbt": [ "native" ],
+    "error.mbt": [ "native" ],
+    "error_wbtest.mbt": [ "native" ],
     "opendal_easy_test.mbt": [ "native" ],
     "opendal_mid_test.mbt": [ "native" ],
     "opendal_difficult_test.mbt": [ "native" ],

@@ -19,7 +19,7 @@ test "contract: whole-object workflow type-checks" {
 fn construction_contract(
   config : Map[String, String],
 ) -> @opendal.Operator raise @opendal.OpenDalError {
-  @opendal.Operator::new("memory", config)
+  @opendal.Operator::new("memory", config~)
 }
 
 ///|

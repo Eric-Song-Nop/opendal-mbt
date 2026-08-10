@@ -28,16 +28,16 @@ It is not a transliteration of either Rust or OCaml:
   does, would discard structured errors and duplicate MoonBit's typed
   `raise`/`catch` mechanism.
 - Rust's parallel `read`, `read_with`, and `read_options` forms become one
-  canonical method with an optional immutable options value.
+  canonical method whose implemented options are optional labelled arguments.
 
 ## Public type categories
 
 | Category | Types | Contract |
 |---|---|---|
-| Native resources | `Operator`, `Lister`, `Reader`, `Writer` | Opaque and impossible for callers to fabricate |
+| Native resources | `Operator`, `Lister`, and proposed `Reader`/`Writer` | Opaque and impossible for callers to fabricate |
 | Read-only snapshots | `Metadata`, `Entry`, `ErrorInfo`, `OperatorInfo`, `Timestamp` | Fields are readable but values are produced by the binding |
-| Algebraic values | `EntryMode`, `ErrorKind`, `ErrorStatus`, `Operation`, `ByteRange` | Public constructors and exhaustive pattern matching, with explicit unknown cases where upstream can grow |
-| Immutable inputs | `ReadOptions`, `ReaderOptions`, `WriteOptions`, `StatOptions`, `ListOptions`, `DeleteOptions` | Built with optional labelled arguments; native code copies retained strings |
+| Read-only algebraic outputs | `EntryMode`, `ErrorKind`, `ErrorStatus`, `Operation` | Callers can inspect and pattern-match values but cannot fabricate them |
+| Proposed algebraic input | `ByteRange` | Uses `pub(all)` when Reader lands so callers can construct labelled ranges |
 | Extensible query object | `Capability` | Opaque effective-capability snapshot with getter methods so new capabilities can be added compatibly |
 
 `Operator` is logically immutable and shareable. `Lister` and `Writer` are
@@ -48,7 +48,7 @@ stateful. `Reader` is a random-access reader without an implicit cursor.
 ```moonbit
 Operator::new(
   scheme : StringView,
-  config : Map[String, String],
+  config? : Map[String, String] = Map([]),
 ) -> Operator raise OpenDalError
 ```
 
@@ -68,13 +68,15 @@ Operator::new(
 All operational failures use a typed MoonBit error effect:
 
 ```moonbit
-pub(all) suberror OpenDalError {
+pub suberror OpenDalError {
   OpenDalError(ErrorInfo)
 }
 ```
 
 Callers normally propagate it naturally and can materialize it as a `Result`
-only when an error must become data.
+only when an error must become data. Convenience accessors expose `info`,
+`kind`, `status`, `is_temporary`, and `is_persistent`; the retry-status
+helpers do not imply that a non-idempotent operation is safe to retry.
 
 `ErrorInfo` contains:
 
@@ -129,14 +131,15 @@ The core synchronous methods are:
 
 ```moonbit
 op.exists(path) -> Bool raise OpenDalError
-op.stat(path, options?) -> Metadata raise OpenDalError
-op.read(path, options?) -> Bytes raise OpenDalError
-op.write(path, data, options?) -> Metadata raise OpenDalError
+op.stat(path, version?, if_match?, if_none_match?) -> Metadata raise OpenDalError
+op.read(path) -> Bytes raise OpenDalError
+op.write(path, data : BytesView) -> Metadata raise OpenDalError
 op.create_dir(path) -> Unit raise OpenDalError
-op.delete(path, options?) -> Unit raise OpenDalError
-op.copy(from, to) -> Metadata raise OpenDalError
-op.rename(from, to) -> Unit raise OpenDalError
+op.delete(path, version?, recursive?) -> Unit raise OpenDalError
 ```
+
+Copy, rename, read options, and write options are not published until their
+complete Phase 3 slices are available.
 
 Important guarantees and non-guarantees:
 
@@ -145,7 +148,7 @@ Important guarantees and non-guarantees:
 - The binding does not promise that every backend write is atomic or creates
   missing parent directories.
 - deleting a missing path succeeds.
-- recursive deletion is expressed through `DeleteOptions`, not a deprecated
+- recursive deletion is expressed by `recursive=true`, not a separate
   `remove_all` convenience operation.
 - `copy` and `rename` retain upstream semantics. The binding never implements
   rename as copy plus delete because that would change atomicity and failure
@@ -161,14 +164,14 @@ OpenDAL listing is prefix-based, not a traditional filesystem directory read:
 - deeper matching objects can be returned even when the parent is absent;
 - non-recursive listing means immediate children when the backend supports a
   delimiter;
-- `ListOptions.limit` is a backend page/request hint, not a guaranteed total
+- `limit` is a backend page/request hint, not a guaranteed total
   result bound.
 
 Two forms are exposed:
 
 ```moonbit
-op.list(path, options?) -> Array[Entry] raise OpenDalError
-op.lister(path, options?) -> Lister raise OpenDalError
+op.list(path, recursive?, limit?, start_after?) -> Array[Entry] raise OpenDalError
+op.open_lister(path, recursive?, limit?, start_after?) -> Lister raise OpenDalError
 lister.next() -> Entry? raise OpenDalError
 lister.close() -> Unit
 ```
@@ -181,14 +184,14 @@ The first API does not coerce `Lister` into `Iter[Entry]`. MoonBit's ordinary
 iterator step does not naturally carry checked I/O errors, and hiding errors in
 an iterator would weaken the contract.
 
-## Reader
+## Proposed Reader
 
-The public Reader follows OpenDAL's random-access Reader rather than the
+The Phase 3 Reader will follow OpenDAL's random-access Reader rather than the
 cursor-bearing C `StdReader` adapter:
 
 ```moonbit
-let reader = op.reader(path, options=ReaderOptions::new(...))
-let bytes = reader.read(Range(offset, length))
+let reader = op.open_reader(path, if_match="etag")
+let bytes = reader.read(Range(offset=4096UL, length=1024UL))
 reader.close()
 ```
 
@@ -196,9 +199,9 @@ reader.close()
 
 ```moonbit
 Full
-From(offset)
-Range(offset, length)
-Suffix(length)
+From(offset~ : UInt64)
+Range(offset~ : UInt64, length~ : UInt64)
+Suffix(length~ : UInt64)
 ```
 
 The second `Range` value is a length, not an end offset. A short byte result
@@ -216,30 +219,30 @@ The same checked-allocation rule applies to native output strings and
 materialized entry arrays. The wrapper releases any partially converted native
 snapshots before raising `BufferTooLarge`.
 
-## Writer
+## Proposed Writer
 
 ```moonbit
-let writer = op.writer(path, options=WriteOptions::new(...))
+let writer = op.open_writer(path, content_type="application/octet-stream")
 writer.write(chunk1)
 writer.write(chunk2)
-let metadata = writer.close()
+let metadata = writer.finish()
 ```
 
 - `write` writes an entire supplied chunk or raises.
 - any `write` failure is terminal and moves the Writer to `Failed`;
-- only a successful explicit `close` lets the binding report the Writer as
+- only a successful explicit `finish` lets the binding report the Writer as
   successfully completed;
-- the first close attempt is terminal: success produces `Closed`, failure
+- the first finish attempt is terminal: success produces `Closed`, failure
   produces `Failed`;
-- later `write` or `close` calls raise `ResourceClosed`;
-- dropping/finalizing an open or failed Writer never calls `close` and reports
+- later `write` or `finish` calls raise `ResourceClosed`;
+- dropping/finalizing an open or failed Writer never calls `finish` and reports
   neither success nor an error.
 
 No public `abort` is frozen yet. OpenDAL's blocking Writer does not expose a
-reliable abort operation. Before close succeeds, a write/close failure or drop
+reliable abort operation. Before finish succeeds, a write/finish failure or drop
 can therefore leave visible partial data or orphan multipart state depending
 on the backend. The binding promises neither rollback nor “no partial
-effects”; callers treat only a successful `close` as completed. An abort API
+effects”; callers treat only a successful `finish` as completed. An abort API
 can be added only if the Rust shim owns an async Writer and can define its
 synchronous failure behavior precisely.
 
@@ -259,21 +262,18 @@ List metadata can be partial and is tied to the listing operation's context.
   version preserves that `UInt64` behavior rather than inventing a false
   `Option` distinction that the public Rust API cannot supply.
 
-## Options and capabilities
+## Optional arguments and capabilities
 
-Each operation has one immutable options value and one canonical method. The
-binding does not expose native options handles, and native code copies every
-string or collection that survives a call.
-
-Omitting an options value selects the corresponding default value. Within an
-options constructor, omitted booleans are `false`, optional strings and limits
-are absent, an omitted read range means `Full`, and recursive deletion/listing
-is disabled.
+Each operation has one canonical method with optional labelled arguments. The
+binding does not expose Rust-shaped options records or native options handles.
+Native code copies every view or collection that survives a call. Omitted
+booleans default to `false`; omitted strings and limits are absent.
 
 Capability values are read-only snapshots. `OperatorInfo.capability` exposes
-the effective operations of the composed service stack. OpenDAL 0.58 removed
-the older native/full split from its public `OperatorInfo`; this binding does
-not reconstruct or fabricate it from raw internals.
+only operations and options callable through the current MoonBit facade, while
+preserving the backend's answer for those features. OpenDAL 0.58 removed the
+older native/full split from its public `OperatorInfo`; this binding does not
+reconstruct it from raw internals.
 
 Capability getters are introspection. They do not imply that the binding can
 prevalidate every backend request, and OpenDAL may ignore, degrade, or reject
@@ -281,10 +281,8 @@ unsupported options according to the operation and service. The MoonBit layer
 must not claim a stricter universal policy unless it implements and documents
 one.
 
-`can_read` covers ordinary full/from/offset-length reads. Suffix reads have a
-separate `can_read_suffix` accessor because OpenDAL 0.58.1 exposes that
-capability independently; the binding does not invent a broader
-`can_read_range` flag that upstream cannot supply.
+Reader, Writer, copy, rename, suffix-read, and append capability accessors are
+added only with their callable MoonBit operations.
 
 ## Retry policy
 

@@ -8,9 +8,15 @@ import {
 // Values
 
 // Errors
-pub(all) suberror OpenDalError {
+pub suberror OpenDalError {
   OpenDalError(ErrorInfo)
 } derive(Eq, @debug.Debug)
+pub fn OpenDalError::info(Self) -> ErrorInfo
+pub fn OpenDalError::is_persistent(Self) -> Bool
+pub fn OpenDalError::is_temporary(Self) -> Bool
+pub fn OpenDalError::kind(Self) -> ErrorKind
+pub fn OpenDalError::status(Self) -> ErrorStatus
+pub impl Show for OpenDalError
 
 // Types and methods
 pub type Capability
@@ -24,19 +30,13 @@ pub fn Capability::can_read(Self) -> Bool
 pub fn Capability::can_stat(Self) -> Bool
 pub fn Capability::can_write(Self) -> Bool
 
-pub struct DeleteOptions {
-  version : String?
-  recursive : Bool
-}
-pub fn DeleteOptions::new(version? : String, recursive? : Bool) -> Self
-
 pub struct Entry {
   path : String
   name : String
   metadata : Metadata
 } derive(Eq, @debug.Debug)
 
-pub(all) enum EntryMode {
+pub enum EntryMode {
   File
   Directory
   Unknown
@@ -51,7 +51,7 @@ pub struct ErrorInfo {
   destination_path : String?
 } derive(Eq, @debug.Debug)
 
-pub(all) enum ErrorKind {
+pub enum ErrorKind {
   Unexpected
   Unsupported
   ConfigInvalid
@@ -71,19 +71,12 @@ pub(all) enum ErrorKind {
   UnknownKind(Int, String)
 } derive(Eq, @debug.Debug)
 
-pub(all) enum ErrorStatus {
+pub enum ErrorStatus {
   Permanent
   Temporary
   Persistent
   UnknownStatus(Int)
 } derive(Eq, @debug.Debug)
-
-pub struct ListOptions {
-  recursive : Bool
-  limit : UInt64?
-  start_after : String?
-}
-pub fn ListOptions::new(recursive? : Bool, limit? : UInt64, start_after? : String) -> Self
 
 pub struct Lister {
   // private fields
@@ -108,34 +101,30 @@ pub struct Metadata {
 pub fn Metadata::is_dir(Self) -> Bool
 pub fn Metadata::is_file(Self) -> Bool
 
-pub(all) enum Operation {
+pub enum Operation {
   NewOperator
   Check
-  Info
   Exists
   CreateDir
   Read
   Write
-  Copy
-  Rename
   Stat
   Delete
   List
-  UnknownOperation(String)
 } derive(Eq, @debug.Debug)
 
 pub type Operator
 pub fn Operator::check(Self) -> Unit raise OpenDalError
 pub fn Operator::create_dir(Self, StringView) -> Unit raise OpenDalError
-pub fn Operator::delete(Self, StringView, options? : DeleteOptions) -> Unit raise OpenDalError
+pub fn Operator::delete(Self, StringView, version? : StringView, recursive? : Bool) -> Unit raise OpenDalError
 pub fn Operator::exists(Self, StringView) -> Bool raise OpenDalError
 pub fn Operator::info(Self) -> OperatorInfo
-pub fn Operator::list(Self, StringView, options? : ListOptions) -> Array[Entry] raise OpenDalError
-pub fn Operator::lister(Self, StringView, options? : ListOptions) -> Lister raise OpenDalError
-pub fn Operator::new(StringView, Map[String, String]) -> Self raise OpenDalError
+pub fn Operator::list(Self, StringView, recursive? : Bool, limit? : UInt64, start_after? : StringView) -> Array[Entry] raise OpenDalError
+pub fn Operator::new(StringView, config? : Map[String, String]) -> Self raise OpenDalError
+pub fn Operator::open_lister(Self, StringView, recursive? : Bool, limit? : UInt64, start_after? : StringView) -> Lister raise OpenDalError
 pub fn Operator::read(Self, StringView) -> Bytes raise OpenDalError
-pub fn Operator::stat(Self, StringView, options? : StatOptions) -> Metadata raise OpenDalError
-pub fn Operator::write(Self, StringView, Bytes) -> Metadata raise OpenDalError
+pub fn Operator::stat(Self, StringView, version? : StringView, if_match? : StringView, if_none_match? : StringView) -> Metadata raise OpenDalError
+pub fn Operator::write(Self, StringView, BytesView) -> Metadata raise OpenDalError
 
 pub struct OperatorInfo {
   scheme : String
@@ -143,13 +132,6 @@ pub struct OperatorInfo {
   name : String
   capability : Capability
 }
-
-pub struct StatOptions {
-  version : String?
-  if_match : String?
-  if_none_match : String?
-}
-pub fn StatOptions::new(version? : String, if_match? : String, if_none_match? : String) -> Self
 
 pub struct Timestamp {
   unix_seconds : Int64

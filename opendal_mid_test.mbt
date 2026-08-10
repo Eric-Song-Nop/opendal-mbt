@@ -1,11 +1,11 @@
 ///|
 fn listing_contract(op : @opendal.Operator) -> Unit raise @opendal.OpenDalError {
-  let options = @opendal.ListOptions::new(
+  let lister = op.open_lister(
+    "prefix/",
     recursive=true,
     limit=128UL,
     start_after="prefix/old",
   )
-  let lister = op.lister("prefix/", options~)
   let next : @opendal.Entry? = lister.next()
   ignore(next)
   lister.close()
@@ -20,8 +20,7 @@ test "contract: fallible streaming listing type-checks" {
 fn recursive_delete_contract(
   op : @opendal.Operator,
 ) -> Unit raise @opendal.OpenDalError {
-  let options = @opendal.DeleteOptions::new(recursive=true)
-  op.delete("prefix/", options~)
+  op.delete("prefix/", recursive=true)
 }
 
 ///|

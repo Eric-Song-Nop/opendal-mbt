@@ -1,6 +1,6 @@
 ///|
 /// Identifies whether an entry is a file, directory, or unknown object kind.
-pub(all) enum EntryMode {
+pub enum EntryMode {
   File
   Directory
   Unknown
@@ -8,7 +8,7 @@ pub(all) enum EntryMode {
 
 ///|
 /// OpenDAL's retry classification for an operation failure.
-pub(all) enum ErrorStatus {
+pub enum ErrorStatus {
   Permanent
   Temporary
   Persistent
@@ -17,7 +17,7 @@ pub(all) enum ErrorStatus {
 
 ///|
 /// Stable error categories exposed by the MoonBit binding.
-pub(all) enum ErrorKind {
+pub enum ErrorKind {
   Unexpected
   Unsupported
   ConfigInvalid
@@ -39,20 +39,16 @@ pub(all) enum ErrorKind {
 
 ///|
 /// The operation being attempted when an error occurred.
-pub(all) enum Operation {
+pub enum Operation {
   NewOperator
   Check
-  Info
   Exists
   CreateDir
   Read
   Write
-  Copy
-  Rename
   Stat
   Delete
   List
-  UnknownOperation(String)
 } derive(Eq, @debug.Debug)
 
 ///|
@@ -77,7 +73,7 @@ pub struct ErrorInfo {
 
 ///|
 /// The checked error effect raised by all fallible OpenDAL operations.
-pub(all) suberror OpenDalError {
+pub suberror OpenDalError {
   OpenDalError(ErrorInfo)
 } derive(Eq, @debug.Debug)
 
@@ -113,27 +109,4 @@ pub struct OperatorInfo {
   root : String
   name : String
   capability : Capability
-}
-
-///|
-/// Immutable options for a metadata request.
-pub struct StatOptions {
-  version : String?
-  if_match : String?
-  if_none_match : String?
-}
-
-///|
-/// Immutable options for a prefix listing.
-pub struct ListOptions {
-  recursive : Bool
-  limit : UInt64?
-  start_after : String?
-}
-
-///|
-/// Immutable options for deletion.
-pub struct DeleteOptions {
-  version : String?
-  recursive : Bool
 }
