@@ -13,12 +13,38 @@ ABI_STATIC_ASSERT(sizeof(opendal_mbt_status_t) == 4,
                   "transport status must be 32-bit");
 ABI_STATIC_ASSERT(sizeof(opendal_mbt_bool_t) == 4,
                   "ABI boolean must be 32-bit");
+ABI_STATIC_ASSERT(sizeof(opendal_mbt_bytes_view_v1_t) == 16,
+                  "byte view layout drifted");
+ABI_STATIC_ASSERT(sizeof(opendal_mbt_kv_v1_t) == 32,
+                  "key/value layout drifted");
 ABI_STATIC_ASSERT(sizeof(opendal_mbt_byte_range_v1_t) == 32,
                   "byte range layout drifted");
+ABI_STATIC_ASSERT(sizeof(opendal_mbt_read_options_v1_t) == 96,
+                  "read options layout drifted");
+ABI_STATIC_ASSERT(sizeof(opendal_mbt_reader_options_v1_t) == 64,
+                  "reader options layout drifted");
+ABI_STATIC_ASSERT(sizeof(opendal_mbt_write_options_v1_t) == 120,
+                  "write options layout drifted");
+ABI_STATIC_ASSERT(sizeof(opendal_mbt_stat_options_v1_t) == 64,
+                  "stat options layout drifted");
+ABI_STATIC_ASSERT(sizeof(opendal_mbt_list_options_v1_t) == 48,
+                  "list options layout drifted");
+ABI_STATIC_ASSERT(sizeof(opendal_mbt_delete_options_v1_t) == 40,
+                  "delete options layout drifted");
 ABI_STATIC_ASSERT(sizeof(opendal_mbt_timestamp_v1_t) == 16,
                   "timestamp layout drifted");
 ABI_STATIC_ASSERT(sizeof(opendal_mbt_capability_v1_t) == 32,
                   "capability layout drifted");
+ABI_STATIC_ASSERT(sizeof(opendal_mbt_metadata_view_v1_t) == 168,
+                  "metadata view layout drifted");
+ABI_STATIC_ASSERT(sizeof(opendal_mbt_entry_view_v1_t) == 48,
+                  "entry view layout drifted");
+ABI_STATIC_ASSERT(sizeof(opendal_mbt_operator_info_view_v1_t) == 96,
+                  "operator info view layout drifted");
+ABI_STATIC_ASSERT(sizeof(opendal_mbt_error_view_v1_t) == 48,
+                  "error view layout drifted");
+ABI_STATIC_ASSERT(sizeof(opendal_mbt_library_info_view_v1_t) == 64,
+                  "library info view layout drifted");
 ABI_STATIC_ASSERT(offsetof(opendal_mbt_api_v1_t, struct_size) == 0,
                   "bootstrap size must be first");
 ABI_STATIC_ASSERT(offsetof(opendal_mbt_api_v1_t, requested_major) == 4,

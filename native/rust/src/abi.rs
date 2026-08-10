@@ -498,8 +498,10 @@ const _: () = {
     assert!(core::mem::size_of::<KvV1>() == 32);
     assert!(core::mem::size_of::<ByteRangeV1>() == 32);
     assert!(core::mem::size_of::<ReadOptionsV1>() == 96);
+    assert!(core::mem::size_of::<ReaderOptionsV1>() == 64);
     assert!(core::mem::size_of::<WriteOptionsV1>() == 120);
     assert!(core::mem::size_of::<StatOptionsV1>() == 64);
+    assert!(core::mem::size_of::<ListOptionsV1>() == 48);
     assert!(core::mem::size_of::<DeleteOptionsV1>() == 40);
     assert!(core::mem::size_of::<MetadataViewV1>() == 168);
     assert!(core::mem::size_of::<EntryViewV1>() == 48);

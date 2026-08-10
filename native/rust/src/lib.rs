@@ -1488,6 +1488,7 @@ pub unsafe extern "C" fn opendal_mbt_get_api(inout_api: *mut c_void) -> Status {
 mod tests {
     use super::*;
     use std::mem::MaybeUninit;
+    use std::ptr::NonNull;
 
     fn bytes(value: &[u8]) -> BytesViewV1 {
         BytesViewV1 {
@@ -1511,6 +1512,50 @@ mod tests {
             assert_eq!(opendal_mbt_get_api(pointer.cast()), STATUS_OK);
             api.assume_init()
         }
+    }
+
+    fn memory_operator(api: &ApiV1) -> (*mut OperatorV1, *mut OperatorInfoV1) {
+        let mut operator = ptr::null_mut();
+        let mut info = ptr::null_mut();
+        let mut error = ptr::null_mut();
+        let scheme = bytes(b"memory");
+        // SAFETY: all pointers and views obey the C ABI contract.
+        let status = unsafe {
+            api.operator_new.expect("BASE constructor is installed")(
+                &scheme,
+                ptr::null(),
+                0,
+                &mut operator,
+                &mut info,
+                &mut error,
+            )
+        };
+        assert_eq!(status, STATUS_OK);
+        assert!(!operator.is_null());
+        assert!(!info.is_null());
+        assert!(error.is_null());
+        (operator, info)
+    }
+
+    fn take_error_kind(api: &ApiV1, error: *mut ErrorV1) -> u32 {
+        assert!(!error.is_null());
+        let mut view = ErrorViewV1 {
+            struct_size: size_of::<ErrorViewV1>() as u32,
+            struct_version: STRUCT_VERSION,
+            kind: 0,
+            status: 0,
+            kind_name: bytes(b""),
+            message: bytes(b""),
+        };
+        // SAFETY: error is an owned ABI handle and view is complete writable storage.
+        unsafe {
+            assert_eq!(
+                api.error_view.expect("BASE error view is installed")(error, &mut view),
+                STATUS_OK
+            );
+            api.error_free.expect("BASE error free is installed")(error);
+        }
+        view.kind
     }
 
     #[test]
@@ -1543,6 +1588,112 @@ mod tests {
         assert_eq!(status, STATUS_OK);
         assert!(storage.0[field_start..cut].iter().all(|byte| *byte == 0));
         assert!(storage.0[cut..].iter().all(|byte| *byte == 0xA5));
+    }
+
+    #[test]
+    fn bootstrap_respects_every_table_boundary_and_long_caller_tail() {
+        #[repr(C, align(16))]
+        struct Storage([u8; size_of::<ApiV1>() + 16]);
+
+        let staged = stage_api().expect("the test target can stage the v1 API");
+        macro_rules! field_bounds {
+            ($($field:ident),+ $(,)?) => {
+                [$(
+                    (
+                        offset_of!(ApiV1, $field),
+                        size_of_val(&staged.$field),
+                    ),
+                )+]
+            };
+        }
+        let fields = field_bounds!(
+            library_struct_size,
+            library_minor,
+            library_patch,
+            reserved0,
+            feature_bits,
+            max_output_bytes,
+            library_info,
+            error_view,
+            error_free,
+            buffer_len,
+            buffer_copy,
+            buffer_free,
+            metadata_view,
+            metadata_free,
+            entry_view,
+            entry_metadata_view,
+            entry_free,
+            operator_info_view,
+            operator_info_free,
+            operator_new,
+            operator_free,
+            operator_check,
+            operator_exists,
+            operator_stat,
+            operator_read,
+            operator_write,
+            operator_create_dir,
+            operator_delete,
+            operator_copy,
+            operator_rename,
+            operator_lister,
+            lister_next,
+            lister_close,
+            lister_free,
+            operator_reader,
+            reader_read,
+            reader_close,
+            reader_free,
+            operator_writer,
+            writer_write,
+            writer_close,
+            writer_free,
+        );
+
+        for caller_size in API_PREFIX_SIZE..=size_of::<ApiV1>() + 16 {
+            let mut storage = Storage([0xA5; size_of::<ApiV1>() + 16]);
+            storage.0[..4].copy_from_slice(
+                &u32::try_from(caller_size)
+                    .expect("test caller size fits u32")
+                    .to_ne_bytes(),
+            );
+            storage.0[4..8].copy_from_slice(&ABI_MAJOR.to_ne_bytes());
+
+            // SAFETY: aligned storage covers the caller-declared size.
+            assert_eq!(
+                unsafe { opendal_mbt_get_api(storage.0.as_mut_ptr().cast()) },
+                STATUS_OK,
+                "caller_size={caller_size}",
+            );
+
+            let installed = caller_size.min(size_of::<ApiV1>());
+            assert!(
+                storage.0[installed..].iter().all(|byte| *byte == 0xA5),
+                "caller tail changed at caller_size={caller_size}",
+            );
+            for (start, size) in fields {
+                let end = start + size;
+                if start < installed && installed < end {
+                    assert!(
+                        storage.0[start..installed].iter().all(|byte| *byte == 0),
+                        "partially covered field changed at caller_size={caller_size}",
+                    );
+                }
+            }
+        }
+
+        let mut short = Storage([0xA5; size_of::<ApiV1>() + 16]);
+        let caller_size = API_PREFIX_SIZE - 1;
+        short.0[..4].copy_from_slice(&(caller_size as u32).to_ne_bytes());
+        short.0[4..8].copy_from_slice(&ABI_MAJOR.to_ne_bytes());
+        let preserved = short.0[API_INPUT_SIZE..].to_vec();
+        // SAFETY: the bootstrap input prefix itself is readable and aligned.
+        assert_eq!(
+            unsafe { opendal_mbt_get_api(short.0.as_mut_ptr().cast()) },
+            STATUS_ABI_MISMATCH,
+        );
+        assert_eq!(&short.0[API_INPUT_SIZE..], preserved);
     }
 
     #[test]
@@ -1691,6 +1842,283 @@ mod tests {
             (api.operator_info_free.expect("info free installed"))(ptr::null_mut());
             (api.operator_free.expect("operator free installed"))(operator);
             (api.operator_free.expect("operator free installed"))(ptr::null_mut());
+        }
+    }
+
+    #[test]
+    fn base_inputs_reject_duplicate_config_and_preserve_atomic_outputs() {
+        let api = api();
+        let new = api.operator_new.expect("BASE constructor is installed");
+        let root = bytes(b"root");
+        let root_upper = bytes(b"ROOT");
+        let value = bytes(b"/");
+        let config = [
+            KvV1 { key: root, value },
+            KvV1 {
+                key: root_upper,
+                value,
+            },
+        ];
+        let scheme = bytes(b"memory");
+        let mut operator = NonNull::<OperatorV1>::dangling().as_ptr();
+        let mut info = NonNull::<OperatorInfoV1>::dangling().as_ptr();
+        let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+
+        // SAFETY: all input regions and output slots are valid for the call.
+        let status = unsafe {
+            new(
+                &scheme,
+                config.as_ptr(),
+                config.len() as u64,
+                &mut operator,
+                &mut info,
+                &mut error,
+            )
+        };
+        assert_eq!(status, STATUS_ERROR);
+        assert!(operator.is_null());
+        assert!(info.is_null());
+        assert_eq!(take_error_kind(&api, error), ERROR_INVALID_ARGUMENT);
+
+        operator = NonNull::<OperatorV1>::dangling().as_ptr();
+        info = NonNull::<OperatorInfoV1>::dangling().as_ptr();
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: required outputs are writable; NULL with a nonzero config length
+        // is deliberately malformed and must fail before backend construction.
+        let status = unsafe {
+            new(
+                &scheme,
+                ptr::null(),
+                1,
+                &mut operator,
+                &mut info,
+                &mut error,
+            )
+        };
+        assert_eq!(status, STATUS_ABI_MISMATCH);
+        assert!(operator.is_null());
+        assert!(info.is_null());
+        assert!(error.is_null());
+    }
+
+    #[test]
+    fn whole_object_options_fail_atomically_at_the_abi_boundary() {
+        let api = api();
+        let (operator, info) = memory_operator(&api);
+        let read = api.operator_read.expect("WHOLE_OBJECT read is installed");
+        let write = api.operator_write.expect("WHOLE_OBJECT write is installed");
+        let path = bytes(b"options-boundary");
+        let absent = bytes(b"");
+        let mut read_options = ReadOptionsV1 {
+            struct_size: size_of::<ReadOptionsV1>() as u32,
+            struct_version: STRUCT_VERSION,
+            present_bits: 1 << 63,
+            range: ByteRangeV1 {
+                struct_size: size_of::<ByteRangeV1>() as u32,
+                struct_version: STRUCT_VERSION,
+                kind: RANGE_FULL,
+                reserved0: 0,
+                offset: 0,
+                length: 0,
+            },
+            version: absent,
+            if_match: absent,
+            if_none_match: absent,
+        };
+        let mut buffer = NonNull::<BufferV1>::dangling().as_ptr();
+        let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+
+        // SAFETY: outputs are writable and malformed options are fully readable.
+        assert_eq!(
+            unsafe {
+                read(
+                    operator,
+                    &path,
+                    &read_options,
+                    MAX_OUTPUT_BYTES,
+                    &mut buffer,
+                    &mut error,
+                )
+            },
+            STATUS_ABI_MISMATCH,
+        );
+        assert!(buffer.is_null());
+        assert!(error.is_null());
+
+        read_options.present_bits = 0;
+        read_options.version = bytes(b"noncanonical-absent");
+        buffer = NonNull::<BufferV1>::dangling().as_ptr();
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: same valid carriers, with a deliberately noncanonical absent value.
+        assert_eq!(
+            unsafe {
+                read(
+                    operator,
+                    &path,
+                    &read_options,
+                    MAX_OUTPUT_BYTES,
+                    &mut buffer,
+                    &mut error,
+                )
+            },
+            STATUS_ABI_MISMATCH,
+        );
+        assert!(buffer.is_null());
+        assert!(error.is_null());
+
+        let mut write_options = WriteOptionsV1 {
+            struct_size: size_of::<WriteOptionsV1>() as u32,
+            struct_version: STRUCT_VERSION,
+            present_bits: 0,
+            flags: 1 << 63,
+            content_type: absent,
+            content_disposition: absent,
+            content_encoding: absent,
+            cache_control: absent,
+            if_match: absent,
+            if_none_match: absent,
+        };
+        let payload = bytes(b"must-not-be-written");
+        let mut metadata = NonNull::<MetadataV1>::dangling().as_ptr();
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: outputs and carriers are valid; the unknown flag is intentional.
+        assert_eq!(
+            unsafe {
+                write(
+                    operator,
+                    &path,
+                    &payload,
+                    &write_options,
+                    &mut metadata,
+                    &mut error,
+                )
+            },
+            STATUS_ABI_MISMATCH,
+        );
+        assert!(metadata.is_null());
+        assert!(error.is_null());
+
+        write_options.flags = 0;
+        write_options.struct_size = (size_of::<WriteOptionsV1>() - 1) as u32;
+        metadata = NonNull::<MetadataV1>::dangling().as_ptr();
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the readable allocation is complete, but its declared prefix is short.
+        assert_eq!(
+            unsafe {
+                write(
+                    operator,
+                    &path,
+                    &payload,
+                    &write_options,
+                    &mut metadata,
+                    &mut error,
+                )
+            },
+            STATUS_ABI_MISMATCH,
+        );
+        assert!(metadata.is_null());
+        assert!(error.is_null());
+
+        let invalid_utf8_bytes = [0xFF];
+        let invalid_utf8 = bytes(&invalid_utf8_bytes);
+        buffer = NonNull::<BufferV1>::dangling().as_ptr();
+        error = ptr::null_mut();
+        // SAFETY: the byte view is valid but intentionally not UTF-8.
+        assert_eq!(
+            unsafe {
+                read(
+                    operator,
+                    &invalid_utf8,
+                    ptr::null(),
+                    MAX_OUTPUT_BYTES,
+                    &mut buffer,
+                    &mut error,
+                )
+            },
+            STATUS_ERROR,
+        );
+        assert!(buffer.is_null());
+        assert_eq!(take_error_kind(&api, error), ERROR_INVALID_ARGUMENT);
+
+        // SAFETY: both handles remain uniquely owned by this test.
+        unsafe {
+            api.operator_info_free.expect("BASE info free is installed")(info);
+            api.operator_free.expect("BASE operator free is installed")(operator);
+        }
+    }
+
+    #[test]
+    fn buffer_copy_is_atomic_for_sizing_errors_and_success_tail() {
+        let api = api();
+        let copy = api.buffer_copy.expect("BASE buffer copy is installed");
+        let free = api.buffer_free.expect("BASE buffer free is installed");
+        let buffer = Box::into_raw(Box::new(BufferV1 {
+            bytes: b"abcdef".to_vec(),
+        }));
+        let mut destination = [0xA5; 8];
+        let mut required = u64::MAX;
+
+        // SAFETY: buffer and output regions are live and non-overlapping.
+        assert_eq!(
+            unsafe { copy(buffer, destination.as_mut_ptr(), 5, &mut required) },
+            STATUS_BUFFER_TOO_SMALL,
+        );
+        assert_eq!(required, 6);
+        assert_eq!(destination, [0xA5; 8]);
+
+        required = u64::MAX;
+        // SAFETY: NULL with nonzero capacity is intentionally malformed.
+        assert_eq!(
+            unsafe { copy(buffer, ptr::null_mut(), 1, &mut required) },
+            STATUS_ABI_MISMATCH,
+        );
+        assert_eq!(required, 0);
+        assert_eq!(destination, [0xA5; 8]);
+
+        required = u64::MAX;
+        // SAFETY: the NULL handle is deliberately invalid; destination is valid.
+        assert_eq!(
+            unsafe {
+                copy(
+                    ptr::null(),
+                    destination.as_mut_ptr(),
+                    destination.len() as u64,
+                    &mut required,
+                )
+            },
+            STATUS_ABI_MISMATCH,
+        );
+        assert_eq!(required, 0);
+        assert_eq!(destination, [0xA5; 8]);
+
+        // SAFETY: capacity covers the destination and the immutable buffer.
+        assert_eq!(
+            unsafe {
+                copy(
+                    buffer,
+                    destination.as_mut_ptr(),
+                    destination.len() as u64,
+                    &mut required,
+                )
+            },
+            STATUS_OK,
+        );
+        assert_eq!(required, 6);
+        assert_eq!(&destination[..6], b"abcdef");
+        assert_eq!(&destination[6..], &[0xA5; 2]);
+
+        let empty = Box::into_raw(Box::new(BufferV1 { bytes: Vec::new() }));
+        required = u64::MAX;
+        // SAFETY: NULL+zero is the documented sizing query for an empty buffer.
+        assert_eq!(
+            unsafe { copy(empty, ptr::null_mut(), 0, &mut required) },
+            STATUS_OK,
+        );
+        assert_eq!(required, 0);
+        // SAFETY: both handles are still uniquely owned by this test.
+        unsafe {
+            free(empty);
+            free(buffer);
         }
     }
 
