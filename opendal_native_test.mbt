@@ -16,9 +16,9 @@ test "native memory: binary whole-object roundtrip" {
 test "native memory: missing path preserves typed context" {
   let operator = @opendal.Operator::new("memory", Map([]))
   try operator.read("missing.bin") catch {
-    @opendal.OpenDalError(info) => {
-      assert_eq(info.kind, @opendal.NotFound)
-      assert_eq(info.operation, @opendal.Read)
+    OpenDalError(info) => {
+      assert_eq(info.kind, NotFound)
+      assert_eq(info.operation, Read)
       assert_eq(info.path, Some("missing.bin"))
       assert_eq(info.destination_path, None)
     }
@@ -40,11 +40,11 @@ test "native memory: empty content and Unicode path roundtrip" {
 ///|
 test "native memory: deferred read options fail before the ABI call" {
   let operator = @opendal.Operator::new("memory", Map([]))
-  let options = @opendal.ReadOptions::new(range=@opendal.From(1UL))
+  let options = @opendal.ReadOptions::new(range=From(1UL))
   try operator.read("missing.bin", options~) catch {
-    @opendal.OpenDalError(info) => {
-      assert_eq(info.kind, @opendal.Unsupported)
-      assert_eq(info.operation, @opendal.Read)
+    OpenDalError(info) => {
+      assert_eq(info.kind, Unsupported)
+      assert_eq(info.operation, Read)
       assert_eq(info.path, Some("missing.bin"))
     }
   } noraise {
