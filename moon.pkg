@@ -1,0 +1,6 @@
+// The public contract is target-independent. Native FFI files will be gated
+// explicitly when the implementation phase starts.
+
+import {
+  "moonbitlang/core/debug",
+}
