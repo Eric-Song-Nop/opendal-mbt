@@ -31,10 +31,6 @@ jobs:
           moon version --all
       - name: Check formatting, lints, MoonBit, and C ABI
         run: make check
-      - name: Verify generated public interface
-        run: |
-          moon info --target native --frozen
-          git diff --exit-code -- pkg.generated.mbti
 
   native:
     name: ${{ matrix.os }} / ${{ matrix.profile }}
@@ -58,6 +54,9 @@ jobs:
           echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
       - name: Run Rust and MoonBit tests
         run: make test-profile RUST_PROFILE=${{ matrix.profile }}
+      - name: Test the packaged downstream consumer
+        if: matrix.os == 'ubuntu-24.04' && matrix.profile == 'debug'
+        run: make packaged-consumer RUST_PROFILE=debug
       - name: Run the C consumer
         if: matrix.profile == 'release'
         run: make c-example RUST_PROFILE=release

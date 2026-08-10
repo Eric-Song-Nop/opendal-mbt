@@ -18,7 +18,8 @@ MOON_LIBRARY_PATH := $(NATIVE_LIB_DIR)$(if $(LIBRARY_PATH),:$(LIBRARY_PATH))
 MOON_TEST_FLAGS := --target native --frozen --warn-list '$(MOON_WARN_LIST)' --deny-warn
 
 .PHONY: native rust-test moon-check moon-test coverage abi-smoke c-example \
-	check test-profile asan
+	api-contract interface-contract package-contract packaged-consumer check \
+	test-profile asan
 
 native:
 	cargo build --workspace --locked $(CARGO_PROFILE_FLAG)
@@ -35,6 +36,7 @@ moon-test: native
 		moon test $(MOON_TEST_FLAGS) $(MOON_PROFILE_FLAG)
 
 coverage: native
+	moon clean
 	LIBRARY_PATH="$(MOON_LIBRARY_PATH)" \
 		moon test $(MOON_TEST_FLAGS) --enable-coverage
 	LIBRARY_PATH="$(MOON_LIBRARY_PATH)" moon coverage analyze
@@ -49,7 +51,20 @@ abi-smoke:
 c-example:
 	./scripts/run-c-example.sh $(RUST_PROFILE)
 
-check:
+api-contract:
+	sh scripts/check-public-api.sh
+
+interface-contract:
+	moon info --target native --frozen operator.mbt
+	git diff --exit-code -- pkg.generated.mbti
+
+package-contract:
+	sh scripts/check-package.sh
+
+packaged-consumer:
+	sh scripts/check-packaged-consumer.sh $(RUST_PROFILE)
+
+check: api-contract interface-contract package-contract
 	cargo fmt --all -- --check
 	cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 	$(MAKE) moon-check
@@ -61,4 +76,5 @@ asan:
 	$(MAKE) native RUST_PROFILE=debug
 	LIBRARY_PATH="$(CURDIR)/target/debug$(if $(LIBRARY_PATH),:$(LIBRARY_PATH))" \
 		python3 .agents/skills/moonbit-c-binding/scripts/run-asan.py \
-			--repo-root . --pkg moon.pkg
+			--repo-root . --pkg moon.pkg \
+			--pkg integration/consumer/moon.pkg

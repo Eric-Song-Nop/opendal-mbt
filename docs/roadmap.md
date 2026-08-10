@@ -124,7 +124,7 @@ errors, panics, and poisoned synchronization state.
 
 ### Phase 2.5: MoonBit facade stabilization
 
-Status: in progress.
+Status: complete.
 
 - publish implemented operations only;
 - use optional labelled arguments instead of public options records;
@@ -132,6 +132,13 @@ Status: in progress.
 - name managed resource constructors `open_*`;
 - expose structured error accessors and checked examples;
 - verify the public contract from a real downstream consumer.
+
+The generated interface now contains only implemented operations, all native
+externs are isolated behind the safe facade, and an independent workspace
+module executes the published API in debug and release builds. README examples
+are compiler-checked and the publish manifest excludes development-only
+workspace fixtures. A separate debug smoke test unpacks the source package,
+builds its native archive in isolation, and runs the downstream consumer.
 
 ### Phase 3: Streaming and operation options
 
