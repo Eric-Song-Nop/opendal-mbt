@@ -1,0 +1,208 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "eric-song-nop/opendal"
+
+import {
+  "moonbitlang/core/debug",
+}
+
+// Values
+
+// Errors
+pub(all) suberror OpenDalError {
+  OpenDalError(ErrorInfo)
+} derive(Eq, @debug.Debug)
+
+// Types and methods
+pub(all) enum ByteRange {
+  Full
+  From(UInt64)
+  Range(UInt64, UInt64)
+  Suffix(UInt64)
+} derive(Eq, @debug.Debug)
+
+pub type Capability
+pub fn Capability::can_copy(Self) -> Bool
+pub fn Capability::can_create_dir(Self) -> Bool
+pub fn Capability::can_delete(Self) -> Bool
+pub fn Capability::can_list(Self) -> Bool
+pub fn Capability::can_list_recursive(Self) -> Bool
+pub fn Capability::can_list_with_limit(Self) -> Bool
+pub fn Capability::can_list_with_start_after(Self) -> Bool
+pub fn Capability::can_read(Self) -> Bool
+pub fn Capability::can_read_range(Self) -> Bool
+pub fn Capability::can_rename(Self) -> Bool
+pub fn Capability::can_stat(Self) -> Bool
+pub fn Capability::can_write(Self) -> Bool
+pub fn Capability::can_write_append(Self) -> Bool
+
+pub struct DeleteOptions {
+  version : String?
+  recursive : Bool
+}
+pub fn DeleteOptions::new(version? : String, recursive? : Bool) -> Self
+
+pub struct Entry {
+  path : String
+  name : String
+  metadata : Metadata
+} derive(Eq, @debug.Debug)
+
+pub(all) enum EntryMode {
+  File
+  Directory
+  Unknown
+} derive(Eq, @debug.Debug)
+
+pub struct ErrorInfo {
+  kind : ErrorKind
+  status : ErrorStatus
+  message : String
+  operation : Operation
+  path : String?
+} derive(Eq, @debug.Debug)
+
+pub(all) enum ErrorKind {
+  Unexpected
+  Unsupported
+  ConfigInvalid
+  NotFound
+  PermissionDenied
+  IsADirectory
+  NotADirectory
+  AlreadyExists
+  RateLimited
+  IsSameFile
+  ConditionNotMatch
+  RangeNotSatisfied
+  InvalidArgument
+  ResourceClosed
+  BufferTooLarge
+  AbiMismatch
+  UnknownKind(Int, String)
+} derive(Eq, @debug.Debug)
+
+pub(all) enum ErrorStatus {
+  Permanent
+  Temporary
+  Persistent
+  UnknownStatus(Int)
+} derive(Eq, @debug.Debug)
+
+pub struct ListOptions {
+  recursive : Bool
+  limit : UInt64?
+  start_after : String?
+}
+pub fn ListOptions::new(recursive? : Bool, limit? : UInt64, start_after? : String) -> Self
+
+pub type Lister
+pub fn Lister::close(Self) -> Unit
+pub fn Lister::next(Self) -> Entry? raise OpenDalError
+
+pub struct Metadata {
+  mode : EntryMode
+  content_length : UInt64
+  is_current : Bool?
+  is_deleted : Bool
+  cache_control : String?
+  content_disposition : String?
+  content_encoding : String?
+  content_md5 : String?
+  content_type : String?
+  etag : String?
+  last_modified : Timestamp?
+  version : String?
+} derive(Eq, @debug.Debug)
+pub fn Metadata::is_dir(Self) -> Bool
+pub fn Metadata::is_file(Self) -> Bool
+
+pub(all) enum Operation {
+  NewOperator
+  Check
+  Info
+  CreateDir
+  Read
+  Write
+  Copy
+  Rename
+  Stat
+  Delete
+  List
+  UnknownOperation(String)
+} derive(Eq, @debug.Debug)
+
+pub type Operator
+pub fn Operator::check(Self) -> Unit raise OpenDalError
+pub fn Operator::copy(Self, StringView, StringView) -> Metadata raise OpenDalError
+pub fn Operator::create_dir(Self, StringView) -> Unit raise OpenDalError
+pub fn Operator::delete(Self, StringView, options? : DeleteOptions) -> Unit raise OpenDalError
+pub fn Operator::exists(Self, StringView) -> Bool raise OpenDalError
+pub fn Operator::info(Self) -> OperatorInfo
+pub fn Operator::list(Self, StringView, options? : ListOptions) -> Array[Entry] raise OpenDalError
+pub fn Operator::lister(Self, StringView, options? : ListOptions) -> Lister raise OpenDalError
+pub fn Operator::new(StringView, Map[String, String]) -> Self raise OpenDalError
+pub fn Operator::read(Self, StringView, options? : ReadOptions) -> Bytes raise OpenDalError
+pub fn Operator::reader(Self, StringView, options? : ReaderOptions) -> Reader raise OpenDalError
+pub fn Operator::rename(Self, StringView, StringView) -> Unit raise OpenDalError
+pub fn Operator::stat(Self, StringView, options? : StatOptions) -> Metadata raise OpenDalError
+pub fn Operator::write(Self, StringView, Bytes, options? : WriteOptions) -> Metadata raise OpenDalError
+pub fn Operator::writer(Self, StringView, options? : WriteOptions) -> Writer raise OpenDalError
+
+pub struct OperatorInfo {
+  scheme : String
+  root : String
+  name : String
+  native_capability : Capability
+  full_capability : Capability
+}
+
+pub struct ReadOptions {
+  range : ByteRange?
+  version : String?
+  if_match : String?
+  if_none_match : String?
+}
+pub fn ReadOptions::new(range? : ByteRange, version? : String, if_match? : String, if_none_match? : String) -> Self
+
+pub type Reader
+pub fn Reader::close(Self) -> Unit
+pub fn Reader::read(Self, ByteRange) -> Bytes raise OpenDalError
+
+pub struct ReaderOptions {
+  version : String?
+  if_match : String?
+  if_none_match : String?
+}
+pub fn ReaderOptions::new(version? : String, if_match? : String, if_none_match? : String) -> Self
+
+pub struct StatOptions {
+  version : String?
+  if_match : String?
+  if_none_match : String?
+}
+pub fn StatOptions::new(version? : String, if_match? : String, if_none_match? : String) -> Self
+
+pub struct Timestamp {
+  unix_seconds : Int64
+  nanoseconds : Int
+} derive(Eq, @debug.Debug)
+
+pub struct WriteOptions {
+  append : Bool
+  content_type : String?
+  content_disposition : String?
+  content_encoding : String?
+  cache_control : String?
+  if_match : String?
+  if_none_match : String?
+}
+pub fn WriteOptions::new(append? : Bool, content_type? : String, content_disposition? : String, content_encoding? : String, cache_control? : String, if_match? : String, if_none_match? : String) -> Self
+
+pub type Writer
+pub fn Writer::close(Self) -> Metadata raise OpenDalError
+pub fn Writer::write(Self, Bytes) -> Unit raise OpenDalError
+
+// Type aliases
+
+// Traits
+
