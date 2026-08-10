@@ -1558,6 +1558,100 @@ mod tests {
         view.kind
     }
 
+    fn write_memory_object(api: &ApiV1, operator: *mut OperatorV1, path: &[u8], data: &[u8]) {
+        let path = bytes(path);
+        let data = bytes(data);
+        let mut metadata = NonNull::<MetadataV1>::dangling().as_ptr();
+        let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: all carriers and output slots are live for the duration of the call.
+        let status = unsafe {
+            api.operator_write.expect("WHOLE_OBJECT write is installed")(
+                operator,
+                &path,
+                &data,
+                ptr::null(),
+                &mut metadata,
+                &mut error,
+            )
+        };
+        assert_eq!(status, STATUS_OK);
+        assert!(!metadata.is_null());
+        assert!(error.is_null());
+        // SAFETY: the successful call returned one uniquely owned metadata handle.
+        unsafe { api.metadata_free.expect("BASE metadata free is installed")(metadata) };
+    }
+
+    fn memory_object_exists(api: &ApiV1, operator: *mut OperatorV1, path: &[u8]) -> bool {
+        let path = bytes(path);
+        let mut exists = u32::MAX;
+        let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the path carrier and both output slots are valid for this call.
+        let status = unsafe {
+            api.operator_exists
+                .expect("WHOLE_OBJECT exists is installed")(
+                operator,
+                &path,
+                &mut exists,
+                &mut error,
+            )
+        };
+        assert_eq!(status, STATUS_OK);
+        assert!(error.is_null());
+        match exists {
+            0 => false,
+            1 => true,
+            value => panic!("exists returned noncanonical boolean {value}"),
+        }
+    }
+
+    fn stat_mode_and_len(api: &ApiV1, operator: *mut OperatorV1, path: &[u8]) -> (u32, u64) {
+        let path = bytes(path);
+        let mut metadata = NonNull::<MetadataV1>::dangling().as_ptr();
+        let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the path carrier and output slots are live for the duration of the call.
+        let status = unsafe {
+            api.operator_stat.expect("WHOLE_OBJECT stat is installed")(
+                operator,
+                &path,
+                ptr::null(),
+                &mut metadata,
+                &mut error,
+            )
+        };
+        assert_eq!(status, STATUS_OK);
+        assert!(!metadata.is_null());
+        assert!(error.is_null());
+
+        let absent = bytes(b"");
+        let mut view = MetadataViewV1 {
+            struct_size: size_of::<MetadataViewV1>() as u32,
+            struct_version: STRUCT_VERSION,
+            present_bits: 0,
+            mode: ENTRY_MODE_UNKNOWN,
+            is_current: 0,
+            is_deleted: 0,
+            reserved0: 0,
+            content_length: 0,
+            last_modified: TimestampV1::default(),
+            cache_control: absent,
+            content_disposition: absent,
+            content_encoding: absent,
+            content_md5: absent,
+            content_type: absent,
+            etag: absent,
+            version: absent,
+        };
+        // SAFETY: metadata is live and view is complete writable storage.
+        unsafe {
+            assert_eq!(
+                api.metadata_view.expect("BASE metadata view is installed")(metadata, &mut view),
+                STATUS_OK,
+            );
+            api.metadata_free.expect("BASE metadata free is installed")(metadata);
+        }
+        (view.mode, view.content_length)
+    }
+
     #[test]
     fn bootstrap_installs_complete_supported_groups() {
         let api = api();
@@ -2039,6 +2133,209 @@ mod tests {
         );
         assert!(buffer.is_null());
         assert_eq!(take_error_kind(&api, error), ERROR_INVALID_ARGUMENT);
+
+        // SAFETY: both handles remain uniquely owned by this test.
+        unsafe {
+            api.operator_info_free.expect("BASE info free is installed")(info);
+            api.operator_free.expect("BASE operator free is installed")(operator);
+        }
+    }
+
+    #[test]
+    fn blocking_core_memory_operations_cover_success_missing_and_recursive_delete() {
+        let api = api();
+        let (operator, info) = memory_operator(&api);
+        let check = api.operator_check.expect("WHOLE_OBJECT check is installed");
+        let create_dir = api
+            .operator_create_dir
+            .expect("WHOLE_OBJECT create_dir is installed");
+        let delete = api
+            .operator_delete
+            .expect("WHOLE_OBJECT delete is installed");
+        let stat = api.operator_stat.expect("WHOLE_OBJECT stat is installed");
+        let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+
+        // SAFETY: the operator is live and the optional error slot is writable.
+        assert_eq!(unsafe { check(operator, &mut error) }, STATUS_OK);
+        assert!(error.is_null());
+
+        assert!(!memory_object_exists(&api, operator, b"phase2/file"));
+        write_memory_object(&api, operator, b"phase2/file", b"phase-two");
+        assert!(memory_object_exists(&api, operator, b"phase2/file"));
+        assert_eq!(
+            stat_mode_and_len(&api, operator, b"phase2/file"),
+            (ENTRY_MODE_FILE, 9),
+        );
+
+        let directory = bytes(b"phase2/tree/");
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the operator, path carrier, and output slot are valid.
+        assert_eq!(
+            unsafe { create_dir(operator, &directory, &mut error) },
+            STATUS_OK,
+        );
+        assert!(error.is_null());
+        assert_eq!(
+            stat_mode_and_len(&api, operator, b"phase2/tree/"),
+            (ENTRY_MODE_DIRECTORY, 0),
+        );
+
+        let file = bytes(b"phase2/file");
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: default delete borrows valid carrier storage for this call only.
+        assert_eq!(
+            unsafe { delete(operator, &file, ptr::null(), &mut error) },
+            STATUS_OK,
+        );
+        assert!(error.is_null());
+        assert!(!memory_object_exists(&api, operator, b"phase2/file"));
+
+        let nested_directory = bytes(b"phase2/tree/nested/");
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the nested directory carrier and output slot are valid.
+        assert_eq!(
+            unsafe { create_dir(operator, &nested_directory, &mut error) },
+            STATUS_OK,
+        );
+        assert!(error.is_null());
+        write_memory_object(&api, operator, b"phase2/tree/nested/child", b"recursive");
+        assert!(memory_object_exists(
+            &api,
+            operator,
+            b"phase2/tree/nested/child",
+        ));
+
+        let absent = bytes(b"");
+        let recursive = DeleteOptionsV1 {
+            struct_size: size_of::<DeleteOptionsV1>() as u32,
+            struct_version: STRUCT_VERSION,
+            present_bits: 0,
+            flags: DELETE_RECURSIVE,
+            version: absent,
+        };
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: options and path are complete readable v1 carriers.
+        assert_eq!(
+            unsafe { delete(operator, &directory, &recursive, &mut error) },
+            STATUS_OK,
+        );
+        assert!(error.is_null());
+        assert!(!memory_object_exists(
+            &api,
+            operator,
+            b"phase2/tree/nested/child",
+        ));
+        assert!(!memory_object_exists(&api, operator, b"phase2/tree/"));
+
+        let missing = bytes(b"phase2/missing");
+        let mut metadata = NonNull::<MetadataV1>::dangling().as_ptr();
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: required outputs are writable and the missing path is valid UTF-8.
+        assert_eq!(
+            unsafe { stat(operator, &missing, ptr::null(), &mut metadata, &mut error) },
+            STATUS_ERROR,
+        );
+        assert!(metadata.is_null());
+        assert_eq!(take_error_kind(&api, error), ERROR_NOT_FOUND);
+
+        // SAFETY: both handles remain uniquely owned by this test.
+        unsafe {
+            api.operator_info_free.expect("BASE info free is installed")(info);
+            api.operator_free.expect("BASE operator free is installed")(operator);
+        }
+    }
+
+    #[test]
+    fn blocking_core_options_reject_unknown_and_noncanonical_fields_atomically() {
+        let api = api();
+        let (operator, info) = memory_operator(&api);
+        let stat = api.operator_stat.expect("WHOLE_OBJECT stat is installed");
+        let delete = api
+            .operator_delete
+            .expect("WHOLE_OBJECT delete is installed");
+        let path = bytes(b"phase2/options-target");
+        let absent = bytes(b"");
+        write_memory_object(&api, operator, b"phase2/options-target", b"kept");
+
+        let mut stat_options = StatOptionsV1 {
+            struct_size: size_of::<StatOptionsV1>() as u32,
+            struct_version: STRUCT_VERSION,
+            present_bits: 1 << 63,
+            version: absent,
+            if_match: absent,
+            if_none_match: absent,
+        };
+        let mut metadata = NonNull::<MetadataV1>::dangling().as_ptr();
+        let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the complete options carrier deliberately contains an unknown bit.
+        assert_eq!(
+            unsafe { stat(operator, &path, &stat_options, &mut metadata, &mut error) },
+            STATUS_ABI_MISMATCH,
+        );
+        assert!(metadata.is_null());
+        assert!(error.is_null());
+
+        stat_options.present_bits = 0;
+        stat_options.version = bytes(b"noncanonical-absent");
+        metadata = NonNull::<MetadataV1>::dangling().as_ptr();
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: version is readable but intentionally noncanonical while absent.
+        assert_eq!(
+            unsafe { stat(operator, &path, &stat_options, &mut metadata, &mut error) },
+            STATUS_ABI_MISMATCH,
+        );
+        assert!(metadata.is_null());
+        assert!(error.is_null());
+
+        let mut delete_options = DeleteOptionsV1 {
+            struct_size: size_of::<DeleteOptionsV1>() as u32,
+            struct_version: STRUCT_VERSION,
+            present_bits: 1 << 63,
+            flags: 0,
+            version: absent,
+        };
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: options are complete and the unknown presence bit is intentional.
+        assert_eq!(
+            unsafe { delete(operator, &path, &delete_options, &mut error) },
+            STATUS_ABI_MISMATCH,
+        );
+        assert!(error.is_null());
+        assert!(memory_object_exists(
+            &api,
+            operator,
+            b"phase2/options-target",
+        ));
+
+        delete_options.present_bits = 0;
+        delete_options.flags = 1 << 63;
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: options are complete and the unknown flag is intentional.
+        assert_eq!(
+            unsafe { delete(operator, &path, &delete_options, &mut error) },
+            STATUS_ABI_MISMATCH,
+        );
+        assert!(error.is_null());
+        assert!(memory_object_exists(
+            &api,
+            operator,
+            b"phase2/options-target",
+        ));
+
+        delete_options.flags = 0;
+        delete_options.version = bytes(b"noncanonical-absent");
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the absent version carrier is deliberately noncanonical.
+        assert_eq!(
+            unsafe { delete(operator, &path, &delete_options, &mut error) },
+            STATUS_ABI_MISMATCH,
+        );
+        assert!(error.is_null());
+        assert!(memory_object_exists(
+            &api,
+            operator,
+            b"phase2/options-target",
+        ));
 
         // SAFETY: both handles remain uniquely owned by this test.
         unsafe {

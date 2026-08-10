@@ -25,6 +25,30 @@ extern "C" fn native_operator_new(
 ) -> NativeResult = "moonbit_opendal_operator_new"
 
 ///|
+#borrow(operator)
+extern "C" fn native_operator_check(operator : Operator) -> NativeResult = "moonbit_opendal_operator_check"
+
+///|
+#borrow(operator, path)
+extern "C" fn native_operator_exists(
+  operator : Operator,
+  path : String,
+) -> NativeResult = "moonbit_opendal_operator_exists"
+
+///|
+#borrow(operator, path, version, if_match, if_none_match)
+extern "C" fn native_operator_stat(
+  operator : Operator,
+  path : String,
+  has_version : Bool,
+  version : String,
+  has_if_match : Bool,
+  if_match : String,
+  has_if_none_match : Bool,
+  if_none_match : String,
+) -> NativeResult = "moonbit_opendal_operator_stat"
+
+///|
 #borrow(operator, path)
 extern "C" fn native_operator_read(
   operator : Operator,
@@ -38,6 +62,23 @@ extern "C" fn native_operator_write(
   path : String,
   data : Bytes,
 ) -> NativeResult = "moonbit_opendal_operator_write"
+
+///|
+#borrow(operator, path)
+extern "C" fn native_operator_create_dir(
+  operator : Operator,
+  path : String,
+) -> NativeResult = "moonbit_opendal_operator_create_dir"
+
+///|
+#borrow(operator, path, version)
+extern "C" fn native_operator_delete(
+  operator : Operator,
+  path : String,
+  has_version : Bool,
+  version : String,
+  recursive : Bool,
+) -> NativeResult = "moonbit_opendal_operator_delete"
 
 ///|
 #borrow(result)
@@ -62,6 +103,10 @@ extern "C" fn native_result_error_message(result : NativeResult) -> Bytes = "moo
 ///|
 #borrow(result)
 extern "C" fn native_result_take_operator(result : NativeResult) -> Operator = "moonbit_opendal_result_take_operator"
+
+///|
+#borrow(result)
+extern "C" fn native_result_take_bool(result : NativeResult) -> Bool = "moonbit_opendal_result_take_bool"
 
 ///|
 #borrow(result)
@@ -503,6 +548,15 @@ pub fn Operator::new(
 }
 
 ///|
+pub fn Operator::check(self : Operator) -> Unit raise OpenDalError {
+  let result = native_operator_check(self)
+  if native_result_status(result) != 0U {
+    raise error_from_native_result(result, Check, None, None)
+  }
+  native_result_release(result)
+}
+
+///|
 pub fn Operator::info(self : Operator) -> OperatorInfo {
   let scheme_bytes = native_operator_info_scheme(self)
   let root_bytes = native_operator_info_root(self)
@@ -512,6 +566,65 @@ pub fn Operator::info(self : Operator) -> OperatorInfo {
   let root = try! @utf8.decode(root_bytes)
   let name = try! @utf8.decode(name_bytes)
   { scheme, root, name, capability }
+}
+
+///|
+pub fn Operator::exists(
+  self : Operator,
+  path : StringView,
+) -> Bool raise OpenDalError {
+  let path = path.to_owned()
+  let result = native_operator_exists(self, path)
+  if native_result_status(result) != 0U {
+    raise error_from_native_result(result, Exists, Some(path), None)
+  }
+  let exists = native_result_take_bool(result)
+  if native_result_status(result) != 0U {
+    raise error_from_native_result(result, Exists, Some(path), None)
+  }
+  native_result_release(result)
+  exists
+}
+
+///|
+pub fn Operator::stat(
+  self : Operator,
+  path : StringView,
+  options? : StatOptions,
+) -> Metadata raise OpenDalError {
+  let path = path.to_owned()
+  let (
+    has_version,
+    version,
+    has_if_match,
+    if_match,
+    has_if_none_match,
+    if_none_match,
+  ) = match options {
+    None => (false, "", false, "", false, "")
+    Some(value) =>
+      (
+        value.version is Some(_),
+        value.version.unwrap_or(""),
+        value.if_match is Some(_),
+        value.if_match.unwrap_or(""),
+        value.if_none_match is Some(_),
+        value.if_none_match.unwrap_or(""),
+      )
+  }
+  let result = native_operator_stat(
+    self, path, has_version, version, has_if_match, if_match, has_if_none_match,
+    if_none_match,
+  )
+  if native_result_status(result) != 0U {
+    raise error_from_native_result(result, Stat, Some(path), None)
+  }
+  let metadata = native_result_take_metadata(result)
+  if native_result_status(result) != 0U {
+    raise error_from_native_result(result, Stat, Some(path), None)
+  }
+  native_result_release(result)
+  metadata_from_native(metadata, Stat, Some(path))
 }
 
 ///|
@@ -569,6 +682,40 @@ pub fn Operator::write(
   }
   native_result_release(result)
   metadata_from_native(metadata, Write, Some(path))
+}
+
+///|
+pub fn Operator::create_dir(
+  self : Operator,
+  path : StringView,
+) -> Unit raise OpenDalError {
+  let path = path.to_owned()
+  let result = native_operator_create_dir(self, path)
+  if native_result_status(result) != 0U {
+    raise error_from_native_result(result, CreateDir, Some(path), None)
+  }
+  native_result_release(result)
+}
+
+///|
+pub fn Operator::delete(
+  self : Operator,
+  path : StringView,
+  options? : DeleteOptions,
+) -> Unit raise OpenDalError {
+  let path = path.to_owned()
+  let (has_version, version, recursive) = match options {
+    None => (false, "", false)
+    Some(value) =>
+      (value.version is Some(_), value.version.unwrap_or(""), value.recursive)
+  }
+  let result = native_operator_delete(
+    self, path, has_version, version, recursive,
+  )
+  if native_result_status(result) != 0U {
+    raise error_from_native_result(result, Delete, Some(path), None)
+  }
+  native_result_release(result)
 }
 
 ///|
