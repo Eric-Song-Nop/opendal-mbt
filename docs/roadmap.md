@@ -154,8 +154,8 @@ Delivered:
 
 ### Phase 4: Distribution and service profiles
 
-Status: implementation complete; public activation awaits the `v0.1.0`
-release after this stack merges.
+Status: complete. `v0.1.0` is published as both a GitHub Release and the
+`Eric-Song-Nop/opendal` module on mooncakes.io.
 
 The distribution contract is now fixed: `moon add`, a normal package import,
 and the native target must be sufficient for consumers. Rust, a source
@@ -198,10 +198,10 @@ Delivered:
 - one tag pipeline that publishes verified GitHub assets, publishes the same
   version to mooncakes.io, and executes the registry package afterward.
 
-The remaining action is operational rather than a code-design phase: configure
-the mooncakes credential secret, merge the stack, and push `v0.1.0`. Until the
-tag workflow publishes both registries, the release URLs pinned for `0.1.0`
-intentionally do not exist.
+The `v0.1.0` tag workflow rebuilt and verified both native artifacts, published
+the GitHub Release and Moon package, and passed a clean registry-consumer test.
+An independent macOS consumer also passed native debug and release tests after
+installing `Eric-Song-Nop/opendal@0.1.0` from the registry.
 
 The initial platform target is macOS and Linux. Windows support requires a
 separate linker and artifact-distribution decision.
