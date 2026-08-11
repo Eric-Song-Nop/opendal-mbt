@@ -7,5 +7,4 @@ import {
 
 options(
   targets: { "consumer_test.mbt": [ "native" ] },
-  link: { "native": { "cc-link-flags": "-lopendal_mbt_native -lm" } },
 )

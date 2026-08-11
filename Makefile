@@ -14,7 +14,7 @@ $(error RUST_PROFILE must be debug or release)
 endif
 
 NATIVE_LIB_DIR := $(CURDIR)/target/$(RUST_PROFILE)
-MOON_LIBRARY_PATH := $(NATIVE_LIB_DIR)$(if $(LIBRARY_PATH),:$(LIBRARY_PATH))
+MOON_NATIVE_LIB := $(NATIVE_LIB_DIR)/libopendal_mbt_native.a
 MOON_TEST_FLAGS := --target native --frozen --warn-list '$(MOON_WARN_LIST)' --deny-warn
 
 
@@ -29,18 +29,17 @@ rust-test:
 	cargo test --workspace --all-targets --all-features --locked $(CARGO_PROFILE_FLAG)
 
 moon-check:
-	LIBRARY_PATH="$(MOON_LIBRARY_PATH)" \
-		moon check --target native --frozen --warn-list '$(MOON_WARN_LIST)' --deny-warn
+	moon check --target native --frozen --warn-list '$(MOON_WARN_LIST)' --deny-warn
 
 moon-test: native
-	LIBRARY_PATH="$(MOON_LIBRARY_PATH)" \
+	OPENDAL_MBT_NATIVE_LIB="$(MOON_NATIVE_LIB)" \
 		moon test $(MOON_TEST_FLAGS) $(MOON_PROFILE_FLAG)
 
 coverage: native
 	moon clean
-	LIBRARY_PATH="$(MOON_LIBRARY_PATH)" \
+	OPENDAL_MBT_NATIVE_LIB="$(MOON_NATIVE_LIB)" \
 		moon test $(MOON_TEST_FLAGS) --enable-coverage
-	LIBRARY_PATH="$(MOON_LIBRARY_PATH)" moon coverage analyze
+	moon coverage analyze
 
 abi-smoke:
 	$${CC:-cc} -std=c11 -Wall -Wextra -Werror -Wpedantic \
@@ -67,6 +66,7 @@ packaged-consumer:
 
 native-artifact-test:
 	python3 scripts/test-package-native-artifact.py
+	node --test scripts/test-native-resolver.js
 
 check: api-contract interface-contract package-contract native-artifact-test
 	cargo fmt --all -- --check
@@ -78,7 +78,7 @@ test-profile: rust-test moon-test
 
 asan:
 	$(MAKE) native RUST_PROFILE=debug
-	LIBRARY_PATH="$(CURDIR)/target/debug$(if $(LIBRARY_PATH),:$(LIBRARY_PATH))" \
+	OPENDAL_MBT_NATIVE_LIB="$(CURDIR)/target/debug/libopendal_mbt_native.a" \
 		python3 .agents/skills/moonbit-c-binding/scripts/run-asan.py \
 			--repo-root . --pkg moon.pkg \
 			--pkg integration/consumer/moon.pkg

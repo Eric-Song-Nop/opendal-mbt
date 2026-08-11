@@ -4,9 +4,11 @@ on:
   pull_request:
     paths:
       - .github/workflows/native-release.yml
+      - build.js
       - Cargo.lock
       - Cargo.toml
       - native/distribution-profile.json
+      - native/artifacts.json
       - native/include/opendal_mbt.h
       - native/rust/**
       - rust-toolchain.toml
@@ -65,7 +67,8 @@ jobs:
             --native-static-libs-log \
               target/native-release/native-static-libs.log \
             --rust-target '${{ matrix.rust_target }}' \
-            --output-dir target/native-dist | \
+            --output-dir target/native-dist \
+            --verify-pinned native/artifacts.json | \
             tee target/native-release/package-result.json
       - uses: actions/upload-artifact@v4
         with:
