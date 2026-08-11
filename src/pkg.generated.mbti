@@ -163,6 +163,20 @@ pub struct Reader {
 pub fn Reader::close(Self) -> Unit
 pub fn Reader::read(Self, ByteRange) -> Bytes raise OpenDalError
 
+pub struct S3Auth {
+  // private fields
+}
+pub fn S3Auth::assume_role(role_arn~ : StringView, source? : S3CredentialSource, external_id? : StringView, role_session_name? : StringView, duration_seconds? : UInt64) -> Self raise OpenDalError
+pub fn S3Auth::default_chain(disable_ec2_metadata? : Bool) -> Self
+pub fn S3Auth::static_credentials(access_key_id~ : StringView, secret_access_key~ : StringView, session_token? : StringView) -> Self raise OpenDalError
+pub fn S3Auth::unsigned() -> Self
+
+pub struct S3CredentialSource {
+  // private fields
+}
+pub fn S3CredentialSource::default_chain(disable_ec2_metadata? : Bool) -> Self
+pub fn S3CredentialSource::static_credentials(access_key_id~ : StringView, secret_access_key~ : StringView, session_token? : StringView) -> Self raise OpenDalError
+
 pub struct Timestamp {
   unix_seconds : Int64
   nanoseconds : Int
