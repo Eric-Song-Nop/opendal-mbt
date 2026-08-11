@@ -25,9 +25,9 @@ const WHOLE_READ_CHUNK_BYTES: usize = 1024 * 1024;
 const BINDING_VERSION: &str = env!("CARGO_PKG_VERSION");
 const OPENDAL_VERSION: &str = "0.58.1";
 #[cfg(feature = "profile-standard")]
-const SERVICE_PROFILE: &str = "memory,fs,s3";
+const SERVICE_PROFILE: &str = "standard";
 #[cfg(not(feature = "profile-standard"))]
-const SERVICE_PROFILE: &str = "memory,fs";
+const SERVICE_PROFILE: &str = "local";
 
 static RUNTIME: OnceLock<Result<Runtime, String>> = OnceLock::new();
 
@@ -3634,6 +3634,12 @@ mod tests {
 
     #[test]
     fn library_info_reports_the_selected_service_profile() {
+        let expected_profile = if cfg!(feature = "profile-standard") {
+            "standard"
+        } else {
+            "local"
+        };
+        assert_eq!(SERVICE_PROFILE, expected_profile);
         let mut view = LibraryInfoViewV1 {
             struct_size: size_of::<LibraryInfoViewV1>() as u32,
             struct_version: STRUCT_VERSION,
