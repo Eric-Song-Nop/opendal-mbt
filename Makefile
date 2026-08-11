@@ -121,4 +121,5 @@ asan:
 		OPENDAL_MBT_SOURCE_PROFILE="$(NATIVE_SERVICE_PROFILE)" \
 		python3 .agents/skills/moonbit-c-binding/scripts/run-asan.py \
 			--repo-root . --pkg src/moon.pkg \
-			--pkg integration/consumer/moon.pkg
+			--pkg integration/consumer/moon.pkg \
+			--pkg integration/s3/moon.pkg

@@ -62,7 +62,11 @@ cp "$repo_root/integration/consumer/moon.pkg" \
   "$stage_dir/integration/consumer/moon.pkg"
 cp "$repo_root/integration/consumer/consumer_test.mbt" \
   "$stage_dir/integration/consumer/consumer_test.mbt"
-cp "$repo_root/moon.work" "$stage_dir/moon.work"
+printf '%s\n' \
+  'members = [' \
+  '  ".",' \
+  '  "./integration/consumer",' \
+  ']' >"$stage_dir/moon.work"
 
 for forbidden in Cargo.toml Cargo.lock rust-toolchain.toml native/rust \
   examples tests scripts; do
