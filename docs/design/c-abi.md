@@ -1,7 +1,7 @@
 # OpenDAL MoonBit C ABI
 
-Status: ABI v1.5 implemented; append-only v1 extensions frozen through
-concurrency limiting
+Status: ABI v1.7 implemented; append-only v1 extensions frozen through the
+initial async facade
 
 The executable header is `native/include/opendal_mbt.h`. It is the canonical
 source for exact field order, numeric constants, and function signatures. This
@@ -26,10 +26,12 @@ reference-counted value. This is important because `moonbit.h` explicitly
 describes itself as an unstable runtime API; it must not become the durable
 Rust ABI.
 
-ABI v1 covers the synchronous public contract, including bounded read streams,
-Writer abort, the standard S3 constructor, presigning, and explicit timeout,
-retry, and concurrency-limit layers. It intentionally excludes callbacks,
-async completion, batch operations, and raw service-specific handles.
+ABI v1 covers the synchronous public contract, bounded read streams, Writer
+abort, the standard S3 constructor, presigning, explicit timeout/retry/
+concurrency-limit layers, batch delete, managed Copier operations, and the
+initial asynchronous read/stream/writer facade. It intentionally excludes
+foreign callbacks, public native task handles, full async parity, and raw
+service-specific handles.
 
 ## Core choices
 
@@ -113,22 +115,35 @@ Feature groups are exact: `BASE` covers bootstrap diagnostics, immutable
 snapshot helpers, and Operator construction/destruction; `WHOLE_OBJECT` covers
 check/exists/stat/read/write/create-dir/delete/copy/rename; `LISTING` covers
 Lister; `RANDOM_READER` covers Reader; `CHUNKED_WRITER` covers the v1.0 Writer
-open/write/finish/free contract; `READ_STREAM` covers the v1.1 bounded stream;
-and `WRITER_ABORT` covers only the appended abort operation. A set feature bit
-guarantees that every pointer in that group is non-NULL. Every non-`BASE` group
-depends on `BASE`: a library must never advertise one without also advertising
-`BASE`, and a caller requiring any operation group must require and validate
-both bits. This guarantees construction plus the common buffer, snapshot,
-error, and destruction functions needed to consume that group's results.
+open/write/finish/free contract; `READ_STREAM` and `WRITER_ABORT` cover the two
+v1.1 lifecycle additions; `S3` covers typed construction; `PRESIGN` covers the
+three request constructors and owned request inspection; `LAYERS` covers
+timeout and retry; `CONCURRENCY_LIMIT` covers its separately feature-gated
+layer; `BATCH_DELETE` and `COPIER` cover the v1.6 operations; and `ASYNC` covers
+the v1.7 start, resource, result-take, cancellation, and free functions. A set
+feature bit guarantees that every pointer in that group is non-NULL.
+
+Every non-`BASE` group depends on `BASE`: a library must never advertise one
+without also advertising `BASE`, and a caller requiring any operation group
+must require and validate both bits. `WRITER_ABORT` additionally depends on
+`CHUNKED_WRITER`. This guarantees construction plus the common buffer,
+snapshot, error, and destruction functions needed to consume each group's
+results. Feature availability remains separate from a configured backend's
+capability; for example, a library can expose `PRESIGN` or `COPIER` while a
+memory Operator reports the corresponding operation as unsupported.
 
 The table ranges are normative: `BASE` is `library_info` through
 `operator_free`; `WHOLE_OBJECT` is `operator_check` through `operator_rename`;
 `LISTING` is `operator_lister` through `lister_free`; `RANDOM_READER` is
 `operator_reader` through `reader_free`; `CHUNKED_WRITER` is
-`operator_writer` through `writer_free`; `READ_STREAM` is the contiguous v1.1
-range `operator_read_stream` through `read_stream_free`; and `WRITER_ABORT` is
-the appended `writer_abort` pointer. `WRITER_ABORT` depends on
-`CHUNKED_WRITER` as well as `BASE`.
+`operator_writer` through `writer_free`; `READ_STREAM` is
+`operator_read_stream` through `read_stream_free`; `WRITER_ABORT` is the
+appended `writer_abort` pointer; `S3` is `operator_s3`; `PRESIGN` is
+`operator_presign_read` through `presigned_request_free`; `LAYERS` is
+`operator_with_timeout` through `operator_with_retry`; `CONCURRENCY_LIMIT` is
+`operator_with_concurrency_limit`; `BATCH_DELETE` is `operator_delete_many`;
+`COPIER` is `operator_copier` through `copier_free`; and `ASYNC` is
+`async_operator_read_start` through `async_task_free`.
 
 ### ABI v1.1 local-lifecycle extension
 
@@ -172,6 +187,49 @@ being held across `Runtime::block_on`. A successful repeated abort from
 `Aborted` returns `OK`; every other terminal operation returns a binding-owned
 `ResourceClosed` error. Free drops the Writer without calling close or abort.
 
+### ABI v1.2 typed-S3 extension
+
+ABI v1.2 appends `operator_s3` under `OPENDAL_MBT_FEATURE_S3`. Its versioned
+options record carries a required bucket and region, optional root and
+endpoint, path-style/virtual-host selection, and exactly one typed
+authentication policy: default chain, static/session credentials, unsigned,
+or assume role with a typed credential source. All byte views are borrowed
+only for the call and copied before return. Invalid combinations and
+out-of-range values fail before an Operator is returned.
+
+The constructor performs no object I/O. Credential material is never included
+in immutable OperatorInfo, `library_info`, error diagnostics, or a public
+debug representation. Only a profile that compiles and advertises `S3` may
+install this function; passing the generic `"s3"` scheme to another profile
+does not load the service dynamically.
+
+### ABI v1.3 presign extension
+
+ABI v1.3 appends the `PRESIGN` group: read, write, and stat constructors plus
+owned request inspection/free functions. Expiry is explicit and positive.
+Each successful call returns one immutable request handle owning its HTTP
+method, URI, ordered header names, and arbitrary header bytes. Header order and
+duplicate names are preserved. Request/header views borrow from that handle
+until `presigned_request_free`; no presign call executes HTTP automatically.
+
+Presigned URIs and headers can be bearer-equivalent credentials. The ABI does
+not log them, attach them to errors, coerce header values to UTF-8, or provide a
+`Debug`-style formatter.
+
+### ABI v1.4 timeout/retry extension
+
+ABI v1.4 appends `operator_with_timeout` and `operator_with_retry` under
+`OPENDAL_MBT_FEATURE_LAYERS`. Each function borrows its input Operator and
+returns a separately owned derived Operator plus matching OperatorInfo. The
+input and every resource already opened from it remain unchanged.
+
+Timeout and delay values must be positive, the minimum retry delay must not
+exceed the maximum, and `max_retries` counts attempts after the initial one.
+The supported composition order is timeout followed by retry. Duplicate
+timeout/retry layers and adding timeout outside retry are rejected. Retry is
+never installed implicitly and does not promise exactly-once Writer or append
+semantics: an uncertain remote commit can be replayed.
+
 ### ABI v1.5 concurrency-limit extension
 
 ABI v1.5 appends `operator_with_concurrency_limit` under the independent
@@ -187,6 +245,45 @@ timeout or retry calls are rejected. Operation permits on body-style Reader
 streams, Writers, Listers, Deleters, and Copiers are held until the body is
 dropped. An optional HTTP permit is held until the HTTP response body is
 dropped. The local profile neither compiles nor advertises this group.
+
+### ABI v1.6 batch/Copier extension
+
+ABI v1.6 appends independent `BATCH_DELETE` and `COPIER` groups.
+`operator_delete_many` copies and validates the complete path array before it
+starts OpenDAL work. Empty input succeeds. `OK` means the high-level deleter
+closed successfully; an error can follow deletion of an unspecified subset.
+The ABI exposes no ordered per-path result and promises neither atomicity,
+input-order preservation, nor uniqueness.
+
+`operator_copier` creates one same-Operator, one-object Copier. `copier_next`
+returns `OK` with one progress delta or stable `END`; `copier_finish` drives
+remaining work and returns destination metadata; `copier_abort` is explicit
+and idempotent after successful abort. Failures are terminal, and abort cannot
+roll back effects already visible at the backend. `copier_free` only releases
+state; it never reports finish or abort success.
+
+### ABI v1.7 async extension
+
+ABI v1.7 appends `OPENDAL_MBT_FEATURE_ASYNC` on POSIX native targets. A start
+function synchronously validates and copies all borrowed inputs, duplicates a
+writable pipe descriptor, and returns an owned native task. A Tokio worker
+publishes exactly one owned result before writing one readiness byte. It never
+calls MoonBit, retains a MoonBit value, or puts result data in the pipe.
+
+Completion, result-taking, and cancellation are linearized by the task state.
+Cancellation that wins publishes the terminal cancellation state, requests
+worker cancellation, and owns the one wake signal; a later worker completion
+cannot publish or signal again. A result is taken exactly once with the
+matching typed take function. Taking too early, after cancellation, twice, or
+through the wrong typed function returns an error.
+
+Async read streams and Writers allow one in-flight operation. Cancelling an
+unclaimed stream/Writer result, or cancelling an in-flight stateful operation,
+makes that resource terminal because cursor or commit progress may be unknown.
+Async stream chunks retain the fixed bound and one-step backpressure of the
+synchronous stream. `async_read_stream_close` is synchronous, idempotent, and
+performs no I/O. Async resource/task frees only release owned state; they never
+invent successful finish or abort outcomes.
 
 Version meaning:
 
@@ -300,9 +397,11 @@ to be non-NULL. The complete exceptions are: a NULL options pointer selects
 defaults; `out_error` may be NULL; the config array may be NULL when
 `config_len == 0`; a byte-view `data` may be NULL when `len == 0`;
 `buffer_copy` may receive a NULL destination only for its zero-capacity sizing
-query; and every `*_free`, `lister_close`, and `reader_close` treats NULL as a
-no-op. The byte-view struct pointer itself, required handles, ranges,
-success-output pointers, and `buffer_copy`'s `out_required` are not optional.
+query; every `*_free`, `lister_close`, `reader_close`, `read_stream_close`, and
+`async_read_stream_close` treats NULL as a no-op; and
+`async_task_cancel(NULL)` is a no-op. The byte-view struct pointer itself,
+required handles, ranges, success-output pointers, and `buffer_copy`'s
+`out_required` are not optional.
 
 The caller additionally guarantees that every non-NULL pointer is correctly
 aligned for its declared C type, remains live for the whole call, and refers
@@ -393,22 +492,29 @@ outputs. A function never returns partially initialized success data, uses
 |---|---|---|---|
 | API table | caller | function pointers | caller storage |
 | LibraryInfo | library static data | `library_info` view | valid while loaded |
-| Operator | `operator_new` | operation calls | `operator_free` |
-| OperatorInfo | `operator_new` | `operator_info_view` | `operator_info_free` |
+| Operator | `operator_new`, `operator_s3`, or a layer function | operation calls | `operator_free` |
+| OperatorInfo | an Operator constructor or layer function | `operator_info_view` | `operator_info_free` |
 | Buffer | read calls | `buffer_len`/`buffer_copy` | `buffer_free` |
-| Metadata | stat/write/copy/close | `metadata_view` | `metadata_free` |
+| Metadata | stat/write/copy/finish calls | `metadata_view` | `metadata_free` |
 | Entry | `lister_next` | entry + metadata views | `entry_free` |
 | Error | failed operation | `error_view` | `error_free` |
 | Lister | `operator_lister` | `lister_next` | `lister_free` |
 | Reader | `operator_reader` | `reader_read` | `reader_free` |
+| ReadStream | `operator_read_stream` | `read_stream_next` | `read_stream_free` |
 | Writer | `operator_writer` | write/close calls | `writer_free` |
+| PresignedRequest | a presign call | request + header views | `presigned_request_free` |
+| Copier | `operator_copier` | next/finish/abort calls | `copier_free` |
+| AsyncTask | an async start function | matching typed take | `async_task_free` |
+| AsyncReadStream | async read-stream result take | async next/close calls | `async_read_stream_free` |
+| AsyncWriter | async writer result take | async write/finish/abort calls | `async_writer_free` |
 
 Every successful constructor transfers one owning pointer to the caller.
-`*_free(NULL)`, `lister_close(NULL)`, and `reader_close(NULL)` are no-ops. A
-non-NULL owning pointer is freed exactly once and is then invalid. Copying an
-opaque pointer does not retain or clone it. Destroying or freeing a handle
-while another call uses the same handle is caller undefined behavior; the safe
-wrapper prevents it.
+`*_free(NULL)`, `lister_close(NULL)`, `reader_close(NULL)`,
+`read_stream_close(NULL)`, `async_read_stream_close(NULL)`, and
+`async_task_cancel(NULL)` are no-ops. A non-NULL owning pointer is freed exactly
+once and is then invalid. Copying an opaque pointer does not retain or clone
+it. Destroying or freeing a handle while another call uses the same handle is
+caller undefined behavior; the safe wrapper prevents it.
 
 Except for the null-safe free/close functions above, an operation given a NULL
 handle returns `ABI_MISMATCH`. A forged, wrong-type, stale, or already-freed
@@ -501,6 +607,7 @@ exceptions cannot be converted into normal errors.
 | MoonBit surface | ABI operation |
 |---|---|
 | `Operator::new` | `operator_new`, returning Operator + cached OperatorInfo |
+| `Operator::s3` | `operator_s3`, returning Operator + cached OperatorInfo |
 | `Operator::info` | pure cached MoonBit snapshot; no later native call |
 | `check` | `operator_check` |
 | `exists` | `operator_exists` |
@@ -518,12 +625,30 @@ exceptions cannot be converted into normal errors.
 | `open_reader` | `operator_reader` |
 | `Reader::read` | `reader_read` + buffer length/copy/free |
 | `Reader::close` | `reader_close` |
+| `open_read_stream` | `operator_read_stream` |
+| `ReadStream::next` | `read_stream_next` + buffer length/copy/free |
+| `ReadStream::close` | `read_stream_close` |
 | `open_writer` | `operator_writer` |
 | `Writer::write` | `writer_write` |
 | `Writer::finish` | `writer_close` + metadata view/free |
+| `Writer::abort` | `writer_abort` |
+| `presign_read`/`presign_write`/`presign_stat` | matching presign call + request/header views/free |
 | `with_timeout` | `operator_with_timeout`, returning Operator + OperatorInfo |
 | `with_retry` | `operator_with_retry`, returning Operator + OperatorInfo |
 | `with_concurrency_limit` | `operator_with_concurrency_limit`, returning Operator + OperatorInfo |
+| `delete_many` | `operator_delete_many` |
+| `open_copier` | `operator_copier` |
+| `Copier::next` | `copier_next` |
+| `Copier::finish` | `copier_finish` + metadata view/free |
+| `Copier::abort` | `copier_abort` |
+| `Operator::as_async` | pure MoonBit wrapper retaining the Operator |
+| `AsyncOperator::read` | `async_operator_read_start` + pipe readiness + buffer task take/free |
+| `AsyncOperator::open_read_stream` | `async_operator_read_stream_start` + read-stream task take/free |
+| `AsyncReadStream::next` | `async_read_stream_next_start` + buffer task take/free |
+| `AsyncReadStream::close` | `async_read_stream_close` |
+| `AsyncOperator::open_writer` | `async_operator_writer_start` + writer task take/free |
+| `AsyncWriter::write`/`abort` | matching async start + unit task take/free |
+| `AsyncWriter::finish` | `async_writer_finish_start` + metadata task take/free |
 
 Materializing `list` over the native lister is not an emulation of a storage
 operation; it is the eager consumption form of the same listing primitive.
@@ -545,8 +670,28 @@ Lister: Open --EOF/error--> Exhausted --close--> Closed
 
 Reader: Open ---------------------close-------> Closed
 
-Writer: Open --close success------------------> Closed
-        Open --write/close failure or panic---> Failed
+ReadStream: Open --EOF-------------------------> End
+            Open --error/panic----------------> Failed
+            Open/End/Failed --close-----------> Closed
+
+Writer: Open --write success------------------> Open
+        Open --finish attempt-----------------> Finished or Failed
+        Open --abort attempt------------------> Aborted or Failed
+
+Copier: Open --next progress------------------> Open
+        Open --EOF----------------------------> End
+        Open/End --finish attempt-------------> Finished or Failed
+        Open --abort attempt------------------> Aborted or Failed
+
+AsyncTask: Running --worker-------------------> Completed --take--> Taken
+           Running/Completed --cancel---------> Cancelled
+
+AsyncReadStream: Open --next------------------> Busy --> Open/End/Failed
+                 Open/Busy/End/Failed --close-> Closed
+
+AsyncWriter: Open --write---------------------> Busy --> Open/Failed
+             Open --finish--------------------> Busy --> Finished/Failed
+             Open --abort---------------------> Busy --> Aborted/Failed
 ```
 
 - Lister EOF returns `END`. An ordinary error is returned once, then the
@@ -555,18 +700,30 @@ Writer: Open --close success------------------> Closed
 - Reader reads do not move a cursor. Ordinary read errors do not close it.
   Close is idempotent; later reads return `ResourceClosed`. A contained panic
   closes it because internal state is uncertain.
-- Writer calls are serialized. Any `write` error is terminal. The first close
-  attempt is terminal whether it succeeds or fails; later write/close calls
-  return `ResourceClosed`.
-- The binding reports a Writer as successfully completed only after an
-  explicit `close` succeeds. Freeing/finalizing an open or failed Writer drops
-  it without calling `close` and reports neither success nor an I/O error.
-  OpenDAL's blocking Writer has no abort contract, so a failed or dropped
-  Writer can leave backend-visible partial data or orphan multipart state; the
-  binding promises neither rollback nor “no partial effects.”
+- ReadStream EOF returns stable `END`. An error or panic is terminal and later
+  `next` calls return `ResourceClosed`. Close is idempotent and performs no
+  I/O.
+- Writer calls are serialized. Any `write` error is terminal. The first
+  finish/close or abort attempt is terminal whether it succeeds or fails.
+  Repeating a successful abort returns `OK`; every other later operation
+  returns `ResourceClosed`.
+- Copier calls are serialized. `END` from `next` is stable until `finish`
+  consumes the retained Copier. Finish drives any remaining work. Failure is
+  terminal; repeating a successful abort returns `OK`.
+- Async tasks publish at most one completion and allow exactly one matching
+  result take. Cancellation before a take is terminal. Cancelling an in-flight
+  stateful operation marks its AsyncReadStream or AsyncWriter failed.
+- AsyncReadStream and AsyncWriter reject a second in-flight operation. Stream
+  EOF is stable; explicit stream close is idempotent. Async Writer finish and
+  abort have the same terminal/repeated-abort rules as the synchronous Writer.
+- Freeing/finalizing any open Writer or Copier only drops it. It never calls
+  finish or abort and reports neither outcome. A successful abort does not
+  promise rollback of effects already visible; failure, cancellation, or a
+  drop can leave partial data or orphan multipart state.
 
-`lister_close` and `reader_close` keep the outer ABI handle alive so later calls
-can deterministically report their state; the paired free still occurs once.
+The close functions keep their outer ABI handles alive so later calls can
+deterministically report state; the paired free still occurs once. The same is
+true of terminal Writer, Copier, and async resource handles.
 
 ## Thread contract
 
@@ -576,8 +733,12 @@ can deterministically report their state; the paired free still occurs once.
 - Reader range reads on one handle are concurrent. Close linearizes through an
   internal state lock: admitted reads finish before close, later reads fail as
   closed.
-- Lister, ReadStream, and Writer calls on one handle are internally serialized.
-  Racing calls are memory-safe, but their acquisition order is unspecified.
+- Lister, ReadStream, Writer, and Copier calls on one handle are internally
+  serialized. Racing synchronous calls are memory-safe, but their acquisition
+  order is unspecified.
+- Async task completion/cancel/take transitions are serialized. AsyncReadStream
+  and AsyncWriter permit one operation at a time and reject overlap without
+  running a second upstream operation.
 - No handle has thread affinity. A finalizer may run on a different thread.
 - Free must not race any call on the same handle.
 
@@ -598,26 +759,39 @@ rust-version = "1.91"
 [lib]
 crate-type = ["staticlib"]
 
+[features]
+profile-local = ["opendal/blocking", "opendal/services-fs"]
+profile-standard = [
+  "profile-local",
+  "layers-concurrent-limit",
+  "layers-timeout-retry",
+  "opendal/services-s3",
+  "opendal/http-transport-reqwest",
+  "opendal/http-transport-reqwest-rustls",
+  "opendal/executors-tokio",
+]
+layers-concurrent-limit = ["opendal/layers-concurrent-limit"]
+layers-timeout-retry = ["opendal/layers-retry", "opendal/layers-timeout"]
+
 [dependencies]
-opendal = {
-  version = "=0.58.1",
-  default-features = false,
-  features = ["blocking", "services-fs"],
-}
-tokio = { version = "1.52", features = ["rt-multi-thread", "fs"] }
+opendal = { version = "=0.58.1", default-features = false }
+tokio = { version = "=1.52.0", features = ["rt-multi-thread", "fs"] }
 
 [profile.release]
 panic = "unwind"
 ```
 
 Memory is always enabled in OpenDAL 0.58.1; the deprecated
-`services-memory` feature is unnecessary. Filesystem support is explicit.
-Disabling facade defaults also ensures that the retry layer is not pulled in
-or applied accidentally.
+`services-memory` feature is unnecessary. `profile-local` adds explicit
+filesystem support. `profile-standard` adds S3, its HTTP/TLS/runtime features,
+and only the layer implementations that its public methods can install.
+Disabling facade defaults ensures that no retry, timeout, logging, or unrelated
+layer is pulled in or applied accidentally.
 
 Static libraries cannot safely depend on constructor registration being run.
-The bridge explicitly invokes `opendal::init_default_registry()` through an
-idempotent initialization path. It initializes its Tokio runtime with a
+The bridge explicitly invokes `opendal::install_default()` through an
+idempotent runtime initialization path; with the standard profile this installs
+the compiled S3 HTTP transport. It initializes its Tokio runtime with a
 fallible `OnceLock` result and never uses `unwrap`/`expect` at the ABI boundary.
 Blocking Operator construction occurs inside the runtime's entered context.
 
@@ -625,13 +799,15 @@ Every C-callable entry point—the direct bootstrap and every function pointer
 installed into the table—is an `extern "C"` panic boundary. Installed
 functions clear outputs, validate ABI inputs, and run implementation work
 inside `catch_unwind(AssertUnwindSafe(...))`; bootstrap uses the staged-table
-rule above. No unwind crosses C. Stateful panic transitions are Writer ->
-Failed, Lister -> Exhausted, and Reader -> Closed. Destructors also contain
-panics; they never call Writer close/abort or report Writer completion.
+rule above. No unwind crosses C. Stateful panic transitions are Lister ->
+Exhausted, Reader -> Closed, and ReadStream/Writer/Copier/async resources ->
+their documented terminal failure state. Destructors also contain panics; they
+never call finish/abort or report completion.
 
 The final linker requirements of a Rust `staticlib` are recorded from
 `rustc --print native-static-libs` rather than hard-coded from one machine.
-Distribution of prebuilt libraries remains a later packaging decision.
+Every target-native artifact manifest and pinned table carries those exact
+flags; a release probe links the archive and verifies its runtime identity.
 
 ## MoonBit C stub contract
 
@@ -653,17 +829,17 @@ The package-local C stub is intentionally mechanical:
 - it converts transport errors into the typed MoonBit error model, attaching
   operation and path context at the safe wrapper call site.
 
-Private MoonBit wrappers retain cached OperatorInfo and the original path for
-Reader/ReadStream/Lister/Writer. They can be private structs while their public
-types stay opaque.
+Private MoonBit wrappers retain cached OperatorInfo and the original path(s)
+for Reader, ReadStream, Lister, Writer, Copier, AsyncReadStream, and
+AsyncWriter. They can be private structs while their public types stay opaque.
 
 ## Validation gates
 
-The header design currently has warning-clean C11 and C++17 syntax smoke tests.
-Implementation cannot be considered complete until all of the following pass:
+The implemented header has warning-clean C11 and C++17 syntax smoke tests.
+ABI v1.7 remains complete only while all of the following gates pass:
 
-1. A real C consumer negotiates the table and performs memory-service
-   new/write/read/metadata/error/free operations.
+1. Real C consumers negotiate the table, exercise memory lifecycle operations,
+   and cover standard-profile typed S3 construction and optional groups.
 2. C and Rust layout assertions match on every supported target.
 3. Negotiation tests cover shorter old callers, sizes cut inside every scalar
    and function-pointer field, longer new callers with tail canaries,
@@ -677,17 +853,19 @@ Implementation cannot be considered complete until all of the following pass:
    Unicode, invalid UTF-8, duplicate config keys, unknown flags/tags, overflow,
    values larger than `SIZE_MAX`/`isize::MAX`/MoonBit limits, every v1.0 option
    minimum, and truncated future option fields defaulted without being read.
-5. Output tests prove atomic clearing, lister's entry/end/error tri-state, and
+5. Output tests prove atomic clearing; lister, read-stream, and Copier
+   entry/chunk/progress/end/error states; async typed-result matching; and
    two-phase buffer-copy destination canaries for every non-OK status and the
    untouched tail after OK.
-6. Ownership tests cover `free(NULL)`, NULL close no-ops, every error branch,
-   early Operator free while children remain live, explicit close, repeated
-   close, open Writer finalization without invoking close, and error/snapshot
-   lifetime independence. Writer tests allow backend effects to be
-   indeterminate unless close succeeds.
+6. Ownership tests cover `free(NULL)`, NULL close/cancel no-ops, every error
+   branch, early Operator free while children remain live, explicit and
+   repeated close/abort, open Writer/Copier finalization without finish, async
+   result cancellation/take races, and snapshot lifetime independence.
+   Writer/Copier tests allow backend effects to be indeterminate unless their
+   explicit terminal operation succeeds.
 7. Panic injection exercises every entry point and verifies that the process
-   survives, output is cleared, no payload leaks, and state transitions are
-   terminal where required.
+   survives, output is cleared, no payload leaks, no foreign-runtime callback
+   occurs, and state transitions are terminal where required.
 8. ASan/LSan/UBSan cover the complete Rust-C-MoonBit slice; Miri covers unsafe
    Rust input helpers; TSAN stresses same-handle concurrency and close races.
 9. Debug and release run on macOS and Linux for the promised architectures.
@@ -705,7 +883,7 @@ Implementation cannot be considered complete until all of the following pass:
 - [OpenDAL Capability fields](https://github.com/apache/opendal/blob/v0.58.1/core/core/src/types/capability.rs)
 - [OpenDAL effective OperatorInfo capability](https://github.com/apache/opendal/blob/v0.58.1/core/core/src/types/operator/info.rs)
 - [OpenDAL BytesRange](https://opendal.apache.org/docs/rust/opendal/enum.BytesRange.html)
-- [OpenDAL explicit registry initialization](https://opendal.apache.org/docs/rust/opendal/fn.init_default_registry.html)
+- [OpenDAL explicit default installation](https://github.com/apache/opendal/blob/v0.58.1/core/core/src/lib.rs)
 - [OpenDAL experimental C header](https://github.com/apache/opendal/blob/v0.58.1/bindings/c/include/opendal.h)
 - [Rust `catch_unwind`](https://doc.rust-lang.org/std/panic/fn.catch_unwind.html)
 - [Rust nullable pointer optimization for FFI](https://doc.rust-lang.org/nomicon/ffi.html#the-nullable-pointer-optimization)
