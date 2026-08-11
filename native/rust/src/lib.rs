@@ -3557,6 +3557,8 @@ fn stage_api() -> Option<ApiV1> {
         presigned_request_view: Some(presigned_request_view),
         presigned_request_header_view: Some(presigned_request_header_view),
         presigned_request_free: Some(presigned_request_free),
+        operator_with_timeout: None,
+        operator_with_retry: None,
     })
 }
 
@@ -3638,6 +3640,8 @@ unsafe fn install_api(base: *mut u8, caller_size: usize, staged: &ApiV1) {
     install_field!(presigned_request_view);
     install_field!(presigned_request_header_view);
     install_field!(presigned_request_free);
+    install_field!(operator_with_timeout);
+    install_field!(operator_with_retry);
 }
 
 /// Negotiate the stable v1 function table.
@@ -4759,6 +4763,8 @@ mod tests {
             presigned_request_view,
             presigned_request_header_view,
             presigned_request_free,
+            operator_with_timeout,
+            operator_with_retry,
         );
 
         for caller_size in API_PREFIX_SIZE..=size_of::<ApiV1>() + 16 {

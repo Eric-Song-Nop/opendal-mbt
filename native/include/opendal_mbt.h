@@ -44,7 +44,7 @@ extern "C" {
 #endif
 
 #define OPENDAL_MBT_ABI_V1_MAJOR UINT32_C(1)
-#define OPENDAL_MBT_ABI_V1_MINOR UINT32_C(3)
+#define OPENDAL_MBT_ABI_V1_MINOR UINT32_C(4)
 #define OPENDAL_MBT_ABI_V1_PATCH UINT32_C(0)
 #define OPENDAL_MBT_STRUCT_VERSION_V1 UINT32_C(1)
 #define OPENDAL_MBT_EXTENSIBLE_CODE_MAX UINT32_C(0x7fffffff)
@@ -127,6 +127,7 @@ typedef uint32_t opendal_mbt_range_kind_t;
 #define OPENDAL_MBT_FEATURE_WRITER_ABORT (UINT64_C(1) << 6)
 #define OPENDAL_MBT_FEATURE_S3 (UINT64_C(1) << 7)
 #define OPENDAL_MBT_FEATURE_PRESIGN (UINT64_C(1) << 8)
+#define OPENDAL_MBT_FEATURE_LAYERS (UINT64_C(1) << 9)
 
 /* Capability bit positions. */
 #define OPENDAL_MBT_CAP_STAT (UINT64_C(1) << 0)
@@ -708,6 +709,25 @@ typedef struct opendal_mbt_api_v1 {
       opendal_mbt_presigned_header_view_v1_t *out_view);
   void(OPENDAL_MBT_CALL *presigned_request_free)(
       opendal_mbt_presigned_request_v1_t *request);
+
+  /*
+   * OPENDAL_MBT_FEATURE_LAYERS: appended in ABI v1.4 and dependent on BASE.
+   * Each call borrows operator_ and returns a separately owned Operator. The
+   * input Operator and every resource already opened from it are unchanged.
+   * Layer order is exactly call order: the newly requested layer is appended
+   * outside the input Operator's existing layer stack.
+   */
+  opendal_mbt_status_t(OPENDAL_MBT_CALL *operator_with_timeout)(
+      const opendal_mbt_operator_v1_t *operator_,
+      uint64_t operation_timeout_millis, uint64_t io_timeout_millis,
+      opendal_mbt_operator_v1_t **out_operator,
+      opendal_mbt_error_v1_t **out_error);
+  opendal_mbt_status_t(OPENDAL_MBT_CALL *operator_with_retry)(
+      const opendal_mbt_operator_v1_t *operator_, uint32_t max_retries,
+      uint64_t min_delay_millis, uint64_t max_delay_millis,
+      opendal_mbt_bool_t jitter,
+      opendal_mbt_operator_v1_t **out_operator,
+      opendal_mbt_error_v1_t **out_error);
 } opendal_mbt_api_v1_t;
 
 /* End offset of one complete table field; never read a partially covered one. */

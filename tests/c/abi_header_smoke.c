@@ -77,8 +77,12 @@ ABI_STATIC_ASSERT(offsetof(opendal_mbt_api_v1_t, operator_s3) == 368,
                   "v1.2 function table offset drifted");
 ABI_STATIC_ASSERT(offsetof(opendal_mbt_api_v1_t, operator_presign_read) == 376,
                   "v1.3 function table offset drifted");
-ABI_STATIC_ASSERT(sizeof(opendal_mbt_api_v1_t) == 424,
-                  "v1.3 function table size drifted");
+ABI_STATIC_ASSERT(offsetof(opendal_mbt_api_v1_t, operator_with_timeout) == 424,
+                  "v1.4 timeout function offset drifted");
+ABI_STATIC_ASSERT(offsetof(opendal_mbt_api_v1_t, operator_with_retry) == 432,
+                  "v1.4 retry function offset drifted");
+ABI_STATIC_ASSERT(sizeof(opendal_mbt_api_v1_t) == 440,
+                  "v1.4 function table size drifted");
 #endif
 ABI_STATIC_ASSERT(OPENDAL_MBT_API_V1_FIELD_END(library_info) <=
                       OPENDAL_MBT_API_V1_FIELD_END(error_view),
@@ -95,6 +99,12 @@ ABI_STATIC_ASSERT(OPENDAL_MBT_API_V1_FIELD_END(operator_s3) <=
 ABI_STATIC_ASSERT(OPENDAL_MBT_API_V1_FIELD_END(presigned_request_header_view) <=
                       OPENDAL_MBT_API_V1_FIELD_END(presigned_request_free),
                   "presign view group order drifted");
+ABI_STATIC_ASSERT(OPENDAL_MBT_API_V1_FIELD_END(presigned_request_free) <=
+                      OPENDAL_MBT_API_V1_FIELD_END(operator_with_timeout),
+                  "v1.4 timeout append order drifted");
+ABI_STATIC_ASSERT(OPENDAL_MBT_API_V1_FIELD_END(operator_with_timeout) <=
+                      OPENDAL_MBT_API_V1_FIELD_END(operator_with_retry),
+                  "v1.4 retry append order drifted");
 ABI_STATIC_ASSERT(OPENDAL_MBT_READ_OPTIONS_V1_MIN_SIZE <=
                       sizeof(opendal_mbt_read_options_v1_t),
                   "read options v1.0 prefix drifted");
