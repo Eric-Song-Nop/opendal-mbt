@@ -117,15 +117,57 @@ jobs:
           set -euo pipefail
           version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' moon.mod)
           test "$GITHUB_REF_NAME" = "v$version"
+      - name: Install MoonBit
+        run: |
+          curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash -s "$MOONBIT_VERSION"
+          echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
+      - name: Configure Moon package credentials
+        env:
+          MOONCAKES_CREDENTIALS_JSON: ${{ secrets.MOONCAKES_CREDENTIALS_JSON }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$MOONCAKES_CREDENTIALS_JSON"
+          mkdir -p "$HOME/.moon"
+          umask 077
+          printf '%s' "$MOONCAKES_CREDENTIALS_JSON" > \
+            "$HOME/.moon/credentials.json"
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          gh release create "$GITHUB_REF_NAME" \
-            target/native-dist/*.tar.gz \
-            target/native-dist/*.tar.gz.sha256 \
-            target/native-dist/*.manifest.json \
-            --generate-notes \
-            --title "opendal-mbt $GITHUB_REF_NAME"
+          assets=(
+            target/native-dist/*.tar.gz
+            target/native-dist/*.tar.gz.sha256
+            target/native-dist/*.manifest.json
+          )
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
+              --generate-notes \
+              --title "opendal-mbt $GITHUB_REF_NAME"
+          fi
+      - name: Publish Moon package
+        run: moon publish --frozen
+      - name: Verify the published package from a clean registry consumer
+        shell: bash
+        run: |
+          set -euo pipefail
+          consumer=target/published-consumer
+          mkdir -p "$consumer"
+          cp integration/consumer/moon.mod "$consumer/moon.mod"
+          cp integration/consumer/moon.pkg "$consumer/moon.pkg"
+          cp integration/consumer/consumer_test.mbt "$consumer/consumer_test.mbt"
+          cd "$consumer"
+          for attempt in 1 2 3 4 5; do
+            if moon update && moon test --target native \
+              --warn-list '-68+73' --deny-warn; then
+              exit 0
+            fi
+            moon clean
+            sleep 10
+          done
+          exit 1
