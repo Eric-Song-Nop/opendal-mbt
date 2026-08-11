@@ -1,5 +1,5 @@
 // Generated using `moon info`, DON'T EDIT IT
-package "eric-song-nop/opendal"
+package "Eric-Song-Nop/opendal"
 
 import {
   "moonbitlang/core/debug",

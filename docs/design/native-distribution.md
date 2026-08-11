@@ -2,11 +2,11 @@
 
 ## Goal
 
-`eric-song-nop/opendal` should behave like an ordinary native Moon package.
+`Eric-Song-Nop/opendal` should behave like an ordinary native Moon package.
 A consumer installs it and imports it in the usual way:
 
 ```sh
-moon add eric-song-nop/opendal
+moon add Eric-Song-Nop/opendal
 moon run --target native cmd/main
 ```
 
@@ -98,7 +98,7 @@ work after the first successful install.
 
 The script writes diagnostics to stderr because stdout is the Moon JSON
 protocol. Its result contributes the exact absolute archive path and target
-system libraries to the link configuration for `eric-song-nop/opendal`.
+system libraries to the link configuration for `Eric-Song-Nop/opendal`.
 
 ## Maintainer path
 

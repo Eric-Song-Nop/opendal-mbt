@@ -585,7 +585,7 @@ function makeBuildOutput(staticLibrary, artifact) {
     vars: {},
     link_configs: [
       {
-        package: 'eric-song-nop/opendal',
+        package: 'Eric-Song-Nop/opendal',
         link_flags: [shellQuote(staticLibrary), ...artifact.system_link_flags].join(' '),
       },
     ],

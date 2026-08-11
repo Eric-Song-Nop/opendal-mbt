@@ -23,7 +23,7 @@ class NativeArtifactTest(unittest.TestCase):
         (self.root / "native/include").mkdir(parents=True)
         (self.root / "native").mkdir(exist_ok=True)
         (self.root / "moon.mod").write_text(
-            'name = "eric-song-nop/opendal"\nversion = "0.1.0"\n',
+            'name = "Eric-Song-Nop/opendal"\nversion = "0.1.0"\n',
             encoding="utf-8",
         )
         (self.root / "native/rust/Cargo.toml").write_text(
