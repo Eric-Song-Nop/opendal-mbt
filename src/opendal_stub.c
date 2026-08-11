@@ -1,6 +1,6 @@
 #include <moonbit.h>
 
-#include "native/include/opendal_mbt.h"
+#include "../native/include/opendal_mbt.h"
 
 #include <limits.h>
 #include <stdbool.h>

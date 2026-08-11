@@ -5,17 +5,16 @@ on:
     paths:
       - .github/workflows/native-release.yml
       - build.js
-      - "*.mbt"
       - Cargo.lock
       - Cargo.toml
       - integration/consumer/**
       - moon.mod
-      - moon.pkg
       - native/distribution-profile.json
       - native/artifacts.json
       - native/include/opendal_mbt.h
       - native/rust/**
       - rust-toolchain.toml
+      - src/**
       - scripts/check-packaged-consumer.sh
       - scripts/package-native-artifact.py
       - scripts/prepare-test-native-cache.js

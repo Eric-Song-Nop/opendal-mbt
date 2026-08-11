@@ -17,6 +17,8 @@ description = "MoonBit bindings for Apache OpenDAL"
 // Keep the downstream contract fixture in the development workspace without
 // publishing it as part of the library module.
 
+source = "src"
+
 options(
   "--moonbit-unstable-prebuild": "build.js",
   exclude: [
