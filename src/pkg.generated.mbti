@@ -19,6 +19,26 @@ pub fn OpenDalError::status(Self) -> ErrorStatus
 pub impl Show for OpenDalError
 
 // Types and methods
+pub struct AsyncOperator {
+  // private fields
+}
+pub async fn AsyncOperator::open_read_stream(Self, StringView, range? : ByteRange, chunk_size? : Int, version? : StringView, if_match? : StringView, if_none_match? : StringView) -> AsyncReadStream
+pub async fn AsyncOperator::open_writer(Self, StringView, append? : Bool, content_type? : StringView, content_disposition? : StringView, content_encoding? : StringView, cache_control? : StringView, if_match? : StringView, if_none_match? : StringView) -> AsyncWriter
+pub async fn AsyncOperator::read(Self, StringView, range? : ByteRange, version? : StringView, if_match? : StringView, if_none_match? : StringView) -> Bytes
+
+pub struct AsyncReadStream {
+  // private fields
+}
+pub async fn AsyncReadStream::close(Self) -> Unit
+pub async fn AsyncReadStream::next(Self) -> Bytes?
+
+pub struct AsyncWriter {
+  // private fields
+}
+pub async fn AsyncWriter::abort(Self) -> Unit
+pub async fn AsyncWriter::finish(Self) -> Metadata
+pub async fn AsyncWriter::write(Self, BytesView) -> Unit
+
 pub(all) enum ByteRange {
   Full
   From(offset~ : UInt64)
@@ -138,6 +158,7 @@ pub enum Operation {
 } derive(Eq, @debug.Debug)
 
 pub type Operator
+pub fn Operator::as_async(Self) -> AsyncOperator
 pub fn Operator::check(Self) -> Unit raise OpenDalError
 pub fn Operator::copy(Self, StringView, StringView) -> Metadata raise OpenDalError
 pub fn Operator::create_dir(Self, StringView) -> Unit raise OpenDalError
