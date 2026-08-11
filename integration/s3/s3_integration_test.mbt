@@ -168,16 +168,18 @@ test "S3 integration: blocking facade exercises MinIO end to end" {
 
       operator.write("copy/source.bin", binary_payload) |> ignore
       let copy_metadata = operator.copy("copy/source.bin", "copy/one-shot.bin")
+      assert_true(copy_metadata.is_file())
       assert_eq(
-        copy_metadata.content_length,
+        operator.stat("copy/one-shot.bin").content_length,
         binary_payload.length().to_uint64(),
       )
       assert_eq(operator.read("copy/one-shot.bin"), binary_payload)
 
       let copier = operator.open_copier("copy/source.bin", "copy/managed.bin")
       let copier_metadata = finish_copier(copier)
+      assert_true(copier_metadata.is_file())
       assert_eq(
-        copier_metadata.content_length,
+        operator.stat("copy/managed.bin").content_length,
         binary_payload.length().to_uint64(),
       )
       assert_eq(operator.read("copy/managed.bin"), binary_payload)

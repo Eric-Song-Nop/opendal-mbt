@@ -46,15 +46,34 @@ async fn execute_presigned(
   request : @opendal.PresignedRequest,
   body : Bytes,
 ) -> (Int, Bytes) {
-  let method = safe_presigned_method(request)
+  let request_method = safe_presigned_method(request)
   let raw_headers : Array[(String, Bytes)] = []
+  let mut has_content_length = false
   for header in request.headers {
     raw_headers.push((header.name, header.value))
+    if header.name.to_lower() == "content-length" {
+      has_content_length = true
+    }
   }
   let headers = safe_presigned_headers(raw_headers)
-  let (response, response_body) = try
-    @http.request(request.uri, method, headers, body)
-  catch {
+  if !has_content_length {
+    headers["Content-Length"] = body.length().to_string()
+  }
+  let (response, response_body) = try {
+    match request_method {
+      Put => {
+        // `http.request` treats its headers as connection-wide headers, where
+        // Content-Length is deliberately ignored. The streaming PUT helper
+        // passes request headers at the message layer, so MinIO receives a
+        // fixed-size payload instead of unsupported chunked S3 upload data.
+        let client = @http.put_stream(request.uri, headers~)
+        defer client.close()
+        let response = client..write(body).end_request()
+        (response, client.read_all())
+      }
+      _ => @http.request(request.uri, request_method, headers, body)
+    }
+  } catch {
     _ => raise Failure::Failure("presigned S3 HTTP request failed")
   } noraise {
     result => result
