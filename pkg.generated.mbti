@@ -27,6 +27,7 @@ pub(all) enum ByteRange {
 } derive(Eq, @debug.Debug)
 
 pub type Capability
+pub fn Capability::can_copy(Self) -> Bool
 pub fn Capability::can_create_dir(Self) -> Bool
 pub fn Capability::can_delete(Self) -> Bool
 pub fn Capability::can_list(Self) -> Bool
@@ -35,6 +36,7 @@ pub fn Capability::can_list_with_limit(Self) -> Bool
 pub fn Capability::can_list_with_start_after(Self) -> Bool
 pub fn Capability::can_read(Self) -> Bool
 pub fn Capability::can_read_suffix(Self) -> Bool
+pub fn Capability::can_rename(Self) -> Bool
 pub fn Capability::can_stat(Self) -> Bool
 pub fn Capability::can_write(Self) -> Bool
 pub fn Capability::can_write_append(Self) -> Bool
@@ -120,10 +122,13 @@ pub enum Operation {
   Stat
   Delete
   List
+  Copy
+  Rename
 } derive(Eq, @debug.Debug)
 
 pub type Operator
 pub fn Operator::check(Self) -> Unit raise OpenDalError
+pub fn Operator::copy(Self, StringView, StringView) -> Metadata raise OpenDalError
 pub fn Operator::create_dir(Self, StringView) -> Unit raise OpenDalError
 pub fn Operator::delete(Self, StringView, version? : StringView, recursive? : Bool) -> Unit raise OpenDalError
 pub fn Operator::exists(Self, StringView) -> Bool raise OpenDalError
@@ -134,6 +139,7 @@ pub fn Operator::open_lister(Self, StringView, recursive? : Bool, limit? : UInt6
 pub fn Operator::open_reader(Self, StringView, version? : StringView, if_match? : StringView, if_none_match? : StringView) -> Reader raise OpenDalError
 pub fn Operator::open_writer(Self, StringView, append? : Bool, content_type? : StringView, content_disposition? : StringView, content_encoding? : StringView, cache_control? : StringView, if_match? : StringView, if_none_match? : StringView) -> Writer raise OpenDalError
 pub fn Operator::read(Self, StringView, range? : ByteRange, version? : StringView, if_match? : StringView, if_none_match? : StringView) -> Bytes raise OpenDalError
+pub fn Operator::rename(Self, StringView, StringView) -> Unit raise OpenDalError
 pub fn Operator::stat(Self, StringView, version? : StringView, if_match? : StringView, if_none_match? : StringView) -> Metadata raise OpenDalError
 pub fn Operator::write(Self, StringView, BytesView, append? : Bool, content_type? : StringView, content_disposition? : StringView, content_encoding? : StringView, cache_control? : StringView, if_match? : StringView, if_none_match? : StringView) -> Metadata raise OpenDalError
 

@@ -1452,6 +1452,122 @@ moonbit_opendal_writer_close(moonbit_opendal_writer_t *writer) {
   return result;
 }
 
+MOONBIT_FFI_EXPORT moonbit_opendal_result_t *moonbit_opendal_operator_copy(
+    moonbit_opendal_operator_t *operator_, moonbit_string_t source,
+    moonbit_string_t destination) {
+  moonbit_opendal_result_t *result = result_new();
+  opendal_mbt_api_v1_t api;
+  owned_utf8_t source_utf8 = {0};
+  owned_utf8_t destination_utf8 = {0};
+  utf16_result_t conversion;
+  result->status = load_api(&api, true);
+  if (result->status != OPENDAL_MBT_STATUS_OK) {
+    return result;
+  }
+  if (operator_ == NULL || operator_->operator_ == NULL) {
+    result_set_local_error(result, OPENDAL_MBT_ERROR_RESOURCE_CLOSED,
+                           "ResourceClosed", "operator is closed");
+    return result;
+  }
+  conversion = utf16_to_utf8(source, &source_utf8);
+  if (conversion != UTF16_OK) {
+    result_set_local_error(
+        result,
+        conversion == UTF16_INVALID ? OPENDAL_MBT_ERROR_INVALID_ARGUMENT
+                                    : OPENDAL_MBT_ERROR_UNEXPECTED,
+        conversion == UTF16_INVALID ? "InvalidArgument" : "Unexpected",
+        conversion == UTF16_INVALID ? "source path contains invalid UTF-16"
+                                    : "unable to allocate UTF-8 source path");
+    goto cleanup_copy;
+  }
+  conversion = utf16_to_utf8(destination, &destination_utf8);
+  if (conversion != UTF16_OK) {
+    result_set_local_error(
+        result,
+        conversion == UTF16_INVALID ? OPENDAL_MBT_ERROR_INVALID_ARGUMENT
+                                    : OPENDAL_MBT_ERROR_UNEXPECTED,
+        conversion == UTF16_INVALID ? "InvalidArgument" : "Unexpected",
+        conversion == UTF16_INVALID
+            ? "destination path contains invalid UTF-16"
+            : "unable to allocate UTF-8 destination path");
+    goto cleanup_copy;
+  }
+  {
+    opendal_mbt_bytes_view_v1_t source_view = owned_utf8_view(&source_utf8);
+    opendal_mbt_bytes_view_v1_t destination_view =
+        owned_utf8_view(&destination_utf8);
+    result->status = api.operator_copy(
+        operator_->operator_, &source_view, &destination_view,
+        &result->metadata, &result->error);
+  }
+  if (result->status == OPENDAL_MBT_STATUS_OK &&
+      (result->metadata == NULL || result->error != NULL)) {
+    result->status = OPENDAL_MBT_STATUS_ABI_MISMATCH;
+  }
+
+cleanup_copy:
+  owned_utf8_free(&destination_utf8);
+  owned_utf8_free(&source_utf8);
+  return result;
+}
+
+MOONBIT_FFI_EXPORT moonbit_opendal_result_t *moonbit_opendal_operator_rename(
+    moonbit_opendal_operator_t *operator_, moonbit_string_t source,
+    moonbit_string_t destination) {
+  moonbit_opendal_result_t *result = result_new();
+  opendal_mbt_api_v1_t api;
+  owned_utf8_t source_utf8 = {0};
+  owned_utf8_t destination_utf8 = {0};
+  utf16_result_t conversion;
+  result->status = load_api(&api, true);
+  if (result->status != OPENDAL_MBT_STATUS_OK) {
+    return result;
+  }
+  if (operator_ == NULL || operator_->operator_ == NULL) {
+    result_set_local_error(result, OPENDAL_MBT_ERROR_RESOURCE_CLOSED,
+                           "ResourceClosed", "operator is closed");
+    return result;
+  }
+  conversion = utf16_to_utf8(source, &source_utf8);
+  if (conversion != UTF16_OK) {
+    result_set_local_error(
+        result,
+        conversion == UTF16_INVALID ? OPENDAL_MBT_ERROR_INVALID_ARGUMENT
+                                    : OPENDAL_MBT_ERROR_UNEXPECTED,
+        conversion == UTF16_INVALID ? "InvalidArgument" : "Unexpected",
+        conversion == UTF16_INVALID ? "source path contains invalid UTF-16"
+                                    : "unable to allocate UTF-8 source path");
+    goto cleanup_rename;
+  }
+  conversion = utf16_to_utf8(destination, &destination_utf8);
+  if (conversion != UTF16_OK) {
+    result_set_local_error(
+        result,
+        conversion == UTF16_INVALID ? OPENDAL_MBT_ERROR_INVALID_ARGUMENT
+                                    : OPENDAL_MBT_ERROR_UNEXPECTED,
+        conversion == UTF16_INVALID ? "InvalidArgument" : "Unexpected",
+        conversion == UTF16_INVALID
+            ? "destination path contains invalid UTF-16"
+            : "unable to allocate UTF-8 destination path");
+    goto cleanup_rename;
+  }
+  {
+    opendal_mbt_bytes_view_v1_t source_view = owned_utf8_view(&source_utf8);
+    opendal_mbt_bytes_view_v1_t destination_view =
+        owned_utf8_view(&destination_utf8);
+    result->status = api.operator_rename(operator_->operator_, &source_view,
+                                         &destination_view, &result->error);
+  }
+  if (result->status == OPENDAL_MBT_STATUS_OK && result->error != NULL) {
+    result->status = OPENDAL_MBT_STATUS_ABI_MISMATCH;
+  }
+
+cleanup_rename:
+  owned_utf8_free(&destination_utf8);
+  owned_utf8_free(&source_utf8);
+  return result;
+}
+
 MOONBIT_FFI_EXPORT moonbit_opendal_result_t *
 moonbit_opendal_operator_create_dir(moonbit_opendal_operator_t *operator_,
                                     moonbit_string_t path) {
