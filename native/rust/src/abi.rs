@@ -5,7 +5,7 @@
 pub(crate) type Status = u32;
 
 pub(crate) const ABI_MAJOR: u32 = 1;
-pub(crate) const ABI_MINOR: u32 = 6;
+pub(crate) const ABI_MINOR: u32 = 7;
 pub(crate) const ABI_PATCH: u32 = 0;
 pub(crate) const STRUCT_VERSION: u32 = 1;
 
@@ -62,6 +62,8 @@ pub(crate) const FEATURE_LAYERS: u64 = 1 << 9;
 pub(crate) const FEATURE_CONCURRENCY_LIMIT: u64 = 1 << 10;
 pub(crate) const FEATURE_BATCH_DELETE: u64 = 1 << 11;
 pub(crate) const FEATURE_COPIER: u64 = 1 << 12;
+#[allow(dead_code)]
+pub(crate) const FEATURE_ASYNC: u64 = 1 << 13;
 
 pub(crate) const CAP_STAT: u64 = 1 << 0;
 pub(crate) const CAP_READ: u64 = 1 << 1;
@@ -461,6 +463,21 @@ pub(crate) struct WriterV1 {
     pub(crate) changed: std::sync::Condvar,
 }
 
+#[repr(C)]
+pub(crate) struct AsyncTaskV1 {
+    pub(crate) shared: std::sync::Arc<crate::AsyncTaskShared>,
+}
+
+#[repr(C)]
+pub(crate) struct AsyncReadStreamV1 {
+    pub(crate) core: std::sync::Arc<crate::AsyncReadStreamCore>,
+}
+
+#[repr(C)]
+pub(crate) struct AsyncWriterV1 {
+    pub(crate) core: std::sync::Arc<crate::AsyncWriterCore>,
+}
+
 pub(crate) enum WriterStateV1 {
     Open(opendal::Writer),
     Busy,
@@ -702,6 +719,70 @@ pub(crate) type CopierFinishFn =
     unsafe extern "C" fn(*mut CopierV1, *mut *mut MetadataV1, *mut *mut ErrorV1) -> Status;
 pub(crate) type CopierAbortFn = unsafe extern "C" fn(*mut CopierV1, *mut *mut ErrorV1) -> Status;
 pub(crate) type CopierFreeFn = unsafe extern "C" fn(*mut CopierV1);
+pub(crate) type AsyncOperatorReadStartFn = unsafe extern "C" fn(
+    *mut OperatorV1,
+    *const BytesViewV1,
+    *const ReadOptionsV1,
+    u64,
+    i32,
+    *mut *mut AsyncTaskV1,
+    *mut *mut ErrorV1,
+) -> Status;
+pub(crate) type AsyncOperatorReadStreamStartFn = unsafe extern "C" fn(
+    *mut OperatorV1,
+    *const BytesViewV1,
+    *const ReadStreamOptionsV1,
+    i32,
+    *mut *mut AsyncTaskV1,
+    *mut *mut ErrorV1,
+) -> Status;
+pub(crate) type AsyncReadStreamNextStartFn = unsafe extern "C" fn(
+    *mut AsyncReadStreamV1,
+    u64,
+    i32,
+    *mut *mut AsyncTaskV1,
+    *mut *mut ErrorV1,
+) -> Status;
+pub(crate) type AsyncReadStreamCloseFn = unsafe extern "C" fn(*mut AsyncReadStreamV1);
+pub(crate) type AsyncReadStreamFreeFn = unsafe extern "C" fn(*mut AsyncReadStreamV1);
+pub(crate) type AsyncOperatorWriterStartFn = unsafe extern "C" fn(
+    *mut OperatorV1,
+    *const BytesViewV1,
+    *const WriteOptionsV1,
+    i32,
+    *mut *mut AsyncTaskV1,
+    *mut *mut ErrorV1,
+) -> Status;
+pub(crate) type AsyncWriterWriteStartFn = unsafe extern "C" fn(
+    *mut AsyncWriterV1,
+    *const BytesViewV1,
+    i32,
+    *mut *mut AsyncTaskV1,
+    *mut *mut ErrorV1,
+) -> Status;
+pub(crate) type AsyncWriterFinishStartFn = unsafe extern "C" fn(
+    *mut AsyncWriterV1,
+    i32,
+    *mut *mut AsyncTaskV1,
+    *mut *mut ErrorV1,
+) -> Status;
+pub(crate) type AsyncWriterAbortStartFn = AsyncWriterFinishStartFn;
+pub(crate) type AsyncWriterFreeFn = unsafe extern "C" fn(*mut AsyncWriterV1);
+pub(crate) type AsyncTaskCancelFn = unsafe extern "C" fn(*mut AsyncTaskV1);
+pub(crate) type AsyncTaskTakeBufferFn =
+    unsafe extern "C" fn(*mut AsyncTaskV1, *mut *mut BufferV1, *mut *mut ErrorV1) -> Status;
+pub(crate) type AsyncTaskTakeMetadataFn =
+    unsafe extern "C" fn(*mut AsyncTaskV1, *mut *mut MetadataV1, *mut *mut ErrorV1) -> Status;
+pub(crate) type AsyncTaskTakeReadStreamFn = unsafe extern "C" fn(
+    *mut AsyncTaskV1,
+    *mut *mut AsyncReadStreamV1,
+    *mut *mut ErrorV1,
+) -> Status;
+pub(crate) type AsyncTaskTakeWriterFn =
+    unsafe extern "C" fn(*mut AsyncTaskV1, *mut *mut AsyncWriterV1, *mut *mut ErrorV1) -> Status;
+pub(crate) type AsyncTaskTakeUnitFn =
+    unsafe extern "C" fn(*mut AsyncTaskV1, *mut *mut ErrorV1) -> Status;
+pub(crate) type AsyncTaskFreeFn = unsafe extern "C" fn(*mut AsyncTaskV1);
 
 #[repr(C)]
 pub(crate) struct ApiV1 {
@@ -770,6 +851,23 @@ pub(crate) struct ApiV1 {
     pub(crate) copier_finish: Option<CopierFinishFn>,
     pub(crate) copier_abort: Option<CopierAbortFn>,
     pub(crate) copier_free: Option<CopierFreeFn>,
+    pub(crate) async_operator_read_start: Option<AsyncOperatorReadStartFn>,
+    pub(crate) async_operator_read_stream_start: Option<AsyncOperatorReadStreamStartFn>,
+    pub(crate) async_read_stream_next_start: Option<AsyncReadStreamNextStartFn>,
+    pub(crate) async_read_stream_close: Option<AsyncReadStreamCloseFn>,
+    pub(crate) async_read_stream_free: Option<AsyncReadStreamFreeFn>,
+    pub(crate) async_operator_writer_start: Option<AsyncOperatorWriterStartFn>,
+    pub(crate) async_writer_write_start: Option<AsyncWriterWriteStartFn>,
+    pub(crate) async_writer_finish_start: Option<AsyncWriterFinishStartFn>,
+    pub(crate) async_writer_abort_start: Option<AsyncWriterAbortStartFn>,
+    pub(crate) async_writer_free: Option<AsyncWriterFreeFn>,
+    pub(crate) async_task_cancel: Option<AsyncTaskCancelFn>,
+    pub(crate) async_task_take_buffer: Option<AsyncTaskTakeBufferFn>,
+    pub(crate) async_task_take_metadata: Option<AsyncTaskTakeMetadataFn>,
+    pub(crate) async_task_take_read_stream: Option<AsyncTaskTakeReadStreamFn>,
+    pub(crate) async_task_take_writer: Option<AsyncTaskTakeWriterFn>,
+    pub(crate) async_task_take_unit: Option<AsyncTaskTakeUnitFn>,
+    pub(crate) async_task_free: Option<AsyncTaskFreeFn>,
 }
 
 pub(crate) const API_INPUT_SIZE: usize =
@@ -812,7 +910,9 @@ const _: () = {
     assert!(core::mem::offset_of!(ApiV1, copier_finish) == 472);
     assert!(core::mem::offset_of!(ApiV1, copier_abort) == 480);
     assert!(core::mem::offset_of!(ApiV1, copier_free) == 488);
-    assert!(core::mem::size_of::<ApiV1>() == 496);
+    assert!(core::mem::offset_of!(ApiV1, async_operator_read_start) == 496);
+    assert!(core::mem::offset_of!(ApiV1, async_task_free) == 624);
+    assert!(core::mem::size_of::<ApiV1>() == 632);
     assert!(API_INPUT_SIZE == 8);
     assert!(API_PREFIX_SIZE == 40);
 };

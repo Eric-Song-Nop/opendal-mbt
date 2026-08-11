@@ -262,6 +262,11 @@ struct StructHeaderV1 {
     struct_version: u32,
 }
 
+/* Defined by the Phase 5E native state-machine commit. */
+pub(crate) struct AsyncTaskShared;
+pub(crate) struct AsyncReadStreamCore;
+pub(crate) struct AsyncWriterCore;
+
 enum CallFailure {
     AbiMismatch,
     Error(ErrorV1),
@@ -4420,6 +4425,23 @@ fn stage_api() -> Option<ApiV1> {
         copier_finish: Some(copier_finish),
         copier_abort: Some(copier_abort),
         copier_free: Some(copier_free),
+        async_operator_read_start: None,
+        async_operator_read_stream_start: None,
+        async_read_stream_next_start: None,
+        async_read_stream_close: None,
+        async_read_stream_free: None,
+        async_operator_writer_start: None,
+        async_writer_write_start: None,
+        async_writer_finish_start: None,
+        async_writer_abort_start: None,
+        async_writer_free: None,
+        async_task_cancel: None,
+        async_task_take_buffer: None,
+        async_task_take_metadata: None,
+        async_task_take_read_stream: None,
+        async_task_take_writer: None,
+        async_task_take_unit: None,
+        async_task_free: None,
     })
 }
 
@@ -4510,6 +4532,23 @@ unsafe fn install_api(base: *mut u8, caller_size: usize, staged: &ApiV1) {
     install_field!(copier_finish);
     install_field!(copier_abort);
     install_field!(copier_free);
+    install_field!(async_operator_read_start);
+    install_field!(async_operator_read_stream_start);
+    install_field!(async_read_stream_next_start);
+    install_field!(async_read_stream_close);
+    install_field!(async_read_stream_free);
+    install_field!(async_operator_writer_start);
+    install_field!(async_writer_write_start);
+    install_field!(async_writer_finish_start);
+    install_field!(async_writer_abort_start);
+    install_field!(async_writer_free);
+    install_field!(async_task_cancel);
+    install_field!(async_task_take_buffer);
+    install_field!(async_task_take_metadata);
+    install_field!(async_task_take_read_stream);
+    install_field!(async_task_take_writer);
+    install_field!(async_task_take_unit);
+    install_field!(async_task_free);
 }
 
 /// Negotiate the stable v1 function table.
@@ -6058,6 +6097,23 @@ mod tests {
             copier_finish,
             copier_abort,
             copier_free,
+            async_operator_read_start,
+            async_operator_read_stream_start,
+            async_read_stream_next_start,
+            async_read_stream_close,
+            async_read_stream_free,
+            async_operator_writer_start,
+            async_writer_write_start,
+            async_writer_finish_start,
+            async_writer_abort_start,
+            async_writer_free,
+            async_task_cancel,
+            async_task_take_buffer,
+            async_task_take_metadata,
+            async_task_take_read_stream,
+            async_task_take_writer,
+            async_task_take_unit,
+            async_task_free,
         );
 
         for caller_size in API_PREFIX_SIZE..=size_of::<ApiV1>() + 16 {

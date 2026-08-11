@@ -44,7 +44,7 @@ extern "C" {
 #endif
 
 #define OPENDAL_MBT_ABI_V1_MAJOR UINT32_C(1)
-#define OPENDAL_MBT_ABI_V1_MINOR UINT32_C(6)
+#define OPENDAL_MBT_ABI_V1_MINOR UINT32_C(7)
 #define OPENDAL_MBT_ABI_V1_PATCH UINT32_C(0)
 #define OPENDAL_MBT_STRUCT_VERSION_V1 UINT32_C(1)
 #define OPENDAL_MBT_EXTENSIBLE_CODE_MAX UINT32_C(0x7fffffff)
@@ -131,6 +131,7 @@ typedef uint32_t opendal_mbt_range_kind_t;
 #define OPENDAL_MBT_FEATURE_CONCURRENCY_LIMIT (UINT64_C(1) << 10)
 #define OPENDAL_MBT_FEATURE_BATCH_DELETE (UINT64_C(1) << 11)
 #define OPENDAL_MBT_FEATURE_COPIER (UINT64_C(1) << 12)
+#define OPENDAL_MBT_FEATURE_ASYNC (UINT64_C(1) << 13)
 
 /* Capability bit positions. */
 #define OPENDAL_MBT_CAP_STAT (UINT64_C(1) << 0)
@@ -471,6 +472,10 @@ typedef struct opendal_mbt_entry_v1 opendal_mbt_entry_v1_t;
 typedef struct opendal_mbt_operator_info_v1 opendal_mbt_operator_info_v1_t;
 typedef struct opendal_mbt_presigned_request_v1
     opendal_mbt_presigned_request_v1_t;
+typedef struct opendal_mbt_async_task_v1 opendal_mbt_async_task_v1_t;
+typedef struct opendal_mbt_async_read_stream_v1
+    opendal_mbt_async_read_stream_v1_t;
+typedef struct opendal_mbt_async_writer_v1 opendal_mbt_async_writer_v1_t;
 
 /*
  * Append-only v1 function table. All table function pointers use the C calling
@@ -800,6 +805,92 @@ typedef struct opendal_mbt_api_v1 {
       opendal_mbt_error_v1_t **out_error);
   /* NULL is a no-op; free never finishes or reports a successful abort. */
   void(OPENDAL_MBT_CALL *copier_free)(opendal_mbt_copier_v1_t *copier);
+
+  /*
+   * OPENDAL_MBT_FEATURE_ASYNC: appended in ABI v1.7. This group is available
+   * on POSIX native targets and depends on BASE. `completion_fd` is a writable
+   * pipe descriptor. Every successful start duplicates that descriptor and
+   * copies all borrowed input before returning, so the caller may immediately
+   * close or reuse its inputs. Worker completion publishes one owned result
+   * before writing one byte. Cancellation that wins first publishes the
+   * terminal task state and writes that byte synchronously; the later worker
+   * does not write again. The byte is readiness only and carries no data.
+   * Workers never call the foreign runtime and never retain foreign values.
+   */
+  opendal_mbt_status_t(OPENDAL_MBT_CALL *async_operator_read_start)(
+      opendal_mbt_operator_v1_t *operator_,
+      const opendal_mbt_bytes_view_v1_t *path,
+      const opendal_mbt_read_options_v1_t *options, uint64_t max_output_len,
+      int32_t completion_fd, opendal_mbt_async_task_v1_t **out_task,
+      opendal_mbt_error_v1_t **out_error);
+  opendal_mbt_status_t(OPENDAL_MBT_CALL *async_operator_read_stream_start)(
+      opendal_mbt_operator_v1_t *operator_,
+      const opendal_mbt_bytes_view_v1_t *path,
+      const opendal_mbt_read_stream_options_v1_t *options,
+      int32_t completion_fd, opendal_mbt_async_task_v1_t **out_task,
+      opendal_mbt_error_v1_t **out_error);
+  opendal_mbt_status_t(OPENDAL_MBT_CALL *async_read_stream_next_start)(
+      opendal_mbt_async_read_stream_v1_t *stream, uint64_t max_output_len,
+      int32_t completion_fd, opendal_mbt_async_task_v1_t **out_task,
+      opendal_mbt_error_v1_t **out_error);
+  /* NULL is a no-op; close is idempotent, synchronous, and performs no I/O. */
+  void(OPENDAL_MBT_CALL *async_read_stream_close)(
+      opendal_mbt_async_read_stream_v1_t *stream);
+  void(OPENDAL_MBT_CALL *async_read_stream_free)(
+      opendal_mbt_async_read_stream_v1_t *stream);
+
+  opendal_mbt_status_t(OPENDAL_MBT_CALL *async_operator_writer_start)(
+      opendal_mbt_operator_v1_t *operator_,
+      const opendal_mbt_bytes_view_v1_t *path,
+      const opendal_mbt_write_options_v1_t *options, int32_t completion_fd,
+      opendal_mbt_async_task_v1_t **out_task,
+      opendal_mbt_error_v1_t **out_error);
+  opendal_mbt_status_t(OPENDAL_MBT_CALL *async_writer_write_start)(
+      opendal_mbt_async_writer_v1_t *writer,
+      const opendal_mbt_bytes_view_v1_t *data, int32_t completion_fd,
+      opendal_mbt_async_task_v1_t **out_task,
+      opendal_mbt_error_v1_t **out_error);
+  opendal_mbt_status_t(OPENDAL_MBT_CALL *async_writer_finish_start)(
+      opendal_mbt_async_writer_v1_t *writer, int32_t completion_fd,
+      opendal_mbt_async_task_v1_t **out_task,
+      opendal_mbt_error_v1_t **out_error);
+  opendal_mbt_status_t(OPENDAL_MBT_CALL *async_writer_abort_start)(
+      opendal_mbt_async_writer_v1_t *writer, int32_t completion_fd,
+      opendal_mbt_async_task_v1_t **out_task,
+      opendal_mbt_error_v1_t **out_error);
+  void(OPENDAL_MBT_CALL *async_writer_free)(
+      opendal_mbt_async_writer_v1_t *writer);
+
+  /*
+   * Cancellation and free are idempotent on NULL. A task result is taken
+   * exactly once with the matching typed take. Taking too early, after cancel,
+   * twice, or through the wrong typed function returns ERROR. Cancel after a
+   * successful take is a no-op. Cancelling an unclaimed stream/writer result
+   * makes that resource terminal even when the worker already completed.
+   */
+  void(OPENDAL_MBT_CALL *async_task_cancel)(
+      opendal_mbt_async_task_v1_t *task);
+  opendal_mbt_status_t(OPENDAL_MBT_CALL *async_task_take_buffer)(
+      opendal_mbt_async_task_v1_t *task,
+      opendal_mbt_buffer_v1_t **out_buffer,
+      opendal_mbt_error_v1_t **out_error);
+  opendal_mbt_status_t(OPENDAL_MBT_CALL *async_task_take_metadata)(
+      opendal_mbt_async_task_v1_t *task,
+      opendal_mbt_metadata_v1_t **out_metadata,
+      opendal_mbt_error_v1_t **out_error);
+  opendal_mbt_status_t(OPENDAL_MBT_CALL *async_task_take_read_stream)(
+      opendal_mbt_async_task_v1_t *task,
+      opendal_mbt_async_read_stream_v1_t **out_stream,
+      opendal_mbt_error_v1_t **out_error);
+  opendal_mbt_status_t(OPENDAL_MBT_CALL *async_task_take_writer)(
+      opendal_mbt_async_task_v1_t *task,
+      opendal_mbt_async_writer_v1_t **out_writer,
+      opendal_mbt_error_v1_t **out_error);
+  opendal_mbt_status_t(OPENDAL_MBT_CALL *async_task_take_unit)(
+      opendal_mbt_async_task_v1_t *task,
+      opendal_mbt_error_v1_t **out_error);
+  void(OPENDAL_MBT_CALL *async_task_free)(
+      opendal_mbt_async_task_v1_t *task);
 } opendal_mbt_api_v1_t;
 
 /* End offset of one complete table field; never read a partially covered one. */
