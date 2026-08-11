@@ -21,6 +21,7 @@ use opendal::{BytesRange, Capability, EntryMode, ErrorKind, Metadata};
 use tokio::runtime::Runtime;
 
 const MAX_OUTPUT_BYTES: u64 = i32::MAX as u64;
+const WHOLE_READ_CHUNK_BYTES: usize = 1024 * 1024;
 const BINDING_VERSION: &str = env!("CARGO_PKG_VERSION");
 const OPENDAL_VERSION: &str = "0.58.1";
 const SERVICE_PROFILE: &str = "memory,fs";
@@ -46,6 +47,9 @@ static TEST_READER_READ_TARGET: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 #[cfg(test)]
 static TEST_READER_READ_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+#[cfg(test)]
+static TEST_WHOLE_READ_OBSERVATIONS: Mutex<Vec<(usize, u64)>> = Mutex::new(Vec::new());
 
 #[cfg(test)]
 const TEST_WRITER_WRITE_ERROR: u8 = 1;
@@ -108,6 +112,40 @@ fn take_reader_read_test_mode(reader: &ReaderV1) -> u8 {
     } else {
         0
     }
+}
+
+#[cfg(test)]
+fn install_whole_read_observer(operator: *mut OperatorV1) {
+    let mut observations = TEST_WHOLE_READ_OBSERVATIONS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    observations.retain(|(address, _)| *address != operator.addr());
+    observations.push((operator.addr(), 0));
+}
+
+#[cfg(test)]
+fn observe_whole_read_chunk(operator: &OperatorV1, length: u64) {
+    let mut observations = TEST_WHOLE_READ_OBSERVATIONS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some((_, observed)) = observations
+        .iter_mut()
+        .find(|(address, _)| *address == ptr::from_ref(operator).addr())
+    {
+        *observed = observed.saturating_add(length);
+    }
+}
+
+#[cfg(test)]
+fn take_whole_read_observation(operator: *mut OperatorV1) -> u64 {
+    let mut observations = TEST_WHOLE_READ_OBSERVATIONS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    observations
+        .iter()
+        .position(|(address, _)| *address == operator.addr())
+        .map(|index| observations.swap_remove(index).1)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -1020,6 +1058,159 @@ fn checked_read_buffer(
     }))
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WholeReadRangePlan {
+    Bounded(BytesRange),
+    Suffix { size: u64 },
+    OpenEnded { offset: u64, probe_size: u64 },
+}
+
+struct WholeReadPlan {
+    reader_options: ReaderOptions,
+    stat_options: StatOptions,
+    range: WholeReadRangePlan,
+    output_limit: u64,
+}
+
+fn whole_read_plan(options: ReadOptions, max_output_len: u64) -> CallResult<WholeReadPlan> {
+    let output_limit = max_output_len.min(MAX_OUTPUT_BYTES);
+    let ReadOptions {
+        range,
+        version,
+        if_match,
+        if_none_match,
+        if_modified_since,
+        if_unmodified_since,
+        content_length_hint,
+        ..
+    } = options;
+
+    let range = match range {
+        BytesRange::Range {
+            offset,
+            size: Some(size),
+        } => {
+            if size > output_limit {
+                return Err(buffer_too_large(
+                    "read result exceeds the negotiated output limit",
+                ));
+            }
+            WholeReadRangePlan::Bounded(BytesRange::new(offset, Some(size)))
+        }
+        BytesRange::Suffix { size } => {
+            if size > output_limit {
+                return Err(buffer_too_large(
+                    "read result exceeds the negotiated output limit",
+                ));
+            }
+            WholeReadRangePlan::Suffix { size }
+        }
+        BytesRange::Range { offset, size: None } => {
+            // Reading one byte beyond the negotiated limit distinguishes an exact
+            // fit from an oversized Full/From result without materializing the
+            // rest of the object. Clamp at the u64 address-space boundary so a
+            // valid open-ended range near u64::MAX cannot overflow when bounded.
+            let probe_size = output_limit
+                .checked_add(1)
+                .expect("MAX_OUTPUT_BYTES leaves room for the overflow probe")
+                .min(u64::MAX - offset);
+            WholeReadRangePlan::OpenEnded { offset, probe_size }
+        }
+    };
+
+    Ok(WholeReadPlan {
+        stat_options: StatOptions {
+            version: version.clone(),
+            ..StatOptions::default()
+        },
+        reader_options: ReaderOptions {
+            version,
+            if_match,
+            if_none_match,
+            if_modified_since,
+            if_unmodified_since,
+            content_length_hint,
+            concurrent: 1,
+            chunk: Some(WHOLE_READ_CHUNK_BYTES),
+            gap: None,
+            prefetch: 0,
+        },
+        range,
+        output_limit,
+    })
+}
+
+fn resolve_whole_read_range(
+    operator: &opendal::blocking::Operator,
+    path: &str,
+    plan: &WholeReadPlan,
+) -> CallResult<BytesRange> {
+    let (offset, requested_size) = match plan.range {
+        WholeReadRangePlan::Bounded(range) => return Ok(range),
+        WholeReadRangePlan::Suffix { size } => (None, size),
+        WholeReadRangePlan::OpenEnded { offset, probe_size } => (Some(offset), probe_size),
+    };
+    let metadata = operator
+        .stat_options(path, plan.stat_options.clone())
+        .map_err(opendal_error)?;
+    if metadata.is_dir() {
+        return Err(opendal_error(
+            opendal::Error::new(ErrorKind::IsADirectory, "read path is a directory")
+                .with_operation("Operator::read"),
+        ));
+    }
+    let content_length = metadata.content_length();
+    match offset {
+        Some(offset) => {
+            let start = offset.min(content_length);
+            let size = content_length.saturating_sub(start).min(requested_size);
+            Ok(BytesRange::new(start, Some(size)))
+        }
+        None => {
+            let size = content_length.min(requested_size);
+            Ok(BytesRange::new(content_length - size, Some(size)))
+        }
+    }
+}
+
+fn append_whole_read_chunk(
+    output: &mut Vec<u8>,
+    buffer: opendal::Buffer,
+    output_limit: u64,
+) -> CallResult<()> {
+    let current_length = u64::try_from(output.len())
+        .map_err(|_| buffer_too_large("read result length is not representable"))?;
+    let chunk_length = u64::try_from(buffer.len())
+        .map_err(|_| buffer_too_large("read result length is not representable"))?;
+    let next_length = current_length
+        .checked_add(chunk_length)
+        .ok_or_else(|| buffer_too_large("read result length is not representable"))?;
+    if next_length > output_limit {
+        return Err(buffer_too_large(
+            "read result exceeds the negotiated output limit",
+        ));
+    }
+
+    let required = usize::try_from(next_length)
+        .map_err(|_| buffer_too_large("read result length is not representable"))?;
+    if required > output.capacity() {
+        let limit = usize::try_from(output_limit)
+            .map_err(|_| buffer_too_large("read output limit is not representable"))?;
+        let target = output
+            .capacity()
+            .max(1)
+            .saturating_mul(2)
+            .max(required)
+            .min(limit);
+        output.reserve_exact(target - output.len());
+    }
+    for bytes in buffer {
+        output.extend_from_slice(&bytes);
+    }
+    debug_assert_eq!(output.len(), required);
+    Ok(())
+}
+
 fn metadata_output_view(metadata: &Metadata, header: StructHeaderV1) -> CallResult<MetadataViewV1> {
     let mut present_bits = 0;
     let is_current = match metadata.is_current() {
@@ -1586,20 +1777,21 @@ unsafe extern "C" fn operator_read(
             let operator = unsafe { borrow_required(operator.cast_const())? };
             let path = unsafe { read_text(path, "path")? };
             let options = unsafe { parse_read_options(options)? };
-            let buffer = operator
+            let plan = whole_read_plan(options, max_output_len)?;
+            let range = resolve_whole_read_range(&operator.inner, &path, &plan)?;
+            let reader = operator
                 .inner
-                .read_options(&path, options)
+                .reader_options(&path, plan.reader_options)
                 .map_err(opendal_error)?;
-            let length = u64::try_from(buffer.len())
-                .map_err(|_| buffer_too_large("read result length is not representable"))?;
-            if length > MAX_OUTPUT_BYTES || length > max_output_len {
-                return Err(buffer_too_large(
-                    "read result exceeds the negotiated output limit",
-                ));
+            let iterator = reader.into_iterator(range).map_err(opendal_error)?;
+            let mut output = Vec::new();
+            for buffer in iterator {
+                let buffer = buffer.map_err(opendal_error)?;
+                #[cfg(test)]
+                observe_whole_read_chunk(operator, u64::try_from(buffer.len()).unwrap_or(u64::MAX));
+                append_whole_read_chunk(&mut output, buffer, plan.output_limit)?;
             }
-            Ok(Box::new(BufferV1 {
-                bytes: buffer.to_vec(),
-            }))
+            Ok(Box::new(BufferV1 { bytes: output }))
         })();
         match result {
             Ok(buffer) => {
@@ -3158,6 +3350,54 @@ mod tests {
         }
     }
 
+    fn whole_read_options(range: ByteRangeV1) -> ReadOptionsV1 {
+        ReadOptionsV1 {
+            struct_size: size_of::<ReadOptionsV1>() as u32,
+            struct_version: STRUCT_VERSION,
+            present_bits: 0,
+            range,
+            version: bytes(b""),
+            if_match: bytes(b""),
+            if_none_match: bytes(b""),
+        }
+    }
+
+    fn try_read_object(
+        api: &ApiV1,
+        operator: *mut OperatorV1,
+        path: &[u8],
+        options: *const ReadOptionsV1,
+        max_output_len: u64,
+    ) -> Result<Vec<u8>, u32> {
+        let path = bytes(path);
+        let mut buffer = NonNull::<BufferV1>::dangling().as_ptr();
+        let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the operator, path, optional options, and outputs remain live for the call.
+        let status = unsafe {
+            api.operator_read.expect("WHOLE_OBJECT read is installed")(
+                operator,
+                &path,
+                options,
+                max_output_len,
+                &mut buffer,
+                &mut error,
+            )
+        };
+        match status {
+            STATUS_OK => {
+                assert!(!buffer.is_null());
+                assert!(error.is_null());
+                Ok(take_buffer(api, buffer))
+            }
+            STATUS_ERROR => {
+                assert!(buffer.is_null());
+                assert!(!error.is_null());
+                Err(take_error_kind(api, error))
+            }
+            other => panic!("whole read returned unexpected status {other}"),
+        }
+    }
+
     fn take_buffer(api: &ApiV1, buffer: *mut BufferV1) -> Vec<u8> {
         assert!(!buffer.is_null());
         let mut length = u64::MAX;
@@ -3555,6 +3795,141 @@ mod tests {
             (api.operator_free.expect("operator free installed"))(operator);
             (api.operator_free.expect("operator free installed"))(ptr::null_mut());
         }
+    }
+
+    #[test]
+    fn whole_read_uses_only_the_negotiated_overflow_probe() {
+        let api = api();
+        let (operator, info) = memory_operator(&api);
+        let payload = vec![0xA5; WHOLE_READ_CHUNK_BYTES * 2 + 17];
+        write_memory_object(&api, operator, b"bounded/large.bin", &payload);
+
+        install_whole_read_observer(operator);
+        assert_eq!(
+            try_read_object(&api, operator, b"bounded/large.bin", ptr::null(), 7,),
+            Err(ERROR_BUFFER_TOO_LARGE),
+        );
+        assert_eq!(take_whole_read_observation(operator), 8);
+
+        // SAFETY: both constructor outputs remain uniquely owned by this test.
+        unsafe {
+            api.operator_info_free.expect("BASE info free is installed")(info);
+            api.operator_free.expect("BASE operator free is installed")(operator);
+        }
+    }
+
+    #[test]
+    fn whole_read_handles_empty_zero_and_exact_limits() {
+        let api = api();
+        let (operator, info) = memory_operator(&api);
+        write_memory_object(&api, operator, b"bounded/empty", b"");
+        write_memory_object(&api, operator, b"bounded/exact", b"12345678");
+
+        install_whole_read_observer(operator);
+        assert_eq!(
+            try_read_object(&api, operator, b"bounded/empty", ptr::null(), 0),
+            Ok(Vec::new()),
+        );
+        assert_eq!(take_whole_read_observation(operator), 0);
+
+        install_whole_read_observer(operator);
+        assert_eq!(
+            try_read_object(&api, operator, b"bounded/exact", ptr::null(), 8),
+            Ok(b"12345678".to_vec()),
+        );
+        assert_eq!(take_whole_read_observation(operator), 8);
+
+        install_whole_read_observer(operator);
+        assert_eq!(
+            try_read_object(&api, operator, b"bounded/exact", ptr::null(), 0),
+            Err(ERROR_BUFFER_TOO_LARGE),
+        );
+        assert_eq!(take_whole_read_observation(operator), 1);
+
+        // SAFETY: both constructor outputs remain uniquely owned by this test.
+        unsafe {
+            api.operator_info_free.expect("BASE info free is installed")(info);
+            api.operator_free.expect("BASE operator free is installed")(operator);
+        }
+    }
+
+    #[test]
+    fn whole_read_preserves_ranges_and_preflights_known_lengths() {
+        let api = api();
+        let (operator, info) = memory_operator(&api);
+        write_memory_object(&api, operator, b"bounded/ranges", b"0123456789");
+
+        let from = whole_read_options(byte_range(RANGE_FROM, 3, 0));
+        install_whole_read_observer(operator);
+        assert_eq!(
+            try_read_object(&api, operator, b"bounded/ranges", &from, 7),
+            Ok(b"3456789".to_vec()),
+        );
+        assert_eq!(take_whole_read_observation(operator), 7);
+
+        let range = whole_read_options(byte_range(RANGE_OFFSET_LENGTH, 2, 4));
+        install_whole_read_observer(operator);
+        assert_eq!(
+            try_read_object(&api, operator, b"bounded/ranges", &range, 4),
+            Ok(b"2345".to_vec()),
+        );
+        assert_eq!(take_whole_read_observation(operator), 4);
+
+        let suffix = whole_read_options(byte_range(RANGE_SUFFIX, 0, 3));
+        install_whole_read_observer(operator);
+        assert_eq!(
+            try_read_object(&api, operator, b"bounded/ranges", &suffix, 3),
+            Ok(b"789".to_vec()),
+        );
+        assert_eq!(take_whole_read_observation(operator), 3);
+
+        let oversized_range = whole_read_options(byte_range(RANGE_OFFSET_LENGTH, 2, 6));
+        install_whole_read_observer(operator);
+        assert_eq!(
+            try_read_object(&api, operator, b"bounded/ranges", &oversized_range, 5,),
+            Err(ERROR_BUFFER_TOO_LARGE),
+        );
+        assert_eq!(take_whole_read_observation(operator), 0);
+
+        let oversized_suffix = whole_read_options(byte_range(RANGE_SUFFIX, 0, 6));
+        install_whole_read_observer(operator);
+        assert_eq!(
+            try_read_object(&api, operator, b"bounded/ranges", &oversized_suffix, 5,),
+            Err(ERROR_BUFFER_TOO_LARGE),
+        );
+        assert_eq!(take_whole_read_observation(operator), 0);
+
+        // SAFETY: both constructor outputs remain uniquely owned by this test.
+        unsafe {
+            api.operator_info_free.expect("BASE info free is installed")(info);
+            api.operator_free.expect("BASE operator free is installed")(operator);
+        }
+    }
+
+    #[test]
+    fn whole_read_plan_preserves_conditions_and_forces_serial_backpressure() {
+        let options = ReadOptions {
+            range: BytesRange::suffix(3),
+            version: Some("version-1".to_owned()),
+            if_match: Some("etag-1".to_owned()),
+            if_none_match: Some("etag-2".to_owned()),
+            content_length_hint: Some(10),
+            ..ReadOptions::default()
+        };
+        let plan = match whole_read_plan(options, 3) {
+            Ok(plan) => plan,
+            Err(_) => panic!("valid bounded whole-read plan was rejected"),
+        };
+
+        assert_eq!(plan.range, WholeReadRangePlan::Suffix { size: 3 });
+        assert_eq!(plan.output_limit, 3);
+        assert_eq!(plan.reader_options.version.as_deref(), Some("version-1"));
+        assert_eq!(plan.reader_options.if_match.as_deref(), Some("etag-1"));
+        assert_eq!(plan.reader_options.if_none_match.as_deref(), Some("etag-2"));
+        assert_eq!(plan.reader_options.content_length_hint, Some(10));
+        assert_eq!(plan.reader_options.concurrent, 1);
+        assert_eq!(plan.reader_options.chunk, Some(WHOLE_READ_CHUNK_BYTES));
+        assert_eq!(plan.reader_options.prefetch, 0);
     }
 
     #[test]
