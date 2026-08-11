@@ -388,9 +388,12 @@ int main(void) {
                                      OPENDAL_MBT_FEATURE_WHOLE_OBJECT |
                                      OPENDAL_MBT_FEATURE_READ_STREAM |
                                      OPENDAL_MBT_FEATURE_CHUNKED_WRITER |
-                                     OPENDAL_MBT_FEATURE_WRITER_ABORT;
+                                     OPENDAL_MBT_FEATURE_WRITER_ABORT |
+                                     OPENDAL_MBT_FEATURE_LAYERS;
   opendal_mbt_api_v1_t api;
   opendal_mbt_operator_v1_t *operator_ = NULL;
+  opendal_mbt_operator_v1_t *base_operator = NULL;
+  opendal_mbt_operator_v1_t *timeout_operator = NULL;
   opendal_mbt_operator_info_v1_t *operator_info = NULL;
   opendal_mbt_metadata_v1_t *metadata = NULL;
   opendal_mbt_buffer_v1_t *buffer = NULL;
@@ -422,7 +425,8 @@ int main(void) {
   }
   if ((api.feature_bits & required_features) != required_features) {
     (void)fprintf(stderr,
-                  "opendal_mbt_get_api: need BASE|WHOLE_OBJECT|READ_STREAM, "
+                  "opendal_mbt_get_api: required operation/lifecycle/layer "
+                  "groups unavailable, "
                   "got 0x%016"
                   PRIx64 "\n",
                   api.feature_bits);
@@ -464,6 +468,8 @@ int main(void) {
   REQUIRE_API_FIELD(writer_close);
   REQUIRE_API_FIELD(writer_free);
   REQUIRE_API_FIELD(writer_abort);
+  REQUIRE_API_FIELD(operator_with_timeout);
+  REQUIRE_API_FIELD(operator_with_retry);
 #undef REQUIRE_API_FIELD
 
   api_ready = 1;
@@ -478,12 +484,12 @@ int main(void) {
     goto cleanup;
   }
 
-  status = api.operator_new(&scheme, NULL, 0, &operator_, &operator_info,
+  status = api.operator_new(&scheme, NULL, 0, &base_operator, &operator_info,
                             &error);
   if (!expect_ok(&api, "operator_new(memory)", status, &error)) {
     goto cleanup;
   }
-  if (operator_ == NULL || operator_info == NULL) {
+  if (base_operator == NULL || operator_info == NULL) {
     (void)fputs("operator_new(memory): OK returned incomplete outputs\n",
                 stderr);
     goto cleanup;
@@ -493,6 +499,27 @@ int main(void) {
   }
   api.operator_info_free(operator_info);
   operator_info = NULL;
+
+  status = api.operator_with_timeout(base_operator, UINT64_C(5000),
+                                     UINT64_C(2000), &timeout_operator,
+                                     &error);
+  if (!expect_ok(&api, "operator_with_timeout", status, &error) ||
+      timeout_operator == NULL) {
+    goto cleanup;
+  }
+  status = api.operator_with_retry(timeout_operator, UINT32_C(3), UINT64_C(1),
+                                   UINT64_C(5), OPENDAL_MBT_FALSE, &operator_,
+                                   &error);
+  if (!expect_ok(&api, "operator_with_retry", status, &error) ||
+      operator_ == NULL) {
+    goto cleanup;
+  }
+
+  /* The composed handle owns its stack independently of both borrowed inputs. */
+  api.operator_free(base_operator);
+  base_operator = NULL;
+  api.operator_free(timeout_operator);
+  timeout_operator = NULL;
 
   /* Exercise the error snapshot, borrowed error view, and paired free. */
   status = api.operator_read(operator_, &absent_path, NULL,
@@ -679,6 +706,12 @@ cleanup:
     }
     if (operator_ != NULL) {
       api.operator_free(operator_);
+    }
+    if (timeout_operator != NULL) {
+      api.operator_free(timeout_operator);
+    }
+    if (base_operator != NULL) {
+      api.operator_free(base_operator);
     }
   }
   return result;
