@@ -69,6 +69,16 @@ fn chunked_writer_contract(
 }
 
 ///|
+fn abort_writer_contract(
+  op : @opendal.Operator,
+  chunk : BytesView,
+) -> Unit raise @opendal.OpenDalError {
+  let writer = op.open_writer("discard.bin")
+  writer.write(chunk)
+  writer.abort()
+}
+
+///|
 fn two_path_contract(
   op : @opendal.Operator,
   source : StringView,
@@ -86,5 +96,6 @@ test "contract: snapshots and materialized errors type-check" {
   ignore(structured_error_contract)
   ignore(random_reader_contract)
   ignore(chunked_writer_contract)
+  ignore(abort_writer_contract)
   ignore(two_path_contract)
 }

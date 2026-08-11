@@ -199,6 +199,44 @@ test "native memory: chunked writer commits slices and is terminal" {
   } noraise {
     _ => fail("expected write after finish to raise")
   }
+  try writer.abort() catch {
+    OpenDalError(info) => {
+      assert_true(info.kind is ResourceClosed)
+      assert_true(info.operation is Write)
+      assert_eq(info.path, Some("writer/chunked.bin"))
+    }
+  } noraise {
+    _ => fail("expected abort after finish to raise")
+  }
+}
+
+///|
+test "native memory: writer abort discards data and is idempotent" {
+  let operator = @opendal.Operator::new("memory")
+  let path = "writer/aborted.bin"
+  let writer = operator.open_writer(path)
+  writer.write(b"discard-me")
+  writer.abort()
+  writer.abort()
+  assert_false(operator.exists(path))
+  try writer.write(b"late") catch {
+    OpenDalError(info) => {
+      assert_true(info.kind is ResourceClosed)
+      assert_true(info.operation is Write)
+      assert_eq(info.path, Some(path))
+    }
+  } noraise {
+    _ => fail("expected write after abort to raise")
+  }
+  try writer.finish() catch {
+    OpenDalError(info) => {
+      assert_true(info.kind is ResourceClosed)
+      assert_true(info.operation is Write)
+      assert_eq(info.path, Some(path))
+    }
+  } noraise {
+    _ => fail("expected finish after abort to raise")
+  }
 }
 
 ///|

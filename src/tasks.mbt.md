@@ -108,7 +108,8 @@ random access, not the Node.js binding's stream interface.
 ## Write in chunks
 
 Use `open_writer` when data arrives in pieces. A write is committed only when
-`finish` succeeds; finalization does not silently finish an open writer.
+`finish` succeeds. Call `abort` to discard an unfinished write explicitly;
+finalization does not silently finish or abort it.
 
 ```mbt check
 ///|
@@ -127,8 +128,24 @@ test "tasks: chunked writer" {
 }
 ```
 
-There is no public `abort` method yet. A native write failure makes the writer
-terminal, and subsequent operations raise `ResourceClosed`.
+Aborting is idempotent after its first success. It leaves no committed object,
+and the writer rejects later writes and finishes.
+
+```mbt check
+///|
+test "tasks: abort chunked writer" {
+  let operator = @opendal.Operator::new("memory")
+  let writer = operator.open_writer("uploads/discarded.bin")
+  writer.write(b"temporary")
+  writer.abort()
+  writer.abort()
+
+  assert_false(operator.exists("uploads/discarded.bin"))
+}
+```
+
+A failed write or abort is also terminal. Any later operation then raises
+`ResourceClosed`; `abort` after `finish` does the same.
 
 ## Check existence and metadata
 

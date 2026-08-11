@@ -11,7 +11,7 @@ uses checked MoonBit errors, and keeps the Rust and C ABI behind the package.
 
 - in-memory (`memory`) and local-filesystem (`fs`) operators;
 - whole and ranged reads, plus reusable random-access readers;
-- whole and chunked writes;
+- whole and chunked writes, with explicit finish or abort for chunked writers;
 - metadata, existence checks, directories, deletion, and listing;
 - backend-native copy and rename when the selected service reports support;
 - typed `OpenDalError` values and capability inspection.
@@ -99,7 +99,6 @@ The upstream Node.js binding documents a broader OpenDAL surface. Version
 - layers such as retry, logging, metrics, timeout, or concurrency limiting;
 - batch delete or long-running recursive copier APIs;
 - a streaming read cursor for objects larger than one MoonBit `Bytes` value;
-- a public Writer abort method;
 - Windows or additional CPU/libc release artifacts.
 
 Passing a service name does not dynamically install it: available services are
