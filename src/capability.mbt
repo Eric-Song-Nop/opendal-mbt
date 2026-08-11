@@ -6,6 +6,17 @@ fn Capability::has(self : Capability, bit : Int) -> Bool {
 }
 
 ///|
+fn capability_size_hint(value : UInt64) -> Int? {
+  if value == 0UL {
+    None
+  } else if value > 2147483647UL {
+    Some(2147483647)
+  } else {
+    Some(value.to_int())
+  }
+}
+
+///|
 /// Return whether metadata lookup is available through this binding.
 pub fn Capability::can_stat(self : Capability) -> Bool {
   self.has(0)
@@ -45,6 +56,15 @@ pub fn Capability::can_create_dir(self : Capability) -> Bool {
 /// Return whether deletion is available through this binding.
 pub fn Capability::can_delete(self : Capability) -> Bool {
   self.has(4)
+}
+
+///|
+/// Return the backend's per-request batch-delete size hint, when available.
+///
+/// This is distinct from `Operator::delete_many`'s total binding input ceiling.
+/// Values above MoonBit's positive Int range are reported as `Int::MAX`.
+pub fn Capability::delete_max_size(self : Capability) -> Int? {
+  capability_size_hint(native_capability_word(self, 1))
 }
 
 ///|

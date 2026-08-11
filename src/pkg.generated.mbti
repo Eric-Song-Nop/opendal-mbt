@@ -43,6 +43,7 @@ pub fn Capability::can_rename(Self) -> Bool
 pub fn Capability::can_stat(Self) -> Bool
 pub fn Capability::can_write(Self) -> Bool
 pub fn Capability::can_write_append(Self) -> Bool
+pub fn Capability::delete_max_size(Self) -> Int?
 
 pub struct Entry {
   path : String
@@ -134,6 +135,7 @@ pub fn Operator::check(Self) -> Unit raise OpenDalError
 pub fn Operator::copy(Self, StringView, StringView) -> Metadata raise OpenDalError
 pub fn Operator::create_dir(Self, StringView) -> Unit raise OpenDalError
 pub fn Operator::delete(Self, StringView, version? : StringView, recursive? : Bool) -> Unit raise OpenDalError
+pub fn Operator::delete_many(Self, ArrayView[String]) -> Unit raise OpenDalError
 pub fn Operator::exists(Self, StringView) -> Bool raise OpenDalError
 pub fn Operator::info(Self) -> OperatorInfo
 pub fn Operator::list(Self, StringView, recursive? : Bool, limit? : UInt64, start_after? : StringView) -> Array[Entry] raise OpenDalError

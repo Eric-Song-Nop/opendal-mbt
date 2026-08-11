@@ -357,6 +357,13 @@ extern "C" fn native_operator_delete(
 ) -> NativeResult = "moonbit_opendal_operator_delete"
 
 ///|
+#borrow(operator, paths)
+extern "C" fn native_operator_delete_many(
+  operator : Operator,
+  paths : FixedArray[String],
+) -> NativeResult = "moonbit_opendal_operator_delete_many"
+
+///|
 #borrow(operator, path, start_after)
 extern "C" fn native_operator_lister(
   operator : Operator,
