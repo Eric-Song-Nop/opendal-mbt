@@ -17,9 +17,10 @@ NATIVE_LIB_DIR := $(CURDIR)/target/$(RUST_PROFILE)
 MOON_LIBRARY_PATH := $(NATIVE_LIB_DIR)$(if $(LIBRARY_PATH),:$(LIBRARY_PATH))
 MOON_TEST_FLAGS := --target native --frozen --warn-list '$(MOON_WARN_LIST)' --deny-warn
 
+
 .PHONY: native rust-test moon-check moon-test coverage abi-smoke c-example \
 	api-contract interface-contract package-contract packaged-consumer check \
-	test-profile asan
+	test-profile native-artifact-test asan
 
 native:
 	cargo build --workspace --locked $(CARGO_PROFILE_FLAG)
@@ -64,7 +65,10 @@ package-contract:
 packaged-consumer:
 	sh scripts/check-packaged-consumer.sh $(RUST_PROFILE)
 
-check: api-contract interface-contract package-contract
+native-artifact-test:
+	python3 scripts/test-package-native-artifact.py
+
+check: api-contract interface-contract package-contract native-artifact-test
 	cargo fmt --all -- --check
 	cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 	$(MAKE) moon-check
