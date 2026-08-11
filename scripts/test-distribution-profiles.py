@@ -24,11 +24,6 @@ STANDARD_TARGETS = {
         "minimum_macos_version": "11.0",
         "required_frameworks": ["Security", "CoreFoundation"],
     },
-    "x86_64-apple-darwin": {
-        "host_key": "darwin-x64",
-        "minimum_macos_version": "11.0",
-        "required_frameworks": ["Security", "CoreFoundation"],
-    },
     "aarch64-unknown-linux-gnu": {
         "host_key": "linux-arm64",
         "minimum_glibc_version": "2.35",
@@ -75,7 +70,7 @@ class DistributionProfilesTest(unittest.TestCase):
         self.assertEqual(profile["targets"], STANDARD_TARGETS)
         self.assertEqual(
             {target["host_key"] for target in profile["targets"].values()},
-            {"darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"},
+            {"darwin-arm64", "linux-arm64", "linux-x64"},
         )
 
         table = read_json("native/artifacts-standard.json")
