@@ -1,9 +1,11 @@
 //! Exact Rust mirror of `native/include/opendal_mbt.h`.
 
+#![cfg_attr(not(feature = "profile-standard"), allow(dead_code))]
+
 pub(crate) type Status = u32;
 
 pub(crate) const ABI_MAJOR: u32 = 1;
-pub(crate) const ABI_MINOR: u32 = 1;
+pub(crate) const ABI_MINOR: u32 = 2;
 pub(crate) const ABI_PATCH: u32 = 0;
 pub(crate) const STRUCT_VERSION: u32 = 1;
 
@@ -54,6 +56,7 @@ pub(crate) const FEATURE_RANDOM_READER: u64 = 1 << 3;
 pub(crate) const FEATURE_CHUNKED_WRITER: u64 = 1 << 4;
 pub(crate) const FEATURE_READ_STREAM: u64 = 1 << 5;
 pub(crate) const FEATURE_WRITER_ABORT: u64 = 1 << 6;
+pub(crate) const FEATURE_S3: u64 = 1 << 7;
 
 pub(crate) const CAP_STAT: u64 = 1 << 0;
 pub(crate) const CAP_READ: u64 = 1 << 1;
@@ -99,6 +102,23 @@ pub(crate) const LIST_START_AFTER_PRESENT: u64 = 1 << 1;
 
 pub(crate) const DELETE_RECURSIVE: u64 = 1 << 0;
 pub(crate) const DELETE_VERSION_PRESENT: u64 = 1 << 0;
+
+pub(crate) const S3_AUTH_DEFAULT_CHAIN: u32 = 0;
+pub(crate) const S3_AUTH_STATIC: u32 = 1;
+pub(crate) const S3_AUTH_UNSIGNED: u32 = 2;
+pub(crate) const S3_AUTH_ASSUME_ROLE: u32 = 3;
+
+pub(crate) const S3_SOURCE_DEFAULT_CHAIN: u32 = 0;
+pub(crate) const S3_SOURCE_STATIC: u32 = 1;
+
+pub(crate) const S3_ROOT_PRESENT: u64 = 1 << 0;
+pub(crate) const S3_ENDPOINT_PRESENT: u64 = 1 << 1;
+pub(crate) const S3_SESSION_TOKEN_PRESENT: u64 = 1 << 2;
+pub(crate) const S3_EXTERNAL_ID_PRESENT: u64 = 1 << 3;
+pub(crate) const S3_ROLE_SESSION_NAME_PRESENT: u64 = 1 << 4;
+pub(crate) const S3_ASSUME_ROLE_DURATION_PRESENT: u64 = 1 << 5;
+pub(crate) const S3_VIRTUAL_HOST_STYLE: u64 = 1 << 0;
+pub(crate) const S3_DISABLE_EC2_METADATA: u64 = 1 << 1;
 
 pub(crate) const METADATA_IS_CURRENT_PRESENT: u64 = 1 << 0;
 pub(crate) const METADATA_LAST_MODIFIED_PRESENT: u64 = 1 << 1;
@@ -216,6 +236,29 @@ pub(crate) struct DeleteOptionsV1 {
     pub(crate) present_bits: u64,
     pub(crate) flags: u64,
     pub(crate) version: BytesViewV1,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(crate) struct S3OptionsV1 {
+    pub(crate) struct_size: u32,
+    pub(crate) struct_version: u32,
+    pub(crate) present_bits: u64,
+    pub(crate) flags: u64,
+    pub(crate) auth_kind: u32,
+    pub(crate) source_kind: u32,
+    pub(crate) bucket: BytesViewV1,
+    pub(crate) region: BytesViewV1,
+    pub(crate) root: BytesViewV1,
+    pub(crate) endpoint: BytesViewV1,
+    pub(crate) access_key_id: BytesViewV1,
+    pub(crate) secret_access_key: BytesViewV1,
+    pub(crate) session_token: BytesViewV1,
+    pub(crate) role_arn: BytesViewV1,
+    pub(crate) external_id: BytesViewV1,
+    pub(crate) role_session_name: BytesViewV1,
+    pub(crate) assume_role_duration_seconds: u32,
+    pub(crate) reserved0: u32,
 }
 
 #[repr(C)]
@@ -513,6 +556,12 @@ pub(crate) type ReadStreamNextFn =
 pub(crate) type ReadStreamCloseFn = unsafe extern "C" fn(*mut ReadStreamV1);
 pub(crate) type ReadStreamFreeFn = unsafe extern "C" fn(*mut ReadStreamV1);
 pub(crate) type WriterAbortFn = unsafe extern "C" fn(*mut WriterV1, *mut *mut ErrorV1) -> Status;
+pub(crate) type OperatorS3Fn = unsafe extern "C" fn(
+    *const S3OptionsV1,
+    *mut *mut OperatorV1,
+    *mut *mut OperatorInfoV1,
+    *mut *mut ErrorV1,
+) -> Status;
 
 #[repr(C)]
 pub(crate) struct ApiV1 {
@@ -565,6 +614,7 @@ pub(crate) struct ApiV1 {
     pub(crate) read_stream_close: Option<ReadStreamCloseFn>,
     pub(crate) read_stream_free: Option<ReadStreamFreeFn>,
     pub(crate) writer_abort: Option<WriterAbortFn>,
+    pub(crate) operator_s3: Option<OperatorS3Fn>,
 }
 
 pub(crate) const API_INPUT_SIZE: usize =
@@ -585,11 +635,17 @@ const _: () = {
     assert!(core::mem::size_of::<StatOptionsV1>() == 64);
     assert!(core::mem::size_of::<ListOptionsV1>() == 48);
     assert!(core::mem::size_of::<DeleteOptionsV1>() == 40);
+    assert!(core::mem::size_of::<S3OptionsV1>() == 200);
+    assert!(core::mem::offset_of!(S3OptionsV1, auth_kind) == 24);
+    assert!(core::mem::offset_of!(S3OptionsV1, bucket) == 32);
+    assert!(core::mem::offset_of!(S3OptionsV1, assume_role_duration_seconds) == 192);
     assert!(core::mem::size_of::<MetadataViewV1>() == 168);
     assert!(core::mem::size_of::<EntryViewV1>() == 48);
     assert!(core::mem::size_of::<OperatorInfoViewV1>() == 96);
     assert!(core::mem::size_of::<ErrorViewV1>() == 48);
     assert!(core::mem::size_of::<LibraryInfoViewV1>() == 64);
+    assert!(core::mem::offset_of!(ApiV1, operator_s3) == 368);
+    assert!(core::mem::size_of::<ApiV1>() == 376);
     assert!(API_INPUT_SIZE == 8);
     assert!(API_PREFIX_SIZE == 40);
 };
