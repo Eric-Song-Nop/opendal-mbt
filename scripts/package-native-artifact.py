@@ -21,6 +21,10 @@ from typing import Any
 STATIC_LIBRARY = "libopendal_mbt_native.a"
 STATIC_LIBRARY_PATH = f"lib/{STATIC_LIBRARY}"
 CANDIDATE_URL_ORIGIN = "https://candidate.invalid"
+PROFILE_FILES = {
+    "local": Path("native/distribution-profile.json"),
+    "standard": Path("native/distribution-profiles/standard.json"),
+}
 
 
 class ArtifactError(Exception):
@@ -139,16 +143,46 @@ def native_static_libraries(filename: Path) -> list[str]:
     return flags
 
 
-def load_profile(repo_root: Path, rust_target: str) -> tuple[dict[str, Any], dict[str, Any]]:
-    profile = read_json(repo_root / "native/distribution-profile.json")
+def load_profile(
+    repo_root: Path,
+    service_profile: str,
+    rust_target: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    profile_file = PROFILE_FILES.get(service_profile)
+    if profile_file is None:
+        supported = ", ".join(sorted(PROFILE_FILES))
+        raise ArtifactError(
+            f"unknown service profile {service_profile}; supported profiles: {supported}"
+        )
+    profile = read_json(repo_root / profile_file)
     if profile.get("schema_version") != 1:
         raise ArtifactError("unsupported distribution profile schema")
-    if profile.get("service_profile") != "local":
-        raise ArtifactError("the initial distribution profile must be local")
-    if profile.get("services") != ["memory", "fs"]:
-        raise ArtifactError("the local profile must contain memory and fs")
-    if profile.get("rust_features") != ["blocking", "services-fs"]:
-        raise ArtifactError("the local profile Rust features are inconsistent")
+    if profile.get("service_profile") != service_profile:
+        raise ArtifactError(
+            f"distribution profile identity does not match {service_profile}"
+        )
+    if service_profile == "local":
+        if profile.get("services") != ["memory", "fs"]:
+            raise ArtifactError("the immutable local profile must contain memory and fs")
+        if profile.get("rust_features") != ["blocking", "services-fs"]:
+            raise ArtifactError("the immutable local profile Rust features changed")
+    elif service_profile == "standard":
+        if profile.get("services") != ["memory", "fs", "s3"]:
+            raise ArtifactError("the standard profile must contain memory, fs, and s3")
+        expected_features = [
+            "blocking",
+            "services-fs",
+            "services-s3",
+            "http-transport-reqwest",
+            "http-transport-reqwest-rustls",
+            "executors-tokio",
+        ]
+        if profile.get("rust_features") != expected_features:
+            raise ArtifactError("the standard profile Rust features are inconsistent")
+        if profile.get("cargo_features") != ["profile-standard"]:
+            raise ArtifactError("the standard profile Cargo feature is inconsistent")
+        if profile.get("runtime_initialization") != "install_default":
+            raise ArtifactError("the standard profile must use install_default")
     revision = profile.get("artifact_revision")
     if not isinstance(revision, str) or re.fullmatch(r"r[1-9][0-9]*", revision) is None:
         raise ArtifactError("artifact_revision must have the form rN")
@@ -176,9 +210,10 @@ def manifest_for(
     repo_root: Path,
     library: Path,
     native_libs_log: Path,
+    service_profile: str,
     rust_target: str,
 ) -> tuple[str, dict[str, Any]]:
-    profile, target = load_profile(repo_root, rust_target)
+    profile, target = load_profile(repo_root, service_profile, rust_target)
     versions = source_versions(repo_root)
     require_regular_file(library, "native static library")
     if library.name != STATIC_LIBRARY:
@@ -213,6 +248,9 @@ def manifest_for(
         "static_library_sha256": sha256_file(library),
         "system_link_flags": native_static_libraries(native_libs_log),
     }
+    for key in ("cargo_features", "runtime_initialization"):
+        if key in profile:
+            manifest[key] = profile[key]
     for key in ("minimum_macos_version", "minimum_glibc_version"):
         if key in target:
             manifest[key] = target[key]
@@ -271,11 +309,30 @@ def write_archive(
             raise
 
 
-def verify_pinned_artifact(table_file: Path, result: dict[str, Any]) -> None:
+def load_artifact_table(table_file: Path) -> dict[str, Any]:
     table = read_json(table_file)
     if table.get("schema_version") != 1 or not isinstance(table.get("artifacts"), dict):
         raise ArtifactError("unsupported pinned artifact table")
+    return table
+
+
+def artifact_record(result: dict[str, Any], url: str) -> dict[str, Any]:
     manifest = read_json(Path(result["manifest"]))
+    return {
+        **{key: value for key, value in manifest.items() if key != "schema_version"},
+        "archive_name": result["archive_name"],
+        "archive_size": result["archive_size"],
+        "archive_sha256": result["archive_sha256"],
+        "url": url,
+    }
+
+
+def verify_pinned_artifact(table_file: Path, result: dict[str, Any]) -> None:
+    table = load_artifact_table(table_file)
+    manifest = read_json(Path(result["manifest"]))
+    table_profile = table.get("service_profile")
+    if table_profile is not None and table_profile != manifest.get("service_profile"):
+        raise ArtifactError("artifact table service profile does not match the build")
     host_key = manifest.get("host_key")
     pinned = table["artifacts"].get(host_key)
     if not isinstance(pinned, dict):
@@ -293,26 +350,26 @@ def verify_pinned_artifact(table_file: Path, result: dict[str, Any]) -> None:
         expected_url_suffix
     ):
         raise ArtifactError("pinned artifact URL does not match the archive name")
+    if pinned["url"].startswith(f"{CANDIDATE_URL_ORIGIN}/"):
+        raise ArtifactError("candidate artifact URL cannot be used for a release")
 
 
 def write_candidate_artifact_table(
     table_file: Path,
     result: dict[str, Any],
 ) -> Path:
-    table = read_json(table_file)
-    if table.get("schema_version") != 1 or not isinstance(table.get("artifacts"), dict):
-        raise ArtifactError("unsupported pinned artifact table")
+    table = load_artifact_table(table_file)
     manifest = read_json(Path(result["manifest"]))
+    service_profile = manifest.get("service_profile")
+    table_profile = table.get("service_profile")
+    if table_profile is not None and table_profile != service_profile:
+        raise ArtifactError("artifact table service profile does not match the build")
+    table["service_profile"] = service_profile
     host_key = manifest.get("host_key")
     if not isinstance(host_key, str) or not host_key:
         raise ArtifactError("candidate artifact manifest has no host_key")
-    table["artifacts"][host_key] = {
-        **{key: value for key, value in manifest.items() if key != "schema_version"},
-        "archive_name": result["archive_name"],
-        "archive_size": result["archive_size"],
-        "archive_sha256": result["archive_sha256"],
-        "url": f"{CANDIDATE_URL_ORIGIN}/{result['archive_name']}",
-    }
+    candidate_url = f"{CANDIDATE_URL_ORIGIN}/{result['archive_name']}"
+    table["artifacts"][host_key] = artifact_record(result, candidate_url)
 
     manifest_file = Path(result["manifest"])
     candidate_file = manifest_file.with_name(
@@ -331,14 +388,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repo-root", type=Path, default=Path.cwd())
     parser.add_argument("--library", type=Path, required=True)
     parser.add_argument("--native-static-libs-log", type=Path, required=True)
+    parser.add_argument(
+        "--service-profile",
+        choices=tuple(PROFILE_FILES),
+        required=True,
+    )
     parser.add_argument("--rust-target", required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    validation = parser.add_mutually_exclusive_group()
-    validation.add_argument("--verify-pinned", type=Path)
-    validation.add_argument(
-        "--candidate-table",
+    parser.add_argument(
+        "--mode",
+        choices=("candidate", "release"),
+        required=True,
+        help="emit a staged candidate table or verify the committed release table",
+    )
+    parser.add_argument(
+        "--artifact-table",
         type=Path,
-        help="published table to overlay with the artifact built by this run",
+        required=True,
+        help="profile-specific artifact table used as the candidate base or release pin",
     )
     return parser.parse_args()
 
@@ -351,6 +418,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         repo_root,
         args.library.resolve(),
         args.native_static_libs_log.resolve(),
+        args.service_profile,
         args.rust_target,
     )
     archive = args.output_dir.resolve() / f"{artifact}.tar.gz"
@@ -378,11 +446,11 @@ def main() -> int:
     try:
         args = parse_args()
         result = run(args)
-        if args.verify_pinned is not None:
-            verify_pinned_artifact(args.verify_pinned.resolve(), result)
-        elif args.candidate_table is not None:
+        if args.mode == "release":
+            verify_pinned_artifact(args.artifact_table.resolve(), result)
+        else:
             candidate_table = write_candidate_artifact_table(
-                args.candidate_table.resolve(), result
+                args.artifact_table.resolve(), result
             )
             result["candidate_artifact_table"] = str(candidate_table)
     except (ArtifactError, OSError) as error:

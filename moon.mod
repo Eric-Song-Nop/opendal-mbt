@@ -30,6 +30,7 @@ options(
     "rust-toolchain.toml",
     "native/rust",
     "native/distribution-profile.json",
+    "native/distribution-profiles",
     "examples",
     "tests",
     "scripts",

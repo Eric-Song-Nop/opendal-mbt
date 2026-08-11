@@ -15,11 +15,11 @@ async function main() {
   const archive = path.resolve(archiveArgument);
   const moonHome = path.resolve(moonHomeArgument);
   const resolver = require(path.join(moduleRoot, 'build.js'));
-  const artifacts = resolver.loadArtifacts(
-    path.join(moduleRoot, 'native', 'artifacts.json'),
+  const selected = resolver.loadSelectedArtifacts(
+    path.join(moduleRoot, 'native', 'artifact-selection.json'),
   );
   const archiveName = path.basename(archive);
-  const artifact = Object.values(artifacts).find(
+  const artifact = Object.values(selected.artifacts).find(
     (candidate) => candidate.archive_name === archiveName,
   );
   if (!artifact) {
