@@ -44,7 +44,7 @@ extern "C" {
 #endif
 
 #define OPENDAL_MBT_ABI_V1_MAJOR UINT32_C(1)
-#define OPENDAL_MBT_ABI_V1_MINOR UINT32_C(1)
+#define OPENDAL_MBT_ABI_V1_MINOR UINT32_C(2)
 #define OPENDAL_MBT_ABI_V1_PATCH UINT32_C(0)
 #define OPENDAL_MBT_STRUCT_VERSION_V1 UINT32_C(1)
 #define OPENDAL_MBT_EXTENSIBLE_CODE_MAX UINT32_C(0x7fffffff)
@@ -125,6 +125,7 @@ typedef uint32_t opendal_mbt_range_kind_t;
 #define OPENDAL_MBT_FEATURE_CHUNKED_WRITER (UINT64_C(1) << 4)
 #define OPENDAL_MBT_FEATURE_READ_STREAM (UINT64_C(1) << 5)
 #define OPENDAL_MBT_FEATURE_WRITER_ABORT (UINT64_C(1) << 6)
+#define OPENDAL_MBT_FEATURE_S3 (UINT64_C(1) << 7)
 
 /* Capability bit positions. */
 #define OPENDAL_MBT_CAP_STAT (UINT64_C(1) << 0)
@@ -294,6 +295,58 @@ typedef struct opendal_mbt_delete_options_v1 {
 } opendal_mbt_delete_options_v1_t;
 #define OPENDAL_MBT_DELETE_OPTIONS_V1_MIN_SIZE                               \
   OPENDAL_MBT_FIELD_END(opendal_mbt_delete_options_v1_t, version)
+
+/* Typed S3 constructor authentication modes. */
+typedef uint32_t opendal_mbt_s3_auth_kind_t;
+#define OPENDAL_MBT_S3_AUTH_DEFAULT_CHAIN UINT32_C(0)
+#define OPENDAL_MBT_S3_AUTH_STATIC UINT32_C(1)
+#define OPENDAL_MBT_S3_AUTH_UNSIGNED UINT32_C(2)
+#define OPENDAL_MBT_S3_AUTH_ASSUME_ROLE UINT32_C(3)
+
+/* Credential sources accepted by the assume-role authentication mode. */
+typedef uint32_t opendal_mbt_s3_assume_role_source_kind_t;
+#define OPENDAL_MBT_S3_SOURCE_DEFAULT_CHAIN UINT32_C(0)
+#define OPENDAL_MBT_S3_SOURCE_STATIC UINT32_C(1)
+
+/* S3 options presence bits and flags. */
+#define OPENDAL_MBT_S3_ROOT_PRESENT (UINT64_C(1) << 0)
+#define OPENDAL_MBT_S3_ENDPOINT_PRESENT (UINT64_C(1) << 1)
+#define OPENDAL_MBT_S3_SESSION_TOKEN_PRESENT (UINT64_C(1) << 2)
+#define OPENDAL_MBT_S3_EXTERNAL_ID_PRESENT (UINT64_C(1) << 3)
+#define OPENDAL_MBT_S3_ROLE_SESSION_NAME_PRESENT (UINT64_C(1) << 4)
+#define OPENDAL_MBT_S3_ASSUME_ROLE_DURATION_PRESENT (UINT64_C(1) << 5)
+#define OPENDAL_MBT_S3_VIRTUAL_HOST_STYLE (UINT64_C(1) << 0)
+#define OPENDAL_MBT_S3_DISABLE_EC2_METADATA (UINT64_C(1) << 1)
+
+/*
+ * Versioned typed S3 constructor input. All text is strict UTF-8 and borrowed
+ * for one call; the library copies every supplied value before returning.
+ * bucket and region are required and non-empty. Optional views must be the
+ * canonical {NULL, 0} value when their presence bit is clear. Credential and
+ * role views not selected by auth_kind/source_kind must also be canonical.
+ */
+typedef struct opendal_mbt_s3_options_v1 {
+  uint32_t struct_size;
+  uint32_t struct_version;
+  uint64_t present_bits;
+  uint64_t flags;
+  opendal_mbt_s3_auth_kind_t auth_kind;
+  opendal_mbt_s3_assume_role_source_kind_t source_kind;
+  opendal_mbt_bytes_view_v1_t bucket;
+  opendal_mbt_bytes_view_v1_t region;
+  opendal_mbt_bytes_view_v1_t root;
+  opendal_mbt_bytes_view_v1_t endpoint;
+  opendal_mbt_bytes_view_v1_t access_key_id;
+  opendal_mbt_bytes_view_v1_t secret_access_key;
+  opendal_mbt_bytes_view_v1_t session_token;
+  opendal_mbt_bytes_view_v1_t role_arn;
+  opendal_mbt_bytes_view_v1_t external_id;
+  opendal_mbt_bytes_view_v1_t role_session_name;
+  uint32_t assume_role_duration_seconds;
+  uint32_t reserved0;
+} opendal_mbt_s3_options_v1_t;
+#define OPENDAL_MBT_S3_OPTIONS_V1_MIN_SIZE                                   \
+  OPENDAL_MBT_FIELD_END(opendal_mbt_s3_options_v1_t, reserved0)
 
 typedef struct opendal_mbt_timestamp_v1 {
   int64_t unix_seconds;
@@ -586,6 +639,17 @@ typedef struct opendal_mbt_api_v1 {
    */
   opendal_mbt_status_t(OPENDAL_MBT_CALL *writer_abort)(
       opendal_mbt_writer_v1_t *writer,
+      opendal_mbt_error_v1_t **out_error);
+
+  /*
+   * OPENDAL_MBT_FEATURE_S3: appended in ABI v1.2 and dependent on BASE.
+   * Construction performs no object-store I/O and returns ordinary owned
+   * Operator and OperatorInfo handles.
+   */
+  opendal_mbt_status_t(OPENDAL_MBT_CALL *operator_s3)(
+      const opendal_mbt_s3_options_v1_t *options,
+      opendal_mbt_operator_v1_t **out_operator,
+      opendal_mbt_operator_info_v1_t **out_info,
       opendal_mbt_error_v1_t **out_error);
 } opendal_mbt_api_v1_t;
 

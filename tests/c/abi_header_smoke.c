@@ -33,6 +33,15 @@ ABI_STATIC_ASSERT(sizeof(opendal_mbt_list_options_v1_t) == 48,
                   "list options layout drifted");
 ABI_STATIC_ASSERT(sizeof(opendal_mbt_delete_options_v1_t) == 40,
                   "delete options layout drifted");
+ABI_STATIC_ASSERT(sizeof(opendal_mbt_s3_options_v1_t) == 200,
+                  "S3 options layout drifted");
+ABI_STATIC_ASSERT(offsetof(opendal_mbt_s3_options_v1_t, auth_kind) == 24,
+                  "S3 auth kind offset drifted");
+ABI_STATIC_ASSERT(offsetof(opendal_mbt_s3_options_v1_t, bucket) == 32,
+                  "S3 bucket offset drifted");
+ABI_STATIC_ASSERT(
+    offsetof(opendal_mbt_s3_options_v1_t, assume_role_duration_seconds) == 192,
+    "S3 duration offset drifted");
 ABI_STATIC_ASSERT(sizeof(opendal_mbt_timestamp_v1_t) == 16,
                   "timestamp layout drifted");
 ABI_STATIC_ASSERT(sizeof(opendal_mbt_capability_v1_t) == 32,
@@ -59,12 +68,21 @@ ABI_STATIC_ASSERT(OPENDAL_MBT_API_V1_PREFIX_SIZE == 40,
                   "bootstrap output prefix drifted");
 ABI_STATIC_ASSERT(OPENDAL_MBT_API_V1_INPUT_SIZE == 8,
                   "bootstrap input prefix drifted");
+#if UINTPTR_MAX == UINT64_MAX
+ABI_STATIC_ASSERT(offsetof(opendal_mbt_api_v1_t, operator_s3) == 368,
+                  "v1.2 function table offset drifted");
+ABI_STATIC_ASSERT(sizeof(opendal_mbt_api_v1_t) == 376,
+                  "v1.2 function table size drifted");
+#endif
 ABI_STATIC_ASSERT(OPENDAL_MBT_API_V1_FIELD_END(library_info) <=
                       OPENDAL_MBT_API_V1_FIELD_END(error_view),
                   "function table order drifted");
 ABI_STATIC_ASSERT(OPENDAL_MBT_API_V1_FIELD_END(read_stream_free) <=
                       OPENDAL_MBT_API_V1_FIELD_END(writer_abort),
                   "v1.1 append order drifted");
+ABI_STATIC_ASSERT(OPENDAL_MBT_API_V1_FIELD_END(writer_abort) <=
+                      OPENDAL_MBT_API_V1_FIELD_END(operator_s3),
+                  "v1.2 append order drifted");
 ABI_STATIC_ASSERT(OPENDAL_MBT_READ_OPTIONS_V1_MIN_SIZE <=
                       sizeof(opendal_mbt_read_options_v1_t),
                   "read options v1.0 prefix drifted");
@@ -86,6 +104,9 @@ ABI_STATIC_ASSERT(OPENDAL_MBT_LIST_OPTIONS_V1_MIN_SIZE <=
 ABI_STATIC_ASSERT(OPENDAL_MBT_DELETE_OPTIONS_V1_MIN_SIZE <=
                       sizeof(opendal_mbt_delete_options_v1_t),
                   "delete options v1.0 prefix drifted");
+ABI_STATIC_ASSERT(OPENDAL_MBT_S3_OPTIONS_V1_MIN_SIZE ==
+                      sizeof(opendal_mbt_s3_options_v1_t),
+                  "S3 options v1.2 prefix drifted");
 
 static int compile_contract(void) {
   opendal_mbt_api_v1_t api;
