@@ -1,16 +1,32 @@
-# OpenDAL for MoonBit
+# Apache OpenDAL for MoonBit
 
-Safe, checked MoonBit bindings for Apache OpenDAL. The current release supports
-the native backend and ships the memory and filesystem service profiles.
+OpenDAL provides one storage API over different storage services. This package
+is the native MoonBit binding: it presents an ordinary MoonBit package surface,
+uses checked MoonBit errors, and keeps the Rust and C ABI behind the package.
 
-Add it like any other Moon dependency:
+## Status
+
+`Eric-Song-Nop/opendal@0.1.0` is published on mooncakes.io. The current
+`local` service profile is synchronous and supports:
+
+- in-memory (`memory`) and local-filesystem (`fs`) operators;
+- whole and ranged reads, plus reusable random-access readers;
+- whole and chunked writes;
+- metadata, existence checks, directories, deletion, and listing;
+- backend-native copy and rename when the selected service reports support;
+- typed `OpenDalError` values and capability inspection.
+
+The public API is generated in [`src/pkg.generated.mbti`](pkg.generated.mbti).
+
+## Installation
+
+Add the dependency like any other Moon package:
 
 ```sh
 moon add Eric-Song-Nop/opendal
 ```
 
-Import the package normally and select the native target. There are no
-OpenDAL-specific linker flags:
+Import it from a native package:
 
 ```moonbit nocheck
 supported_targets = "native"
@@ -18,155 +34,89 @@ supported_targets = "native"
 import {
   "Eric-Song-Nop/opendal",
 }
-
-options(
-  "is-main": true,
-)
 ```
 
-```mbt nocheck
-///|
-fn main raise {
-  let operator = @opendal.Operator::new("memory")
-  operator.write("hello.txt", b"hello from MoonBit") |> ignore
-  println(operator.read("hello.txt"))
-}
-```
+No OpenDAL-specific linker flags are required. On the first native build, the
+package downloads and verifies the release artifact for the current host;
+later builds reuse Moon's shared cache.
 
-Then use the ordinary Moon command:
+The initial binary matrix supports:
 
-```sh
-moon run --target native cmd/main
-```
+- Apple silicon macOS 11 or newer;
+- x86-64 Linux with glibc 2.35 or newer.
 
-The first native build downloads one pinned release artifact into Moon's
-shared content-addressed cache. Later builds validate and reuse that cache,
-including offline builds. Consumers do not need Cargo, Rust, this repository,
-`LIBRARY_PATH`, or a project-specific installer.
+The current Moon native prebuild hook also requires Node.js 18 or newer and
+`tar` at build time. Consumers do not need Rust, Cargo, or this repository.
 
-The initial prebuilt matrix supports Apple silicon macOS 11 or newer and
-x86-64 glibc Linux 2.35 or newer. Moon's current native dependency hook is
-experimental and runs the package `build.js`, so Node.js 18 or newer and
-`tar` must be available during native builds. Unsupported hosts fail before a
-download and list the supported targets.
+## First operation
 
-## Whole-object storage
-
-Inputs accept StringView and BytesView, while returned data is owned.
+`memory` is the quickest way to try the API because it needs no configuration:
 
 ```mbt check
 ///|
-test "README quickstart" {
+test "README: memory round trip" {
   let operator = @opendal.Operator::new("memory")
-  let storage = b"__hello from MoonBit__"
-  let payload : BytesView = storage[2:20]
-  operator.write("hello.txt", payload) |> ignore
+  operator.write("hello.txt", b"hello from MoonBit") |> ignore
   assert_eq(operator.read("hello.txt"), b"hello from MoonBit")
 }
 ```
 
-Range reads use an explicit algebraic value. An opened Reader is random access:
-each call supplies its own range and does not advance a hidden cursor.
+Methods that can fail use MoonBit's checked-error effect:
 
 ```mbt check
 ///|
-test "README random reader" {
-  let operator = @opendal.Operator::new("memory")
-  operator.write("archive.bin", b"0123456789") |> ignore
-  assert_eq(
-    operator.read("archive.bin", range=Range(offset=2UL, length=4UL)),
-    b"2345",
-  )
-
-  let reader = operator.open_reader("archive.bin")
-  assert_eq(reader.read(From(offset=6UL)), b"6789")
-  assert_eq(reader.read(Suffix(length=3UL)), b"789")
-  reader.close()
-}
-```
-
-Pass backend configuration with the optional labelled config argument:
-
-```mbt check
-///|
-test "README configured operator" {
-  let operator = @opendal.Operator::new("memory", config={ "root": "/example/" })
-  assert_eq(operator.info().root, "/example/")
-}
-```
-
-## Eager and streaming listing
-
-Operation options are direct optional labelled arguments. Use list when all
-entries should be materialized, or open_lister for a fallible cursor.
-
-```mbt check
-///|
-test "README listing" {
-  let operator = @opendal.Operator::new("memory")
-  operator.write("logs/2026/one.txt", b"one") |> ignore
-  operator.write("logs/2026/two.txt", b"two") |> ignore
-  let entries = operator.list("logs/", recursive=true)
-  assert_true(entries.length() >= 2)
-
-  let lister = operator.open_lister("logs/", recursive=true)
-  let mut count = 0
-  for ;; {
-    match lister.next() {
-      Some(_) => count = count + 1
-      None => break
-    }
-  }
-  lister.close()
-  assert_true(count >= 2)
-}
-```
-
-## Chunked writes
-
-An opened Writer accepts complete chunks and reports success only after an
-explicit finish. Dropping an unfinished Writer does not finish it implicitly.
-
-```mbt check
-///|
-test "README chunked writer" {
-  let operator = @opendal.Operator::new("memory")
-  let writer = operator.open_writer(
-    "upload.bin",
-    content_type="application/octet-stream",
-  )
-  writer.write(b"hello ")
-  writer.write(b"from MoonBit")
-  let metadata = writer.finish()
-  assert_eq(metadata.content_length, 18UL)
-  assert_eq(operator.read("upload.bin"), b"hello from MoonBit")
-}
-```
-
-## Checked errors
-
-Storage failures use OpenDalError rather than stringly typed Result values.
-
-```mbt check
-///|
-test "README checked errors" {
+test "README: typed storage error" {
   let operator = @opendal.Operator::new("memory")
   try operator.read("missing.txt") catch {
     error => {
       assert_true(error.kind() is NotFound)
       assert_true(error.info().operation is Read)
-      assert_false(error.is_temporary())
-      assert_true("\{error}".contains("OpenDAL NotFound"))
+      assert_eq(error.info().path, Some("missing.txt"))
     }
   } noraise {
-    _ => fail("expected missing read to raise")
+    _ => fail("expected a missing-object error")
   }
 }
 ```
 
-`copy(source, destination)` and `rename(source, destination)` invoke the
-backend operations directly. Check `can_copy()` and `can_rename()` when code
-must adapt across services; unsupported backends raise `Unsupported` with both
-paths retained in the error context.
+## Guides
 
-The generated `src/pkg.generated.mbti` file is the authoritative public surface.
+- [Getting started](getting-started.mbt.md) — install the package and run the
+  first memory and filesystem programs.
+- [Connecting](connecting.mbt.md) — construct and validate operators for the
+  service profiles available today.
+- [Common tasks](tasks.mbt.md) — recipes for reads, writes, metadata, listing,
+  directories, copy, rename, and errors.
+
+## Current limitations
+
+The upstream Node.js binding documents a broader OpenDAL surface. Version
+`0.1.0` of this MoonBit binding does **not** yet provide:
+
+- asynchronous APIs, callbacks, cancellation, or concurrent task handles;
+- S3, GCS, Azure Blob, WebDAV, or other cloud/network service profiles;
+- presigned requests;
+- layers such as retry, logging, metrics, timeout, or concurrency limiting;
+- batch delete or long-running recursive copier APIs;
+- a streaming read cursor for objects larger than one MoonBit `Bytes` value;
+- a public Writer abort method;
+- Windows or additional CPU/libc release artifacts.
+
+Passing a service name does not dynamically install it: available services are
+fixed by the native artifact's compiled profile. Unsupported services and
+options raise `OpenDalError` instead of silently falling back.
+
+These gaps are recorded in [the project roadmap](../docs/roadmap.md#phase-5-deferred-capabilities).
+
+## Upstream references
+
+The organization of these guides follows Apache OpenDAL's official Node.js
+binding documentation:
+
+- [Node.js binding overview](https://opendal.apache.org/docs/bindings/nodejs/)
+- [Getting started](https://opendal.apache.org/docs/bindings/nodejs/getting-started/)
+- [Connecting](https://opendal.apache.org/docs/bindings/nodejs/connecting/)
+- [Common tasks](https://opendal.apache.org/docs/bindings/nodejs/tasks/)
+
+The examples and support claims here are intentionally rewritten for the
+smaller MoonBit `0.1.0` surface.
