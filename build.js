@@ -749,7 +749,22 @@ function makeSourceBuildOutput(staticLibrary, artifact, sourceProfile) {
   });
 }
 
-async function resolveLocalOverride(input, artifact) {
+function parseMaintainerLinkFlags(value) {
+  requireValid(
+    typeof value === 'string' && value.trim().length > 0,
+    'OPENDAL_MBT_NATIVE_LIBS must contain rustc native-static-libs flags',
+  );
+  const flags = value.trim().split(/\s+/);
+  for (const flag of flags) {
+    requireValid(
+      /^[-A-Za-z0-9_+.,=:/]+$/.test(flag),
+      `OPENDAL_MBT_NATIVE_LIBS contains an unsafe token: ${flag}`,
+    );
+  }
+  return flags;
+}
+
+async function resolveLocalOverride(input, fallbackArtifact) {
   const configured = input.env.OPENDAL_MBT_NATIVE_LIB;
   if (typeof configured !== 'string' || configured.length === 0) {
     return null;
@@ -757,12 +772,25 @@ async function resolveLocalOverride(input, artifact) {
   const staticLibrary = path.resolve(configured);
   const stat = await requireRegularFile(staticLibrary, 'OPENDAL_MBT_NATIVE_LIB');
   requireValid(stat.size > 0, 'OPENDAL_MBT_NATIVE_LIB is empty');
+  const configuredLinkFlags = input.env.OPENDAL_MBT_NATIVE_LIBS;
+  if (
+    typeof configuredLinkFlags === 'string' &&
+    configuredLinkFlags.trim().length > 0
+  ) {
+    const systemLinkFlags = parseMaintainerLinkFlags(configuredLinkFlags);
+    report(`Using maintainer native library ${staticLibrary}`);
+    return makeBuildOutput(staticLibrary, { system_link_flags: systemLinkFlags });
+  }
+  requireValid(
+    fallbackArtifact !== undefined,
+    'OPENDAL_MBT_NATIVE_LIBS is required for an unpinned maintainer host',
+  );
   const sourceProfileName = input.env.OPENDAL_MBT_SOURCE_PROFILE;
   const sourceProfile = loadDistributionProfile(sourceProfileName);
   report(
     `Using maintainer ${sourceProfile.service_profile} native library ${staticLibrary}`,
   );
-  return makeSourceBuildOutput(staticLibrary, artifact, sourceProfile);
+  return makeSourceBuildOutput(staticLibrary, fallbackArtifact, sourceProfile);
 }
 
 function formatTopLevelError(error) {
@@ -782,18 +810,22 @@ async function main() {
   }
   const input = await readBuildInput();
   const selected = loadSelectedArtifacts();
+  const hostKey = `${process.platform}-${process.arch}`;
+  const fallbackArtifact = selected.artifacts[hostKey];
+  if (fallbackArtifact) {
+    validateHostCompatibility(fallbackArtifact);
+  }
+  const localOutput = await resolveLocalOverride(input, fallbackArtifact);
+  if (localOutput) {
+    process.stdout.write(`${JSON.stringify(localOutput)}\n`);
+    return;
+  }
   const artifact = selectArtifact(
     selected.artifacts,
     process.platform,
     process.arch,
     selected.serviceProfile,
   );
-  validateHostCompatibility(artifact);
-  const localOutput = await resolveLocalOverride(input, artifact);
-  if (localOutput) {
-    process.stdout.write(`${JSON.stringify(localOutput)}\n`);
-    return;
-  }
   const installed = await ensureArtifact(resolveMoonHome(input), artifact);
   process.stdout.write(`${JSON.stringify(makeBuildOutput(installed.staticLibrary, artifact))}\n`);
 }
@@ -810,6 +842,8 @@ module.exports = {
   loadSelectedArtifacts,
   makeBuildOutput,
   makeSourceBuildOutput,
+  parseMaintainerLinkFlags,
+  resolveLocalOverride,
   selectArtifact,
   sha256File,
   validateInstalledArtifact,

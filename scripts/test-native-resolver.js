@@ -18,6 +18,8 @@ const {
   loadSelectedArtifacts,
   makeBuildOutput,
   makeSourceBuildOutput,
+  parseMaintainerLinkFlags,
+  resolveLocalOverride,
   selectArtifact,
   sha256File,
 } = require('../build.js');
@@ -331,4 +333,55 @@ test('explicit local source builds do not claim standard frameworks', () => {
     output.link_configs[0].link_flags,
     "'/source/libopendal.a' -liconv -lSystem -lc -lm",
   );
+});
+
+test('maintainer link flags accept rustc native-static-libs syntax', () => {
+  assert.deepEqual(
+    parseMaintainerLinkFlags('-lc -lm -lrt -lpthread -framework Security'),
+    ['-lc', '-lm', '-lrt', '-lpthread', '-framework', 'Security'],
+  );
+  assert.throws(
+    () => parseMaintainerLinkFlags('-lc $(touch /tmp/not-allowed)'),
+    /unsafe token/,
+  );
+});
+
+test('maintainer override supports a host without a pinned artifact', async () => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'opendal-override-test-'));
+  try {
+    const library = path.join(root, 'libopendal_mbt_native.a');
+    await fsp.writeFile(library, '!<arch>\nmaintainer fixture');
+    const output = await resolveLocalOverride(
+      {
+        env: {
+          OPENDAL_MBT_NATIVE_LIB: library,
+          OPENDAL_MBT_NATIVE_LIBS: '-lc -lm -lpthread',
+        },
+      },
+      undefined,
+    );
+    assert.equal(
+      output.link_configs[0].link_flags,
+      `'${library}' -lc -lm -lpthread`,
+    );
+  } finally {
+    await cleanup(root);
+  }
+});
+
+test('unpinned maintainer override requires explicit native link flags', async () => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'opendal-override-test-'));
+  try {
+    const library = path.join(root, 'libopendal_mbt_native.a');
+    await fsp.writeFile(library, '!<arch>\nmaintainer fixture');
+    await assert.rejects(
+      resolveLocalOverride(
+        { env: { OPENDAL_MBT_NATIVE_LIB: library } },
+        undefined,
+      ),
+      /OPENDAL_MBT_NATIVE_LIBS is required/,
+    );
+  } finally {
+    await cleanup(root);
+  }
 });
