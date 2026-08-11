@@ -367,6 +367,7 @@ static int copy_buffer(const opendal_mbt_api_v1_t *api,
 int main(void) {
   static const uint8_t memory_scheme[] = {'m', 'e', 'm', 'o', 'r', 'y'};
   static const uint8_t object_path[] = "examples/roundtrip.bin";
+  static const uint8_t aborted_path[] = "examples/aborted.bin";
   static const uint8_t missing_path[] = "examples/missing.bin";
   static const uint8_t payload[] = {
       UINT8_C(0x4f), UINT8_C(0x70), UINT8_C(0x65), UINT8_C(0x6e),
@@ -379,17 +380,22 @@ int main(void) {
       bytes_view(object_path, (uint64_t)(sizeof(object_path) - 1));
   const opendal_mbt_bytes_view_v1_t absent_path =
       bytes_view(missing_path, (uint64_t)(sizeof(missing_path) - 1));
+  const opendal_mbt_bytes_view_v1_t discarded_path =
+      bytes_view(aborted_path, (uint64_t)(sizeof(aborted_path) - 1));
   const opendal_mbt_bytes_view_v1_t data =
       bytes_view(payload, (uint64_t)sizeof(payload));
   const uint64_t required_features = OPENDAL_MBT_FEATURE_BASE |
                                      OPENDAL_MBT_FEATURE_WHOLE_OBJECT |
-                                     OPENDAL_MBT_FEATURE_READ_STREAM;
+                                     OPENDAL_MBT_FEATURE_READ_STREAM |
+                                     OPENDAL_MBT_FEATURE_CHUNKED_WRITER |
+                                     OPENDAL_MBT_FEATURE_WRITER_ABORT;
   opendal_mbt_api_v1_t api;
   opendal_mbt_operator_v1_t *operator_ = NULL;
   opendal_mbt_operator_info_v1_t *operator_info = NULL;
   opendal_mbt_metadata_v1_t *metadata = NULL;
   opendal_mbt_buffer_v1_t *buffer = NULL;
   opendal_mbt_read_stream_v1_t *read_stream = NULL;
+  opendal_mbt_writer_v1_t *writer = NULL;
   opendal_mbt_error_v1_t *error = NULL;
   opendal_mbt_read_stream_options_v1_t stream_options;
   uint8_t *roundtrip = NULL;
@@ -453,6 +459,11 @@ int main(void) {
   REQUIRE_API_FIELD(read_stream_next);
   REQUIRE_API_FIELD(read_stream_close);
   REQUIRE_API_FIELD(read_stream_free);
+  REQUIRE_API_FIELD(operator_writer);
+  REQUIRE_API_FIELD(writer_write);
+  REQUIRE_API_FIELD(writer_close);
+  REQUIRE_API_FIELD(writer_free);
+  REQUIRE_API_FIELD(writer_abort);
 #undef REQUIRE_API_FIELD
 
   api_ready = 1;
@@ -605,6 +616,40 @@ int main(void) {
   api.read_stream_free(read_stream);
   read_stream = NULL;
 
+  status = api.operator_writer(operator_, &discarded_path, NULL, &writer,
+                               &error);
+  if (!expect_ok(&api, "operator_writer(abort)", status, &error) ||
+      writer == NULL) {
+    goto cleanup;
+  }
+  status = api.writer_write(writer, &data, &error);
+  if (!expect_ok(&api, "writer_write(abort)", status, &error)) {
+    goto cleanup;
+  }
+  status = api.writer_abort(writer, &error);
+  if (!expect_ok(&api, "writer_abort", status, &error)) {
+    goto cleanup;
+  }
+  status = api.writer_abort(writer, &error);
+  if (!expect_ok(&api, "writer_abort(repeated)", status, &error)) {
+    goto cleanup;
+  }
+  api.writer_free(writer);
+  writer = NULL;
+
+  status = api.operator_read(operator_, &discarded_path, NULL,
+                             (uint64_t)sizeof(payload), &buffer, &error);
+  if (buffer != NULL) {
+    (void)fputs("operator_read(aborted): returned a buffer\n", stderr);
+    api.buffer_free(buffer);
+    buffer = NULL;
+    goto cleanup;
+  }
+  if (!expect_error(&api, "operator_read(aborted, expected)", status,
+                    &error)) {
+    goto cleanup;
+  }
+
   (void)fprintf(stdout,
                 "binary roundtrip OK: %" PRIu64
                 " bytes, including embedded NUL and non-UTF-8 bytes\n",
@@ -625,6 +670,9 @@ cleanup:
     }
     if (read_stream != NULL) {
       api.read_stream_free(read_stream);
+    }
+    if (writer != NULL) {
+      api.writer_free(writer);
     }
     if (operator_info != NULL) {
       api.operator_info_free(operator_info);

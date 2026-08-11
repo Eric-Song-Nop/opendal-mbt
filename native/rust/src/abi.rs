@@ -53,6 +53,7 @@ pub(crate) const FEATURE_LISTING: u64 = 1 << 2;
 pub(crate) const FEATURE_RANDOM_READER: u64 = 1 << 3;
 pub(crate) const FEATURE_CHUNKED_WRITER: u64 = 1 << 4;
 pub(crate) const FEATURE_READ_STREAM: u64 = 1 << 5;
+pub(crate) const FEATURE_WRITER_ABORT: u64 = 1 << 6;
 
 pub(crate) const CAP_STAT: u64 = 1 << 0;
 pub(crate) const CAP_READ: u64 = 1 << 1;
@@ -298,6 +299,7 @@ pub(crate) struct LibraryInfoViewV1 {
 
 #[repr(C)]
 pub(crate) struct OperatorV1 {
+    pub(crate) async_inner: opendal::Operator,
     pub(crate) inner: opendal::blocking::Operator,
 }
 
@@ -371,12 +373,15 @@ pub(crate) enum ReadStreamStateV1 {
 #[repr(C)]
 pub(crate) struct WriterV1 {
     pub(crate) state: std::sync::Mutex<WriterStateV1>,
+    pub(crate) changed: std::sync::Condvar,
 }
 
 pub(crate) enum WriterStateV1 {
-    Open(opendal::blocking::Writer),
+    Open(opendal::Writer),
+    Busy,
+    Finished,
+    Aborted,
     Failed,
-    Closed,
 }
 
 pub(crate) type LibraryInfoFn = unsafe extern "C" fn(*mut LibraryInfoViewV1) -> Status;
@@ -507,6 +512,7 @@ pub(crate) type ReadStreamNextFn =
     unsafe extern "C" fn(*mut ReadStreamV1, u64, *mut *mut BufferV1, *mut *mut ErrorV1) -> Status;
 pub(crate) type ReadStreamCloseFn = unsafe extern "C" fn(*mut ReadStreamV1);
 pub(crate) type ReadStreamFreeFn = unsafe extern "C" fn(*mut ReadStreamV1);
+pub(crate) type WriterAbortFn = unsafe extern "C" fn(*mut WriterV1, *mut *mut ErrorV1) -> Status;
 
 #[repr(C)]
 pub(crate) struct ApiV1 {
@@ -558,6 +564,7 @@ pub(crate) struct ApiV1 {
     pub(crate) read_stream_next: Option<ReadStreamNextFn>,
     pub(crate) read_stream_close: Option<ReadStreamCloseFn>,
     pub(crate) read_stream_free: Option<ReadStreamFreeFn>,
+    pub(crate) writer_abort: Option<WriterAbortFn>,
 }
 
 pub(crate) const API_INPUT_SIZE: usize =
