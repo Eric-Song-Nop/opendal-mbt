@@ -124,6 +124,7 @@ typedef uint32_t opendal_mbt_range_kind_t;
 #define OPENDAL_MBT_FEATURE_RANDOM_READER (UINT64_C(1) << 3)
 #define OPENDAL_MBT_FEATURE_CHUNKED_WRITER (UINT64_C(1) << 4)
 #define OPENDAL_MBT_FEATURE_READ_STREAM (UINT64_C(1) << 5)
+#define OPENDAL_MBT_FEATURE_WRITER_ABORT (UINT64_C(1) << 6)
 
 /* Capability bit positions. */
 #define OPENDAL_MBT_CAP_STAT (UINT64_C(1) << 0)
@@ -578,6 +579,14 @@ typedef struct opendal_mbt_api_v1 {
       opendal_mbt_read_stream_v1_t *stream);
   void(OPENDAL_MBT_CALL *read_stream_free)(
       opendal_mbt_read_stream_v1_t *stream);
+
+  /*
+   * OPENDAL_MBT_FEATURE_WRITER_ABORT: appended in ABI v1.1 and dependent on
+   * BASE plus CHUNKED_WRITER. A successful repeated abort is idempotent.
+   */
+  opendal_mbt_status_t(OPENDAL_MBT_CALL *writer_abort)(
+      opendal_mbt_writer_v1_t *writer,
+      opendal_mbt_error_v1_t **out_error);
 } opendal_mbt_api_v1_t;
 
 /* End offset of one complete table field; never read a partially covered one. */

@@ -62,6 +62,9 @@ ABI_STATIC_ASSERT(OPENDAL_MBT_API_V1_INPUT_SIZE == 8,
 ABI_STATIC_ASSERT(OPENDAL_MBT_API_V1_FIELD_END(library_info) <=
                       OPENDAL_MBT_API_V1_FIELD_END(error_view),
                   "function table order drifted");
+ABI_STATIC_ASSERT(OPENDAL_MBT_API_V1_FIELD_END(read_stream_free) <=
+                      OPENDAL_MBT_API_V1_FIELD_END(writer_abort),
+                  "v1.1 append order drifted");
 ABI_STATIC_ASSERT(OPENDAL_MBT_READ_OPTIONS_V1_MIN_SIZE <=
                       sizeof(opendal_mbt_read_options_v1_t),
                   "read options v1.0 prefix drifted");
