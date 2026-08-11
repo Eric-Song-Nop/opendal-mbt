@@ -1,4 +1,5 @@
 members = [
   ".",
   "./integration/consumer",
+  "./integration/s3",
 ]

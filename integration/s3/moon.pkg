@@ -1,0 +1,10 @@
+supported_targets = "native"
+
+import {
+  "Eric-Song-Nop/opendal",
+  "moonbitlang/core/env",
+} for "test"
+
+options(
+  targets: { "s3_integration_test.mbt": [ "native" ] },
+)
