@@ -1,5 +1,5 @@
 {
   "schema_version": 1,
-  "service_profile": "local",
-  "artifact_table": "artifacts.json"
+  "service_profile": "standard",
+  "artifact_table": "artifacts-standard.json"
 }

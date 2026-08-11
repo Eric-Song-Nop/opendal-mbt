@@ -1,5 +1,163 @@
 {
   "schema_version": 1,
   "service_profile": "standard",
-  "artifacts": {}
+  "artifacts": {
+    "darwin-arm64": {
+      "abi_version": {
+        "major": 1,
+        "minor": 7,
+        "patch": 0
+      },
+      "archive_name": "opendal-mbt-0.2.0-r1-standard-aarch64-apple-darwin.tar.gz",
+      "archive_sha256": "45edfafc2919380431aa33e78c97d8274e1d51902afa87f7086eb6ec72700357",
+      "archive_size": 15518930,
+      "artifact": "opendal-mbt-0.2.0-r1-standard-aarch64-apple-darwin",
+      "artifact_revision": "r1",
+      "binding_version": "0.2.0",
+      "cargo_features": [
+        "profile-standard"
+      ],
+      "host_key": "darwin-arm64",
+      "minimum_macos_version": "11.0",
+      "opendal_version": "0.58.1",
+      "runtime_initialization": "install_default",
+      "rust_features": [
+        "blocking",
+        "services-fs",
+        "services-s3",
+        "http-transport-reqwest",
+        "http-transport-reqwest-rustls",
+        "executors-tokio",
+        "layers-retry",
+        "layers-timeout",
+        "layers-concurrent-limit"
+      ],
+      "rust_target": "aarch64-apple-darwin",
+      "rust_version": "1.91",
+      "service_profile": "standard",
+      "services": [
+        "memory",
+        "fs",
+        "s3"
+      ],
+      "static_library": "lib/libopendal_mbt_native.a",
+      "static_library_sha256": "ac51d9908d78390c03a8fa972b399e66f274ad4df38498ec68030e670a6671b1",
+      "static_library_size": 46094664,
+      "system_link_flags": [
+        "-framework",
+        "Security",
+        "-framework",
+        "CoreFoundation",
+        "-liconv",
+        "-lSystem",
+        "-lc",
+        "-lm"
+      ],
+      "url": "https://github.com/Eric-Song-Nop/opendal-mbt/releases/download/v0.2.0/opendal-mbt-0.2.0-r1-standard-aarch64-apple-darwin.tar.gz"
+    },
+    "linux-arm64": {
+      "abi_version": {
+        "major": 1,
+        "minor": 7,
+        "patch": 0
+      },
+      "archive_name": "opendal-mbt-0.2.0-r1-standard-aarch64-unknown-linux-gnu.tar.gz",
+      "archive_sha256": "d323283b84d24edc782b5d2fe4601407a9ea4d812a0d5657aa991eed095159d5",
+      "archive_size": 17376816,
+      "artifact": "opendal-mbt-0.2.0-r1-standard-aarch64-unknown-linux-gnu",
+      "artifact_revision": "r1",
+      "binding_version": "0.2.0",
+      "cargo_features": [
+        "profile-standard"
+      ],
+      "host_key": "linux-arm64",
+      "minimum_glibc_version": "2.35",
+      "opendal_version": "0.58.1",
+      "runtime_initialization": "install_default",
+      "rust_features": [
+        "blocking",
+        "services-fs",
+        "services-s3",
+        "http-transport-reqwest",
+        "http-transport-reqwest-rustls",
+        "executors-tokio",
+        "layers-retry",
+        "layers-timeout",
+        "layers-concurrent-limit"
+      ],
+      "rust_target": "aarch64-unknown-linux-gnu",
+      "rust_version": "1.91",
+      "service_profile": "standard",
+      "services": [
+        "memory",
+        "fs",
+        "s3"
+      ],
+      "static_library": "lib/libopendal_mbt_native.a",
+      "static_library_sha256": "13e994b81459c17f931ec5e7ff19516420948a97b6d144d0ff44fa81e2fb1a76",
+      "static_library_size": 66790454,
+      "system_link_flags": [
+        "-lgcc_s",
+        "-lutil",
+        "-lrt",
+        "-lpthread",
+        "-lm",
+        "-ldl",
+        "-lc"
+      ],
+      "url": "https://github.com/Eric-Song-Nop/opendal-mbt/releases/download/v0.2.0/opendal-mbt-0.2.0-r1-standard-aarch64-unknown-linux-gnu.tar.gz"
+    },
+    "linux-x64": {
+      "abi_version": {
+        "major": 1,
+        "minor": 7,
+        "patch": 0
+      },
+      "archive_name": "opendal-mbt-0.2.0-r1-standard-x86_64-unknown-linux-gnu.tar.gz",
+      "archive_sha256": "31d8909729dcab4d3d0de5c0931a49397a6926442bc66b98ec189d1dc5f71b44",
+      "archive_size": 17346926,
+      "artifact": "opendal-mbt-0.2.0-r1-standard-x86_64-unknown-linux-gnu",
+      "artifact_revision": "r1",
+      "binding_version": "0.2.0",
+      "cargo_features": [
+        "profile-standard"
+      ],
+      "host_key": "linux-x64",
+      "minimum_glibc_version": "2.35",
+      "opendal_version": "0.58.1",
+      "runtime_initialization": "install_default",
+      "rust_features": [
+        "blocking",
+        "services-fs",
+        "services-s3",
+        "http-transport-reqwest",
+        "http-transport-reqwest-rustls",
+        "executors-tokio",
+        "layers-retry",
+        "layers-timeout",
+        "layers-concurrent-limit"
+      ],
+      "rust_target": "x86_64-unknown-linux-gnu",
+      "rust_version": "1.91",
+      "service_profile": "standard",
+      "services": [
+        "memory",
+        "fs",
+        "s3"
+      ],
+      "static_library": "lib/libopendal_mbt_native.a",
+      "static_library_sha256": "a5d80274bf94547e2f9ea5f53acd81b74af7b1c7ca0cf427edeb8a46ba9f0b3c",
+      "static_library_size": 66181990,
+      "system_link_flags": [
+        "-lgcc_s",
+        "-lutil",
+        "-lrt",
+        "-lpthread",
+        "-lm",
+        "-ldl",
+        "-lc"
+      ],
+      "url": "https://github.com/Eric-Song-Nop/opendal-mbt/releases/download/v0.2.0/opendal-mbt-0.2.0-r1-standard-x86_64-unknown-linux-gnu.tar.gz"
+    }
+  }
 }

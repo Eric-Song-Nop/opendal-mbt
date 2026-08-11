@@ -79,10 +79,28 @@ class DistributionProfilesTest(unittest.TestCase):
         table = read_json("native/artifacts-standard.json")
         self.assertEqual(table["schema_version"], 1)
         self.assertEqual(table["service_profile"], "standard")
-        for artifact in table["artifacts"].values():
+        self.assertEqual(
+            sorted(table["artifacts"]),
+            ["darwin-arm64", "linux-arm64", "linux-x64"],
+        )
+        for host_key, artifact in table["artifacts"].items():
+            self.assertEqual(artifact["host_key"], host_key)
+            self.assertEqual(artifact["binding_version"], "0.2.0")
+            self.assertEqual(artifact["artifact_revision"], "r1")
             self.assertEqual(artifact["service_profile"], "standard")
             self.assertEqual(artifact["services"], ["memory", "fs", "s3"])
             self.assertEqual(artifact["rust_features"], STANDARD_FEATURES)
+            self.assertEqual(artifact["cargo_features"], ["profile-standard"])
+            self.assertEqual(artifact["runtime_initialization"], "install_default")
+            self.assertRegex(artifact["archive_sha256"], r"^[0-9a-f]{64}$")
+            self.assertRegex(artifact["static_library_sha256"], r"^[0-9a-f]{64}$")
+            self.assertGreater(artifact["archive_size"], 0)
+            self.assertGreater(artifact["static_library_size"], 0)
+            self.assertEqual(
+                artifact["url"],
+                "https://github.com/Eric-Song-Nop/opendal-mbt/"
+                f"releases/download/v0.2.0/{artifact['archive_name']}",
+            )
 
     def test_cargo_profiles_are_explicit_and_standard_is_the_source_default(self) -> None:
         result = subprocess.run(
@@ -123,14 +141,14 @@ class DistributionProfilesTest(unittest.TestCase):
         self.assertIn('name = "opendal-service-s3"', lockfile)
         self.assertIn('name = "opendal-http-transport-reqwest"', lockfile)
 
-    def test_published_selection_is_internal_and_stays_local_until_api_activation(self) -> None:
+    def test_v0_2_candidate_selects_one_internal_standard_profile(self) -> None:
         selection = read_json("native/artifact-selection.json")
         self.assertEqual(
             selection,
             {
                 "schema_version": 1,
-                "service_profile": "local",
-                "artifact_table": "artifacts.json",
+                "service_profile": "standard",
+                "artifact_table": "artifacts-standard.json",
             },
         )
         resolver = (ROOT / "build.js").read_text(encoding="utf-8")
