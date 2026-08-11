@@ -14,8 +14,10 @@ const {
   ensureArtifact,
   loadArtifactSelection,
   loadArtifacts,
+  loadDistributionProfile,
   loadSelectedArtifacts,
   makeBuildOutput,
+  makeSourceBuildOutput,
   selectArtifact,
   sha256File,
 } = require('../build.js');
@@ -273,4 +275,60 @@ test('link configuration uses the exact archive path and target flags', () => {
       },
     ],
   });
+});
+
+test('standard source builds add only profile-required frameworks', () => {
+  const profile = loadDistributionProfile('standard');
+  const artifact = {
+    rust_target: 'aarch64-apple-darwin',
+    host_key: 'darwin-arm64',
+    system_link_flags: ['-liconv', '-lSystem', '-lc', '-lm'],
+  };
+  const output = makeSourceBuildOutput('/source/libopendal.a', artifact, profile);
+  assert.equal(
+    output.link_configs[0].link_flags,
+    "'/source/libopendal.a' -liconv -lSystem -lc -lm " +
+      '-framework Security -framework CoreFoundation',
+  );
+  assert.deepEqual(artifact.system_link_flags, ['-liconv', '-lSystem', '-lc', '-lm']);
+});
+
+test('standard source builds do not duplicate artifact framework flags', () => {
+  const profile = loadDistributionProfile('standard');
+  const output = makeSourceBuildOutput(
+    '/source/libopendal.a',
+    {
+      rust_target: 'aarch64-apple-darwin',
+      host_key: 'darwin-arm64',
+      system_link_flags: [
+        '-framework',
+        'Security',
+        '-framework',
+        'CoreFoundation',
+        '-lc',
+      ],
+    },
+    profile,
+  );
+  assert.equal(
+    output.link_configs[0].link_flags,
+    "'/source/libopendal.a' -framework Security -framework CoreFoundation -lc",
+  );
+});
+
+test('explicit local source builds do not claim standard frameworks', () => {
+  const profile = loadDistributionProfile('local');
+  const output = makeSourceBuildOutput(
+    '/source/libopendal.a',
+    {
+      rust_target: 'aarch64-apple-darwin',
+      host_key: 'darwin-arm64',
+      system_link_flags: ['-liconv', '-lSystem', '-lc', '-lm'],
+    },
+    profile,
+  );
+  assert.equal(
+    output.link_configs[0].link_flags,
+    "'/source/libopendal.a' -liconv -lSystem -lc -lm",
+  );
 });

@@ -160,6 +160,44 @@ function loadArtifactSelection(
   return document;
 }
 
+function loadDistributionProfile(serviceProfile, filename) {
+  if (
+    typeof serviceProfile !== 'string' ||
+    !/^[a-z][a-z0-9-]*$/.test(serviceProfile)
+  ) {
+    throw new Error('OPENDAL_MBT_SOURCE_PROFILE must name a service profile');
+  }
+  const profileFilename =
+    filename ||
+    (serviceProfile === 'local'
+      ? path.join(__dirname, 'native', 'distribution-profile.json')
+      : path.join(
+          __dirname,
+          'native',
+          'distribution-profiles',
+          `${serviceProfile}.json`,
+        ));
+  let document;
+  try {
+    document = JSON.parse(fs.readFileSync(profileFilename, 'utf8'));
+  } catch (error) {
+    throw new Error(
+      `Cannot read maintainer source profile ${serviceProfile}: ${error.message}`,
+    );
+  }
+  if (
+    !document ||
+    document.schema_version !== 1 ||
+    document.service_profile !== serviceProfile ||
+    !document.targets ||
+    typeof document.targets !== 'object' ||
+    Array.isArray(document.targets)
+  ) {
+    throw new Error(`Unsupported maintainer source profile ${serviceProfile}`);
+  }
+  return document;
+}
+
 function loadSelectedArtifacts(
   selectionFilename = path.join(__dirname, 'native', 'artifact-selection.json'),
 ) {
@@ -671,6 +709,46 @@ function makeBuildOutput(staticLibrary, artifact) {
   };
 }
 
+function makeSourceBuildOutput(staticLibrary, artifact, sourceProfile) {
+  const target = sourceProfile.targets[artifact.rust_target];
+  if (!target || target.host_key !== artifact.host_key) {
+    throw new Error(
+      `Maintainer source profile ${sourceProfile.service_profile} does not support ` +
+        `${artifact.rust_target} (${artifact.host_key})`,
+    );
+  }
+  const requiredFrameworks = target.required_frameworks || [];
+  if (
+    !Array.isArray(requiredFrameworks) ||
+    requiredFrameworks.some(
+      (framework) => typeof framework !== 'string' || framework.length === 0,
+    ) ||
+    new Set(requiredFrameworks).size !== requiredFrameworks.length
+  ) {
+    throw new Error(
+      `Maintainer source profile ${sourceProfile.service_profile} has invalid ` +
+        'required_frameworks',
+    );
+  }
+  const systemLinkFlags = [...artifact.system_link_flags];
+  const linkedFrameworks = new Set();
+  for (let index = 0; index < systemLinkFlags.length - 1; index += 1) {
+    if (systemLinkFlags[index] === '-framework') {
+      linkedFrameworks.add(systemLinkFlags[index + 1]);
+      index += 1;
+    }
+  }
+  for (const framework of requiredFrameworks) {
+    if (!linkedFrameworks.has(framework)) {
+      systemLinkFlags.push('-framework', framework);
+    }
+  }
+  return makeBuildOutput(staticLibrary, {
+    ...artifact,
+    system_link_flags: systemLinkFlags,
+  });
+}
+
 async function resolveLocalOverride(input, artifact) {
   const configured = input.env.OPENDAL_MBT_NATIVE_LIB;
   if (typeof configured !== 'string' || configured.length === 0) {
@@ -679,8 +757,12 @@ async function resolveLocalOverride(input, artifact) {
   const staticLibrary = path.resolve(configured);
   const stat = await requireRegularFile(staticLibrary, 'OPENDAL_MBT_NATIVE_LIB');
   requireValid(stat.size > 0, 'OPENDAL_MBT_NATIVE_LIB is empty');
-  report(`Using maintainer native library ${staticLibrary}`);
-  return makeBuildOutput(staticLibrary, artifact);
+  const sourceProfileName = input.env.OPENDAL_MBT_SOURCE_PROFILE;
+  const sourceProfile = loadDistributionProfile(sourceProfileName);
+  report(
+    `Using maintainer ${sourceProfile.service_profile} native library ${staticLibrary}`,
+  );
+  return makeSourceBuildOutput(staticLibrary, artifact, sourceProfile);
 }
 
 function formatTopLevelError(error) {
@@ -724,8 +806,10 @@ module.exports = {
   extractArchive,
   loadArtifactSelection,
   loadArtifacts,
+  loadDistributionProfile,
   loadSelectedArtifacts,
   makeBuildOutput,
+  makeSourceBuildOutput,
   selectArtifact,
   sha256File,
   validateInstalledArtifact,
