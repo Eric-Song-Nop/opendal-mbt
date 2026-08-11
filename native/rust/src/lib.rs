@@ -6,15 +6,22 @@ mod abi;
 
 use std::collections::HashSet;
 use std::ffi::c_void;
+use std::future::Future;
 use std::mem::{align_of, offset_of, size_of};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
 use std::slice;
 use std::str;
-use std::sync::{Condvar, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
+#[cfg(unix)]
+use std::io::Write;
+#[cfg(unix)]
+use std::os::fd::{BorrowedFd, OwnedFd};
+
 use abi::*;
+use futures_util::{FutureExt, TryStreamExt};
 #[cfg(feature = "layers-concurrent-limit")]
 use opendal::layers::ConcurrentLimitLayer;
 #[cfg(feature = "layers-timeout-retry")]
@@ -25,6 +32,7 @@ use opendal::options::{
 use opendal::raw::PresignedRequest;
 use opendal::{BytesRange, Capability, EntryMode, ErrorKind, Metadata};
 use tokio::runtime::Runtime;
+use tokio::task::AbortHandle;
 
 const MAX_OUTPUT_BYTES: u64 = i32::MAX as u64;
 const WHOLE_READ_CHUNK_BYTES: usize = 1024 * 1024;
@@ -262,10 +270,533 @@ struct StructHeaderV1 {
     struct_version: u32,
 }
 
-/* Defined by the Phase 5E native state-machine commit. */
-pub(crate) struct AsyncTaskShared;
-pub(crate) struct AsyncReadStreamCore;
-pub(crate) struct AsyncWriterCore;
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AsyncResultKind {
+    Buffer,
+    Metadata,
+    ReadStream,
+    Writer,
+    Unit,
+}
+
+enum AsyncPayload {
+    None,
+    Buffer(Box<BufferV1>),
+    Metadata(Box<MetadataV1>),
+    ReadStream(Box<AsyncReadStreamV1>),
+    Writer(Box<AsyncWriterV1>),
+    Unit,
+}
+
+struct AsyncOutcome {
+    kind: AsyncResultKind,
+    status: Status,
+    payload: AsyncPayload,
+    error: Option<Box<ErrorV1>>,
+}
+
+impl AsyncOutcome {
+    fn success(kind: AsyncResultKind, payload: AsyncPayload) -> Self {
+        Self {
+            kind,
+            status: STATUS_OK,
+            payload,
+            error: None,
+        }
+    }
+
+    fn end(kind: AsyncResultKind) -> Self {
+        Self {
+            kind,
+            status: STATUS_END,
+            payload: AsyncPayload::None,
+            error: None,
+        }
+    }
+
+    fn failure(kind: AsyncResultKind, failure: CallFailure) -> Self {
+        match failure {
+            CallFailure::AbiMismatch => Self {
+                kind,
+                status: STATUS_ABI_MISMATCH,
+                payload: AsyncPayload::None,
+                error: None,
+            },
+            CallFailure::Error(error) => Self {
+                kind,
+                status: STATUS_ERROR,
+                payload: AsyncPayload::None,
+                error: Some(Box::new(error)),
+            },
+        }
+    }
+
+    fn panic(kind: AsyncResultKind) -> Self {
+        Self {
+            kind,
+            status: STATUS_PANIC,
+            payload: AsyncPayload::None,
+            error: None,
+        }
+    }
+}
+
+enum AsyncTaskState {
+    Running { abort: AbortHandle },
+    Completed(AsyncOutcome),
+    Taken,
+    Cancelled,
+}
+
+#[derive(Clone)]
+enum AsyncResourcePoison {
+    ReadStream(Arc<AsyncReadStreamCore>),
+    Writer(Arc<AsyncWriterCore>),
+}
+
+impl AsyncResourcePoison {
+    fn fail(&self) {
+        match self {
+            Self::ReadStream(stream) => stream.fail(),
+            Self::Writer(writer) => writer.fail(),
+        }
+    }
+}
+
+pub(crate) struct AsyncTaskShared {
+    inner: Mutex<AsyncTaskInner>,
+    resource: Option<AsyncResourcePoison>,
+}
+
+struct AsyncTaskInner {
+    state: AsyncTaskState,
+    signal: Option<CompletionSignal>,
+}
+
+impl AsyncTaskShared {
+    fn publish(&self, outcome: AsyncOutcome) {
+        let signal = {
+            let mut inner = match self.inner.lock() {
+                Ok(inner) => inner,
+                Err(poisoned) => {
+                    self.inner.clear_poison();
+                    poisoned.into_inner()
+                }
+            };
+            if matches!(inner.state, AsyncTaskState::Running { .. }) {
+                inner.state = AsyncTaskState::Completed(outcome);
+                inner.signal.take()
+            } else {
+                None
+            }
+        };
+        if let Some(signal) = signal {
+            signal.notify();
+        }
+    }
+
+    fn cancel(&self) {
+        let (abort, poison, signal) = {
+            let mut inner = match self.inner.lock() {
+                Ok(inner) => inner,
+                Err(poisoned) => {
+                    self.inner.clear_poison();
+                    poisoned.into_inner()
+                }
+            };
+            let previous = std::mem::replace(&mut inner.state, AsyncTaskState::Cancelled);
+            let (abort, poison) = match previous {
+                AsyncTaskState::Running { abort } => (Some(abort), true),
+                AsyncTaskState::Completed(_) => (None, true),
+                AsyncTaskState::Taken => {
+                    inner.state = AsyncTaskState::Taken;
+                    (None, false)
+                }
+                AsyncTaskState::Cancelled => (None, false),
+            };
+            let signal = if poison { inner.signal.take() } else { None };
+            (abort, poison, signal)
+        };
+        if let Some(abort) = abort {
+            abort.abort();
+        }
+        if poison && let Some(resource) = &self.resource {
+            resource.fail();
+        }
+        // Cancellation owns the readiness edge when it wins before the worker.
+        // BrokenPipe is intentionally ignored when the foreign task already
+        // closed its read endpoint; no foreign runtime code is involved.
+        if let Some(signal) = signal {
+            signal.notify();
+        }
+    }
+
+    fn take(&self, expected: AsyncResultKind) -> CallResult<AsyncOutcome> {
+        let mut inner = match self.inner.lock() {
+            Ok(inner) => inner,
+            Err(poisoned) => {
+                self.inner.clear_poison();
+                poisoned.into_inner()
+            }
+        };
+        if let AsyncTaskState::Completed(outcome) = &inner.state
+            && outcome.kind != expected
+        {
+            return Err(invalid_argument(
+                "async task result kind does not match take",
+            ));
+        }
+        let previous = std::mem::replace(&mut inner.state, AsyncTaskState::Taken);
+        match previous {
+            AsyncTaskState::Completed(outcome) => Ok(outcome),
+            AsyncTaskState::Running { abort } => {
+                inner.state = AsyncTaskState::Running { abort };
+                Err(binding_error(
+                    ERROR_RESOURCE_CLOSED,
+                    "ResourceClosed",
+                    "async task result is not ready",
+                ))
+            }
+            AsyncTaskState::Taken => {
+                inner.state = AsyncTaskState::Taken;
+                Err(binding_error(
+                    ERROR_RESOURCE_CLOSED,
+                    "ResourceClosed",
+                    "async task result was already taken",
+                ))
+            }
+            AsyncTaskState::Cancelled => {
+                inner.state = AsyncTaskState::Cancelled;
+                Err(binding_error(
+                    ERROR_RESOURCE_CLOSED,
+                    "ResourceClosed",
+                    "async task was cancelled",
+                ))
+            }
+        }
+    }
+}
+
+enum AsyncReadStreamState {
+    Open(Box<opendal::BufferStream>),
+    Busy(Option<AbortHandle>),
+    End,
+    Failed,
+    Closed,
+}
+
+pub(crate) struct AsyncReadStreamCore {
+    state: Mutex<AsyncReadStreamState>,
+    chunk_size: u64,
+}
+
+impl AsyncReadStreamCore {
+    fn take_for_next(&self) -> CallResult<AsyncReadStreamStart> {
+        let mut state = self.lock_state();
+        let previous = std::mem::replace(&mut *state, AsyncReadStreamState::Failed);
+        match previous {
+            AsyncReadStreamState::Open(stream) => {
+                *state = AsyncReadStreamState::Busy(None);
+                Ok(AsyncReadStreamStart::Stream(stream))
+            }
+            AsyncReadStreamState::End => {
+                *state = AsyncReadStreamState::End;
+                Ok(AsyncReadStreamStart::End)
+            }
+            AsyncReadStreamState::Busy(abort) => {
+                *state = AsyncReadStreamState::Busy(abort);
+                Err(binding_error(
+                    ERROR_RESOURCE_CLOSED,
+                    "ResourceClosed",
+                    "async read stream already has an in-flight operation",
+                ))
+            }
+            terminal @ (AsyncReadStreamState::Failed | AsyncReadStreamState::Closed) => {
+                *state = terminal;
+                Err(binding_error(
+                    ERROR_RESOURCE_CLOSED,
+                    "ResourceClosed",
+                    "async read stream is closed",
+                ))
+            }
+        }
+    }
+
+    fn install_abort(&self, abort: AbortHandle) {
+        let mut state = self.lock_state();
+        match &mut *state {
+            AsyncReadStreamState::Busy(slot @ None) => *slot = Some(abort),
+            AsyncReadStreamState::Failed | AsyncReadStreamState::Closed => abort.abort(),
+            _ => {}
+        }
+    }
+
+    fn complete_next(&self, stream: Box<opendal::BufferStream>, next: AsyncReadStreamNext) {
+        let mut state = self.lock_state();
+        if matches!(*state, AsyncReadStreamState::Busy(_)) {
+            *state = match next {
+                AsyncReadStreamNext::Chunk => AsyncReadStreamState::Open(stream),
+                AsyncReadStreamNext::End => AsyncReadStreamState::End,
+                AsyncReadStreamNext::Failed => AsyncReadStreamState::Failed,
+            };
+        }
+    }
+
+    fn close(&self) {
+        let abort = {
+            let mut state = self.lock_state();
+            let previous = std::mem::replace(&mut *state, AsyncReadStreamState::Closed);
+            match previous {
+                AsyncReadStreamState::Busy(abort) => abort,
+                _ => None,
+            }
+        };
+        if let Some(abort) = abort {
+            abort.abort();
+        }
+    }
+
+    fn fail(&self) {
+        let abort = {
+            let mut state = self.lock_state();
+            let previous = std::mem::replace(&mut *state, AsyncReadStreamState::Failed);
+            match previous {
+                AsyncReadStreamState::Busy(abort) => abort,
+                _ => None,
+            }
+        };
+        if let Some(abort) = abort {
+            abort.abort();
+        }
+    }
+
+    fn lock_state(&self) -> MutexGuard<'_, AsyncReadStreamState> {
+        match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => {
+                self.state.clear_poison();
+                poisoned.into_inner()
+            }
+        }
+    }
+}
+
+enum AsyncReadStreamNext {
+    Chunk,
+    End,
+    Failed,
+}
+
+enum AsyncReadStreamStart {
+    Stream(Box<opendal::BufferStream>),
+    End,
+}
+
+enum AsyncWriterState {
+    Open(opendal::Writer),
+    Busy(Option<AbortHandle>),
+    Finished,
+    Aborted,
+    Failed,
+}
+
+pub(crate) struct AsyncWriterCore {
+    state: Mutex<AsyncWriterState>,
+}
+
+impl AsyncWriterCore {
+    fn take_for_call(&self, repeated_abort_is_ok: bool) -> CallResult<Option<opendal::Writer>> {
+        let mut state = self.lock_state();
+        let previous = std::mem::replace(&mut *state, AsyncWriterState::Failed);
+        match previous {
+            AsyncWriterState::Open(writer) => {
+                *state = AsyncWriterState::Busy(None);
+                Ok(Some(writer))
+            }
+            AsyncWriterState::Aborted if repeated_abort_is_ok => {
+                *state = AsyncWriterState::Aborted;
+                Ok(None)
+            }
+            AsyncWriterState::Busy(abort) => {
+                *state = AsyncWriterState::Busy(abort);
+                Err(binding_error(
+                    ERROR_RESOURCE_CLOSED,
+                    "ResourceClosed",
+                    "async writer already has an in-flight operation",
+                ))
+            }
+            terminal @ (AsyncWriterState::Finished
+            | AsyncWriterState::Aborted
+            | AsyncWriterState::Failed) => {
+                *state = terminal;
+                Err(binding_error(
+                    ERROR_RESOURCE_CLOSED,
+                    "ResourceClosed",
+                    "async writer is closed",
+                ))
+            }
+        }
+    }
+
+    fn install_abort(&self, abort: AbortHandle) {
+        let mut state = self.lock_state();
+        match &mut *state {
+            AsyncWriterState::Busy(slot @ None) => *slot = Some(abort),
+            AsyncWriterState::Failed => abort.abort(),
+            _ => {}
+        }
+    }
+
+    fn complete(&self, writer: opendal::Writer, next: AsyncWriterCompletion) {
+        let mut state = self.lock_state();
+        if matches!(*state, AsyncWriterState::Busy(_)) {
+            *state = match next {
+                AsyncWriterCompletion::Open => AsyncWriterState::Open(writer),
+                AsyncWriterCompletion::Finished => AsyncWriterState::Finished,
+                AsyncWriterCompletion::Aborted => AsyncWriterState::Aborted,
+                AsyncWriterCompletion::Failed => AsyncWriterState::Failed,
+            };
+        }
+    }
+
+    fn fail(&self) {
+        let abort = {
+            let mut state = self.lock_state();
+            let previous = std::mem::replace(&mut *state, AsyncWriterState::Failed);
+            match previous {
+                AsyncWriterState::Busy(abort) => abort,
+                _ => None,
+            }
+        };
+        if let Some(abort) = abort {
+            abort.abort();
+        }
+    }
+
+    fn lock_state(&self) -> MutexGuard<'_, AsyncWriterState> {
+        match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => {
+                self.state.clear_poison();
+                poisoned.into_inner()
+            }
+        }
+    }
+}
+
+enum AsyncWriterCompletion {
+    Open,
+    Finished,
+    Aborted,
+    Failed,
+}
+
+#[cfg(unix)]
+struct CompletionSignal(OwnedFd);
+
+#[cfg(not(unix))]
+struct CompletionSignal;
+
+impl CompletionSignal {
+    #[cfg(unix)]
+    fn duplicate(raw_fd: i32) -> CallResult<Self> {
+        if raw_fd < 0 {
+            return Err(invalid_argument("async completion fd must be non-negative"));
+        }
+        // SAFETY: the caller promises a live descriptor for this synchronous
+        // call. try_clone_to_owned duplicates it before the borrowed value ends.
+        let borrowed = unsafe { BorrowedFd::borrow_raw(raw_fd) };
+        borrowed.try_clone_to_owned().map(Self).map_err(|error| {
+            binding_error(
+                ERROR_UNEXPECTED,
+                "Unexpected",
+                format!("could not duplicate async completion fd: {error}"),
+            )
+        })
+    }
+
+    #[cfg(not(unix))]
+    fn duplicate(_raw_fd: i32) -> CallResult<Self> {
+        Err(binding_error(
+            ERROR_UNSUPPORTED,
+            "Unsupported",
+            "native async pipe completion requires a POSIX target",
+        ))
+    }
+
+    #[cfg(unix)]
+    fn notify(self) {
+        let mut pipe = std::fs::File::from(self.0);
+        let _ = pipe.write_all(&[1]);
+    }
+
+    #[cfg(not(unix))]
+    fn notify(self) {}
+}
+
+struct AsyncLaunch {
+    signal: CompletionSignal,
+    runtime: &'static Runtime,
+}
+
+impl AsyncLaunch {
+    fn prepare(completion_fd: i32) -> CallResult<Self> {
+        Ok(Self {
+            signal: CompletionSignal::duplicate(completion_fd)?,
+            runtime: runtime()?,
+        })
+    }
+
+    fn spawn<F>(
+        self,
+        kind: AsyncResultKind,
+        resource: Option<AsyncResourcePoison>,
+        future: F,
+    ) -> (Box<AsyncTaskV1>, AbortHandle)
+    where
+        F: Future<Output = AsyncOutcome> + Send + 'static,
+    {
+        let operation = self.runtime.spawn(AssertUnwindSafe(future).catch_unwind());
+        let abort = operation.abort_handle();
+        let shared = Arc::new(AsyncTaskShared {
+            inner: Mutex::new(AsyncTaskInner {
+                state: AsyncTaskState::Running {
+                    abort: abort.clone(),
+                },
+                signal: Some(self.signal),
+            }),
+            resource,
+        });
+        let supervisor_shared = shared.clone();
+        self.runtime.spawn(async move {
+            let outcome = match operation.await {
+                Ok(Ok(outcome)) => outcome,
+                Ok(Err(_)) => {
+                    if let Some(resource) = &supervisor_shared.resource {
+                        resource.fail();
+                    }
+                    AsyncOutcome::panic(kind)
+                }
+                Err(error) if error.is_cancelled() => AsyncOutcome::failure(
+                    kind,
+                    binding_error(
+                        ERROR_RESOURCE_CLOSED,
+                        "ResourceClosed",
+                        "async operation was cancelled",
+                    ),
+                ),
+                Err(_) => {
+                    if let Some(resource) = &supervisor_shared.resource {
+                        resource.fail();
+                    }
+                    AsyncOutcome::panic(kind)
+                }
+            };
+            supervisor_shared.publish(outcome);
+        });
+        (Box::new(AsyncTaskV1 { shared }), abort)
+    }
+}
 
 enum CallFailure {
     AbiMismatch,
@@ -1802,6 +2333,65 @@ fn resolve_whole_read_range(
             let size = content_length.min(requested_size);
             Ok(BytesRange::new(content_length - size, Some(size)))
         }
+    }
+}
+
+async fn resolve_whole_read_range_async(
+    operator: &opendal::Operator,
+    path: &str,
+    plan: &WholeReadPlan,
+) -> CallResult<BytesRange> {
+    let (offset, requested_size) = match plan.range {
+        WholeReadRangePlan::Bounded(range) => return Ok(range),
+        WholeReadRangePlan::Suffix { size } => (None, size),
+        WholeReadRangePlan::OpenEnded { offset, probe_size } => (Some(offset), probe_size),
+    };
+    let metadata = operator
+        .stat_options(path, plan.stat_options.clone())
+        .await
+        .map_err(opendal_error)?;
+    if metadata.is_dir() {
+        return Err(opendal_error(
+            opendal::Error::new(ErrorKind::IsADirectory, "read path is a directory")
+                .with_operation("Operator::read"),
+        ));
+    }
+    let content_length = metadata.content_length();
+    match offset {
+        Some(offset) => {
+            let start = offset.min(content_length);
+            let size = content_length.saturating_sub(start).min(requested_size);
+            Ok(BytesRange::new(start, Some(size)))
+        }
+        None => {
+            let size = content_length.min(requested_size);
+            Ok(BytesRange::new(content_length - size, Some(size)))
+        }
+    }
+}
+
+async fn run_async_whole_read(
+    operator: opendal::Operator,
+    path: String,
+    plan: WholeReadPlan,
+) -> AsyncOutcome {
+    let result = async {
+        let range = resolve_whole_read_range_async(&operator, &path, &plan).await?;
+        let reader = operator
+            .reader_options(&path, plan.reader_options)
+            .await
+            .map_err(opendal_error)?;
+        let mut stream = reader.into_stream(range).await.map_err(opendal_error)?;
+        let mut output = Vec::new();
+        while let Some(buffer) = stream.try_next().await.map_err(opendal_error)? {
+            append_whole_read_chunk(&mut output, buffer, plan.output_limit)?;
+        }
+        Ok::<_, CallFailure>(Box::new(BufferV1 { bytes: output }))
+    }
+    .await;
+    match result {
+        Ok(buffer) => AsyncOutcome::success(AsyncResultKind::Buffer, AsyncPayload::Buffer(buffer)),
+        Err(failure) => AsyncOutcome::failure(AsyncResultKind::Buffer, failure),
     }
 }
 
@@ -4336,6 +4926,650 @@ const OPERATOR_WITH_TIMEOUT_ENTRY: Option<OperatorWithTimeoutFn> = None;
 const OPERATOR_WITH_RETRY_ENTRY: Option<OperatorWithRetryFn> = Some(operator_with_retry);
 #[cfg(not(feature = "layers-timeout-retry"))]
 const OPERATOR_WITH_RETRY_ENTRY: Option<OperatorWithRetryFn> = None;
+unsafe fn finish_async_payload_take<T>(
+    task: *mut AsyncTaskV1,
+    expected: AsyncResultKind,
+    out_value: *mut *mut T,
+    out_error: *mut *mut ErrorV1,
+    take_payload: fn(AsyncPayload) -> Option<Box<T>>,
+) -> Status {
+    // SAFETY: outputs are validated and cleared before the task is inspected.
+    let outputs = [
+        unsafe { clear_required_output(out_value, ptr::null_mut()) },
+        unsafe { clear_error_output(out_error) },
+    ];
+    if let Err(failure) = combine_output_validation(outputs) {
+        return unsafe { finish_failure(failure, out_error) };
+    }
+    // SAFETY: opaque handle validity is a caller lifetime obligation.
+    let task = match unsafe { borrow_required(task.cast_const()) } {
+        Ok(task) => task,
+        Err(failure) => return unsafe { finish_failure(failure, out_error) },
+    };
+    let outcome = match task.shared.take(expected) {
+        Ok(outcome) => outcome,
+        Err(failure) => return unsafe { finish_failure(failure, out_error) },
+    };
+    match outcome.status {
+        STATUS_OK => match take_payload(outcome.payload) {
+            Some(value) => {
+                // SAFETY: required output was validated and cleared above.
+                unsafe { out_value.write(Box::into_raw(value)) };
+                STATUS_OK
+            }
+            None => STATUS_ABI_MISMATCH,
+        },
+        STATUS_END if expected == AsyncResultKind::Buffer => {
+            if matches!(outcome.payload, AsyncPayload::None) && outcome.error.is_none() {
+                STATUS_END
+            } else {
+                STATUS_ABI_MISMATCH
+            }
+        }
+        STATUS_ERROR => match outcome.error {
+            Some(error) => {
+                if !out_error.is_null() {
+                    // SAFETY: optional output was validated and cleared above.
+                    unsafe { out_error.write(Box::into_raw(error)) };
+                }
+                STATUS_ERROR
+            }
+            None => STATUS_ERROR,
+        },
+        STATUS_ABI_MISMATCH | STATUS_PANIC => outcome.status,
+        _ => STATUS_ABI_MISMATCH,
+    }
+}
+
+unsafe extern "C" fn async_operator_read_start(
+    operator: *mut OperatorV1,
+    path: *const BytesViewV1,
+    options: *const ReadOptionsV1,
+    max_output_len: u64,
+    completion_fd: i32,
+    out_task: *mut *mut AsyncTaskV1,
+    out_error: *mut *mut ErrorV1,
+) -> Status {
+    catch_status(|| {
+        // SAFETY: outputs are cleared before input is inspected or work starts.
+        let outputs = [
+            unsafe { clear_required_output(out_task, ptr::null_mut()) },
+            unsafe { clear_error_output(out_error) },
+        ];
+        if let Err(failure) = combine_output_validation(outputs) {
+            return unsafe { finish_failure(failure, out_error) };
+        }
+        let result = (|| -> CallResult<Box<AsyncTaskV1>> {
+            // SAFETY: the handle and borrowed carriers are copied synchronously.
+            let operator = unsafe { borrow_required(operator.cast_const())? };
+            let operator = operator.async_inner.clone();
+            let path = unsafe { read_text(path, "path")? };
+            let options = unsafe { parse_read_options(options)? };
+            let plan = whole_read_plan(options, max_output_len)?;
+            let launch = AsyncLaunch::prepare(completion_fd)?;
+            let (task, _) = launch.spawn(
+                AsyncResultKind::Buffer,
+                None,
+                run_async_whole_read(operator, path, plan),
+            );
+            Ok(task)
+        })();
+        match result {
+            Ok(task) => {
+                // SAFETY: required output was validated above.
+                unsafe { out_task.write(Box::into_raw(task)) };
+                STATUS_OK
+            }
+            Err(failure) => unsafe { finish_failure(failure, out_error) },
+        }
+    })
+}
+
+unsafe extern "C" fn async_operator_read_stream_start(
+    operator: *mut OperatorV1,
+    path: *const BytesViewV1,
+    options: *const ReadStreamOptionsV1,
+    completion_fd: i32,
+    out_task: *mut *mut AsyncTaskV1,
+    out_error: *mut *mut ErrorV1,
+) -> Status {
+    catch_status(|| {
+        // SAFETY: outputs are cleared before input is inspected or work starts.
+        let outputs = [
+            unsafe { clear_required_output(out_task, ptr::null_mut()) },
+            unsafe { clear_error_output(out_error) },
+        ];
+        if let Err(failure) = combine_output_validation(outputs) {
+            return unsafe { finish_failure(failure, out_error) };
+        }
+        let result = (|| -> CallResult<Box<AsyncTaskV1>> {
+            // SAFETY: the handle and borrowed carriers are copied synchronously.
+            let operator = unsafe { borrow_required(operator.cast_const())? };
+            let operator = operator.async_inner.clone();
+            let path = unsafe { read_text(path, "path")? };
+            let parsed = unsafe { parse_read_stream_options(options)? };
+            let launch = AsyncLaunch::prepare(completion_fd)?;
+            let future = async move {
+                let result = async {
+                    let reader = operator
+                        .reader_options(&path, parsed.reader)
+                        .await
+                        .map_err(opendal_error)?;
+                    let stream = reader
+                        .into_stream(parsed.range)
+                        .await
+                        .map_err(opendal_error)?;
+                    let core = Arc::new(AsyncReadStreamCore {
+                        state: Mutex::new(AsyncReadStreamState::Open(Box::new(stream))),
+                        chunk_size: parsed.chunk_size,
+                    });
+                    Ok::<_, CallFailure>(Box::new(AsyncReadStreamV1 { core }))
+                }
+                .await;
+                match result {
+                    Ok(stream) => AsyncOutcome::success(
+                        AsyncResultKind::ReadStream,
+                        AsyncPayload::ReadStream(stream),
+                    ),
+                    Err(failure) => AsyncOutcome::failure(AsyncResultKind::ReadStream, failure),
+                }
+            };
+            let (task, _) = launch.spawn(AsyncResultKind::ReadStream, None, future);
+            Ok(task)
+        })();
+        match result {
+            Ok(task) => {
+                // SAFETY: required output was validated above.
+                unsafe { out_task.write(Box::into_raw(task)) };
+                STATUS_OK
+            }
+            Err(failure) => unsafe { finish_failure(failure, out_error) },
+        }
+    })
+}
+
+unsafe extern "C" fn async_read_stream_next_start(
+    stream: *mut AsyncReadStreamV1,
+    max_output_len: u64,
+    completion_fd: i32,
+    out_task: *mut *mut AsyncTaskV1,
+    out_error: *mut *mut ErrorV1,
+) -> Status {
+    catch_status(|| {
+        // SAFETY: outputs are cleared before the handle is inspected.
+        let outputs = [
+            unsafe { clear_required_output(out_task, ptr::null_mut()) },
+            unsafe { clear_error_output(out_error) },
+        ];
+        if let Err(failure) = combine_output_validation(outputs) {
+            return unsafe { finish_failure(failure, out_error) };
+        }
+        let result = (|| -> CallResult<Box<AsyncTaskV1>> {
+            // SAFETY: opaque handle validity is a caller lifetime obligation.
+            let stream = unsafe { borrow_required(stream.cast_const())? };
+            let core = stream.core.clone();
+            let launch = AsyncLaunch::prepare(completion_fd)?;
+            let start = core.take_for_next()?;
+            let resource = Some(AsyncResourcePoison::ReadStream(core.clone()));
+            match start {
+                AsyncReadStreamStart::End => {
+                    let (task, _) = launch.spawn(AsyncResultKind::Buffer, resource, async {
+                        AsyncOutcome::end(AsyncResultKind::Buffer)
+                    });
+                    Ok(task)
+                }
+                AsyncReadStreamStart::Stream(mut native_stream) => {
+                    let worker_core = core.clone();
+                    let future = async move {
+                        match native_stream.try_next().await {
+                            Ok(Some(buffer)) => {
+                                match checked_read_buffer(
+                                    buffer,
+                                    max_output_len.min(worker_core.chunk_size),
+                                    "async read stream chunk",
+                                ) {
+                                    Ok(buffer) => {
+                                        worker_core.complete_next(
+                                            native_stream,
+                                            AsyncReadStreamNext::Chunk,
+                                        );
+                                        AsyncOutcome::success(
+                                            AsyncResultKind::Buffer,
+                                            AsyncPayload::Buffer(buffer),
+                                        )
+                                    }
+                                    Err(failure) => {
+                                        worker_core.complete_next(
+                                            native_stream,
+                                            AsyncReadStreamNext::Failed,
+                                        );
+                                        AsyncOutcome::failure(AsyncResultKind::Buffer, failure)
+                                    }
+                                }
+                            }
+                            Ok(None) => {
+                                worker_core.complete_next(native_stream, AsyncReadStreamNext::End);
+                                AsyncOutcome::end(AsyncResultKind::Buffer)
+                            }
+                            Err(error) => {
+                                worker_core
+                                    .complete_next(native_stream, AsyncReadStreamNext::Failed);
+                                AsyncOutcome::failure(AsyncResultKind::Buffer, opendal_error(error))
+                            }
+                        }
+                    };
+                    let (task, abort) = launch.spawn(AsyncResultKind::Buffer, resource, future);
+                    core.install_abort(abort);
+                    Ok(task)
+                }
+            }
+        })();
+        match result {
+            Ok(task) => {
+                // SAFETY: required output was validated above.
+                unsafe { out_task.write(Box::into_raw(task)) };
+                STATUS_OK
+            }
+            Err(failure) => unsafe { finish_failure(failure, out_error) },
+        }
+    })
+}
+
+unsafe extern "C" fn async_read_stream_close(stream: *mut AsyncReadStreamV1) {
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        if stream.is_null() {
+            return;
+        }
+        // SAFETY: non-null opaque handle validity is the caller's obligation.
+        unsafe { &*stream }.core.close();
+    }));
+}
+
+unsafe extern "C" fn async_read_stream_free(stream: *mut AsyncReadStreamV1) {
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        if stream.is_null() {
+            return;
+        }
+        // SAFETY: every non-null handle is uniquely owned and freed once.
+        let stream = unsafe { Box::from_raw(stream) };
+        stream.core.close();
+        drop(stream);
+    }));
+}
+
+unsafe extern "C" fn async_operator_writer_start(
+    operator: *mut OperatorV1,
+    path: *const BytesViewV1,
+    options: *const WriteOptionsV1,
+    completion_fd: i32,
+    out_task: *mut *mut AsyncTaskV1,
+    out_error: *mut *mut ErrorV1,
+) -> Status {
+    catch_status(|| {
+        // SAFETY: outputs are cleared before input is inspected or work starts.
+        let outputs = [
+            unsafe { clear_required_output(out_task, ptr::null_mut()) },
+            unsafe { clear_error_output(out_error) },
+        ];
+        if let Err(failure) = combine_output_validation(outputs) {
+            return unsafe { finish_failure(failure, out_error) };
+        }
+        let result = (|| -> CallResult<Box<AsyncTaskV1>> {
+            // SAFETY: the handle and borrowed carriers are copied synchronously.
+            let operator = unsafe { borrow_required(operator.cast_const())? };
+            let operator = operator.async_inner.clone();
+            let path = unsafe { read_text(path, "path")? };
+            let options = unsafe { parse_write_options(options)? };
+            let launch = AsyncLaunch::prepare(completion_fd)?;
+            let future = async move {
+                let result = operator
+                    .writer_options(&path, options)
+                    .await
+                    .map_err(opendal_error)
+                    .map(|writer| {
+                        let core = Arc::new(AsyncWriterCore {
+                            state: Mutex::new(AsyncWriterState::Open(writer)),
+                        });
+                        Box::new(AsyncWriterV1 { core })
+                    });
+                match result {
+                    Ok(writer) => {
+                        AsyncOutcome::success(AsyncResultKind::Writer, AsyncPayload::Writer(writer))
+                    }
+                    Err(failure) => AsyncOutcome::failure(AsyncResultKind::Writer, failure),
+                }
+            };
+            let (task, _) = launch.spawn(AsyncResultKind::Writer, None, future);
+            Ok(task)
+        })();
+        match result {
+            Ok(task) => {
+                // SAFETY: required output was validated above.
+                unsafe { out_task.write(Box::into_raw(task)) };
+                STATUS_OK
+            }
+            Err(failure) => unsafe { finish_failure(failure, out_error) },
+        }
+    })
+}
+
+unsafe extern "C" fn async_writer_write_start(
+    writer: *mut AsyncWriterV1,
+    data: *const BytesViewV1,
+    completion_fd: i32,
+    out_task: *mut *mut AsyncTaskV1,
+    out_error: *mut *mut ErrorV1,
+) -> Status {
+    catch_status(|| {
+        // SAFETY: outputs are cleared before inputs are inspected.
+        let outputs = [
+            unsafe { clear_required_output(out_task, ptr::null_mut()) },
+            unsafe { clear_error_output(out_error) },
+        ];
+        if let Err(failure) = combine_output_validation(outputs) {
+            return unsafe { finish_failure(failure, out_error) };
+        }
+        let result = (|| -> CallResult<Box<AsyncTaskV1>> {
+            // SAFETY: the handle is borrowed and the byte carrier is copied now.
+            let writer = unsafe { borrow_required(writer.cast_const())? };
+            let core = writer.core.clone();
+            let data = unsafe { read_binary(data)? };
+            let launch = AsyncLaunch::prepare(completion_fd)?;
+            let mut native_writer = core
+                .take_for_call(false)?
+                .expect("non-abort writer operation always owns a writer");
+            let resource = Some(AsyncResourcePoison::Writer(core.clone()));
+            let worker_core = core.clone();
+            let future = async move {
+                match native_writer.write(data).await.map_err(opendal_error) {
+                    Ok(()) => {
+                        worker_core.complete(native_writer, AsyncWriterCompletion::Open);
+                        AsyncOutcome::success(AsyncResultKind::Unit, AsyncPayload::Unit)
+                    }
+                    Err(failure) => {
+                        worker_core.complete(native_writer, AsyncWriterCompletion::Failed);
+                        AsyncOutcome::failure(AsyncResultKind::Unit, failure)
+                    }
+                }
+            };
+            let (task, abort) = launch.spawn(AsyncResultKind::Unit, resource, future);
+            core.install_abort(abort);
+            Ok(task)
+        })();
+        match result {
+            Ok(task) => {
+                // SAFETY: required output was validated above.
+                unsafe { out_task.write(Box::into_raw(task)) };
+                STATUS_OK
+            }
+            Err(failure) => unsafe { finish_failure(failure, out_error) },
+        }
+    })
+}
+
+unsafe extern "C" fn async_writer_finish_start(
+    writer: *mut AsyncWriterV1,
+    completion_fd: i32,
+    out_task: *mut *mut AsyncTaskV1,
+    out_error: *mut *mut ErrorV1,
+) -> Status {
+    catch_status(|| {
+        // SAFETY: outputs are cleared before the handle is inspected.
+        let outputs = [
+            unsafe { clear_required_output(out_task, ptr::null_mut()) },
+            unsafe { clear_error_output(out_error) },
+        ];
+        if let Err(failure) = combine_output_validation(outputs) {
+            return unsafe { finish_failure(failure, out_error) };
+        }
+        let result = (|| -> CallResult<Box<AsyncTaskV1>> {
+            // SAFETY: opaque handle validity is a caller lifetime obligation.
+            let writer = unsafe { borrow_required(writer.cast_const())? };
+            let core = writer.core.clone();
+            let launch = AsyncLaunch::prepare(completion_fd)?;
+            let mut native_writer = core
+                .take_for_call(false)?
+                .expect("finish always owns an open writer");
+            let resource = Some(AsyncResourcePoison::Writer(core.clone()));
+            let worker_core = core.clone();
+            let future = async move {
+                let result = match native_writer.close().await.map_err(opendal_error) {
+                    Ok(metadata) => checked_metadata(metadata).map(Box::new),
+                    Err(failure) => Err(failure),
+                };
+                match result {
+                    Ok(metadata) => {
+                        worker_core.complete(native_writer, AsyncWriterCompletion::Finished);
+                        AsyncOutcome::success(
+                            AsyncResultKind::Metadata,
+                            AsyncPayload::Metadata(metadata),
+                        )
+                    }
+                    Err(failure) => {
+                        worker_core.complete(native_writer, AsyncWriterCompletion::Failed);
+                        AsyncOutcome::failure(AsyncResultKind::Metadata, failure)
+                    }
+                }
+            };
+            let (task, abort) = launch.spawn(AsyncResultKind::Metadata, resource, future);
+            core.install_abort(abort);
+            Ok(task)
+        })();
+        match result {
+            Ok(task) => {
+                // SAFETY: required output was validated above.
+                unsafe { out_task.write(Box::into_raw(task)) };
+                STATUS_OK
+            }
+            Err(failure) => unsafe { finish_failure(failure, out_error) },
+        }
+    })
+}
+
+unsafe extern "C" fn async_writer_abort_start(
+    writer: *mut AsyncWriterV1,
+    completion_fd: i32,
+    out_task: *mut *mut AsyncTaskV1,
+    out_error: *mut *mut ErrorV1,
+) -> Status {
+    catch_status(|| {
+        // SAFETY: outputs are cleared before the handle is inspected.
+        let outputs = [
+            unsafe { clear_required_output(out_task, ptr::null_mut()) },
+            unsafe { clear_error_output(out_error) },
+        ];
+        if let Err(failure) = combine_output_validation(outputs) {
+            return unsafe { finish_failure(failure, out_error) };
+        }
+        let result = (|| -> CallResult<Box<AsyncTaskV1>> {
+            // SAFETY: opaque handle validity is a caller lifetime obligation.
+            let writer = unsafe { borrow_required(writer.cast_const())? };
+            let core = writer.core.clone();
+            let launch = AsyncLaunch::prepare(completion_fd)?;
+            let resource = Some(AsyncResourcePoison::Writer(core.clone()));
+            match core.take_for_call(true)? {
+                None => {
+                    let (task, _) = launch.spawn(AsyncResultKind::Unit, resource, async {
+                        AsyncOutcome::success(AsyncResultKind::Unit, AsyncPayload::Unit)
+                    });
+                    Ok(task)
+                }
+                Some(mut native_writer) => {
+                    let worker_core = core.clone();
+                    let future = async move {
+                        match native_writer.abort().await.map_err(opendal_error) {
+                            Ok(()) => {
+                                worker_core.complete(native_writer, AsyncWriterCompletion::Aborted);
+                                AsyncOutcome::success(AsyncResultKind::Unit, AsyncPayload::Unit)
+                            }
+                            Err(failure) => {
+                                worker_core.complete(native_writer, AsyncWriterCompletion::Failed);
+                                AsyncOutcome::failure(AsyncResultKind::Unit, failure)
+                            }
+                        }
+                    };
+                    let (task, abort) = launch.spawn(AsyncResultKind::Unit, resource, future);
+                    core.install_abort(abort);
+                    Ok(task)
+                }
+            }
+        })();
+        match result {
+            Ok(task) => {
+                // SAFETY: required output was validated above.
+                unsafe { out_task.write(Box::into_raw(task)) };
+                STATUS_OK
+            }
+            Err(failure) => unsafe { finish_failure(failure, out_error) },
+        }
+    })
+}
+
+unsafe extern "C" fn async_writer_free(writer: *mut AsyncWriterV1) {
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        if writer.is_null() {
+            return;
+        }
+        // SAFETY: every non-null handle is uniquely owned and freed once.
+        let writer = unsafe { Box::from_raw(writer) };
+        writer.core.fail();
+        drop(writer);
+    }));
+}
+
+unsafe extern "C" fn async_task_cancel(task: *mut AsyncTaskV1) {
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        if task.is_null() {
+            return;
+        }
+        // SAFETY: non-null opaque handle validity is the caller's obligation.
+        unsafe { &*task }.shared.cancel();
+    }));
+}
+
+unsafe extern "C" fn async_task_take_buffer(
+    task: *mut AsyncTaskV1,
+    out_buffer: *mut *mut BufferV1,
+    out_error: *mut *mut ErrorV1,
+) -> Status {
+    catch_status(|| unsafe {
+        finish_async_payload_take(
+            task,
+            AsyncResultKind::Buffer,
+            out_buffer,
+            out_error,
+            |payload| match payload {
+                AsyncPayload::Buffer(value) => Some(value),
+                _ => None,
+            },
+        )
+    })
+}
+
+unsafe extern "C" fn async_task_take_metadata(
+    task: *mut AsyncTaskV1,
+    out_metadata: *mut *mut MetadataV1,
+    out_error: *mut *mut ErrorV1,
+) -> Status {
+    catch_status(|| unsafe {
+        finish_async_payload_take(
+            task,
+            AsyncResultKind::Metadata,
+            out_metadata,
+            out_error,
+            |payload| match payload {
+                AsyncPayload::Metadata(value) => Some(value),
+                _ => None,
+            },
+        )
+    })
+}
+
+unsafe extern "C" fn async_task_take_read_stream(
+    task: *mut AsyncTaskV1,
+    out_stream: *mut *mut AsyncReadStreamV1,
+    out_error: *mut *mut ErrorV1,
+) -> Status {
+    catch_status(|| unsafe {
+        finish_async_payload_take(
+            task,
+            AsyncResultKind::ReadStream,
+            out_stream,
+            out_error,
+            |payload| match payload {
+                AsyncPayload::ReadStream(value) => Some(value),
+                _ => None,
+            },
+        )
+    })
+}
+
+unsafe extern "C" fn async_task_take_writer(
+    task: *mut AsyncTaskV1,
+    out_writer: *mut *mut AsyncWriterV1,
+    out_error: *mut *mut ErrorV1,
+) -> Status {
+    catch_status(|| unsafe {
+        finish_async_payload_take(
+            task,
+            AsyncResultKind::Writer,
+            out_writer,
+            out_error,
+            |payload| match payload {
+                AsyncPayload::Writer(value) => Some(value),
+                _ => None,
+            },
+        )
+    })
+}
+
+unsafe extern "C" fn async_task_take_unit(
+    task: *mut AsyncTaskV1,
+    out_error: *mut *mut ErrorV1,
+) -> Status {
+    catch_status(|| {
+        // SAFETY: optional output is cleared before the task is inspected.
+        if let Err(failure) = unsafe { clear_error_output(out_error) } {
+            return unsafe { finish_failure(failure, out_error) };
+        }
+        // SAFETY: opaque handle validity is a caller lifetime obligation.
+        let task = match unsafe { borrow_required(task.cast_const()) } {
+            Ok(task) => task,
+            Err(failure) => return unsafe { finish_failure(failure, out_error) },
+        };
+        let outcome = match task.shared.take(AsyncResultKind::Unit) {
+            Ok(outcome) => outcome,
+            Err(failure) => return unsafe { finish_failure(failure, out_error) },
+        };
+        match outcome.status {
+            STATUS_OK if matches!(outcome.payload, AsyncPayload::Unit) => STATUS_OK,
+            STATUS_ERROR => match outcome.error {
+                Some(error) => {
+                    if !out_error.is_null() {
+                        // SAFETY: optional output was validated and cleared above.
+                        unsafe { out_error.write(Box::into_raw(error)) };
+                    }
+                    STATUS_ERROR
+                }
+                None => STATUS_ERROR,
+            },
+            STATUS_ABI_MISMATCH | STATUS_PANIC => outcome.status,
+            _ => STATUS_ABI_MISMATCH,
+        }
+    })
+}
+
+unsafe extern "C" fn async_task_free(task: *mut AsyncTaskV1) {
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        if task.is_null() {
+            return;
+        }
+        // SAFETY: every non-null handle is uniquely owned and freed once.
+        let task = unsafe { Box::from_raw(task) };
+        task.shared.cancel();
+        drop(task);
+    }));
+}
 
 #[cfg(feature = "layers-concurrent-limit")]
 const OPERATOR_WITH_CONCURRENCY_LIMIT_ENTRY: Option<OperatorWithConcurrencyLimitFn> =
@@ -4363,7 +5597,8 @@ fn stage_api() -> Option<ApiV1> {
             | TIMEOUT_RETRY_FEATURE_BITS
             | CONCURRENCY_LIMIT_FEATURE_BITS
             | FEATURE_BATCH_DELETE
-            | FEATURE_COPIER,
+            | FEATURE_COPIER
+            | if cfg!(unix) { FEATURE_ASYNC } else { 0 },
         max_output_bytes: MAX_OUTPUT_BYTES,
         library_info: Some(library_info),
         error_view: Some(error_view),
@@ -4425,23 +5660,23 @@ fn stage_api() -> Option<ApiV1> {
         copier_finish: Some(copier_finish),
         copier_abort: Some(copier_abort),
         copier_free: Some(copier_free),
-        async_operator_read_start: None,
-        async_operator_read_stream_start: None,
-        async_read_stream_next_start: None,
-        async_read_stream_close: None,
-        async_read_stream_free: None,
-        async_operator_writer_start: None,
-        async_writer_write_start: None,
-        async_writer_finish_start: None,
-        async_writer_abort_start: None,
-        async_writer_free: None,
-        async_task_cancel: None,
-        async_task_take_buffer: None,
-        async_task_take_metadata: None,
-        async_task_take_read_stream: None,
-        async_task_take_writer: None,
-        async_task_take_unit: None,
-        async_task_free: None,
+        async_operator_read_start: Some(async_operator_read_start),
+        async_operator_read_stream_start: Some(async_operator_read_stream_start),
+        async_read_stream_next_start: Some(async_read_stream_next_start),
+        async_read_stream_close: Some(async_read_stream_close),
+        async_read_stream_free: Some(async_read_stream_free),
+        async_operator_writer_start: Some(async_operator_writer_start),
+        async_writer_write_start: Some(async_writer_write_start),
+        async_writer_finish_start: Some(async_writer_finish_start),
+        async_writer_abort_start: Some(async_writer_abort_start),
+        async_writer_free: Some(async_writer_free),
+        async_task_cancel: Some(async_task_cancel),
+        async_task_take_buffer: Some(async_task_take_buffer),
+        async_task_take_metadata: Some(async_task_take_metadata),
+        async_task_take_read_stream: Some(async_task_take_read_stream),
+        async_task_take_writer: Some(async_task_take_writer),
+        async_task_take_unit: Some(async_task_take_unit),
+        async_task_free: Some(async_task_free),
     })
 }
 
@@ -5567,7 +6802,8 @@ mod tests {
                 | TIMEOUT_RETRY_FEATURE_BITS
                 | CONCURRENCY_LIMIT_FEATURE_BITS
                 | FEATURE_BATCH_DELETE
-                | FEATURE_COPIER,
+                | FEATURE_COPIER
+                | if cfg!(unix) { FEATURE_ASYNC } else { 0 },
         );
         assert!(api.library_info.is_some());
         assert!(api.operator_new.is_some());
@@ -5619,6 +6855,23 @@ mod tests {
         assert!(api.copier_finish.is_some());
         assert!(api.copier_abort.is_some());
         assert!(api.copier_free.is_some());
+        assert!(api.async_operator_read_start.is_some());
+        assert!(api.async_operator_read_stream_start.is_some());
+        assert!(api.async_read_stream_next_start.is_some());
+        assert!(api.async_read_stream_close.is_some());
+        assert!(api.async_read_stream_free.is_some());
+        assert!(api.async_operator_writer_start.is_some());
+        assert!(api.async_writer_write_start.is_some());
+        assert!(api.async_writer_finish_start.is_some());
+        assert!(api.async_writer_abort_start.is_some());
+        assert!(api.async_writer_free.is_some());
+        assert!(api.async_task_cancel.is_some());
+        assert!(api.async_task_take_buffer.is_some());
+        assert!(api.async_task_take_metadata.is_some());
+        assert!(api.async_task_take_read_stream.is_some());
+        assert!(api.async_task_take_writer.is_some());
+        assert!(api.async_task_take_unit.is_some());
+        assert!(api.async_task_free.is_some());
     }
 
     #[cfg(feature = "profile-standard")]
@@ -8659,5 +9912,8 @@ mod tests {
         assert_send_sync::<ReadStreamV1>();
         assert_send_sync::<PresignedRequestV1>();
         assert_send_sync::<CopierV1>();
+        assert_send_sync::<AsyncTaskV1>();
+        assert_send_sync::<AsyncReadStreamV1>();
+        assert_send_sync::<AsyncWriterV1>();
     }
 }

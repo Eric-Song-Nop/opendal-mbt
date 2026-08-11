@@ -62,7 +62,6 @@ pub(crate) const FEATURE_LAYERS: u64 = 1 << 9;
 pub(crate) const FEATURE_CONCURRENCY_LIMIT: u64 = 1 << 10;
 pub(crate) const FEATURE_BATCH_DELETE: u64 = 1 << 11;
 pub(crate) const FEATURE_COPIER: u64 = 1 << 12;
-#[allow(dead_code)]
 pub(crate) const FEATURE_ASYNC: u64 = 1 << 13;
 
 pub(crate) const CAP_STAT: u64 = 1 << 0;
