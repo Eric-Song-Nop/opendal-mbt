@@ -715,7 +715,11 @@ typedef struct opendal_mbt_api_v1 {
    * Each call borrows operator_ and returns a separately owned Operator. The
    * input Operator and every resource already opened from it are unchanged.
    * Layer order is exactly call order: the newly requested layer is appended
-   * outside the input Operator's existing layer stack.
+   * outside the input Operator's existing layer stack. Timeout values and
+   * delay bounds must be nonzero; min_delay_millis must not exceed
+   * max_delay_millis. max_retries counts attempts after the initial request,
+   * and jitter must be exactly FALSE or TRUE. Duplicate timeout/retry layers
+   * and adding timeout after retry are rejected.
    */
   opendal_mbt_status_t(OPENDAL_MBT_CALL *operator_with_timeout)(
       const opendal_mbt_operator_v1_t *operator_,

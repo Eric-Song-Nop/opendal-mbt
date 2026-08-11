@@ -370,6 +370,7 @@ pub(crate) struct PresignedHeaderViewV1 {
 pub(crate) struct OperatorV1 {
     pub(crate) async_inner: opendal::Operator,
     pub(crate) inner: opendal::blocking::Operator,
+    pub(crate) layer_bits: u32,
 }
 
 #[repr(C)]
