@@ -389,11 +389,13 @@ int main(void) {
                                      OPENDAL_MBT_FEATURE_READ_STREAM |
                                      OPENDAL_MBT_FEATURE_CHUNKED_WRITER |
                                      OPENDAL_MBT_FEATURE_WRITER_ABORT |
-                                     OPENDAL_MBT_FEATURE_LAYERS;
+                                     OPENDAL_MBT_FEATURE_LAYERS |
+                                     OPENDAL_MBT_FEATURE_CONCURRENCY_LIMIT;
   opendal_mbt_api_v1_t api;
   opendal_mbt_operator_v1_t *operator_ = NULL;
   opendal_mbt_operator_v1_t *base_operator = NULL;
   opendal_mbt_operator_v1_t *timeout_operator = NULL;
+  opendal_mbt_operator_v1_t *retry_operator = NULL;
   opendal_mbt_operator_info_v1_t *operator_info = NULL;
   opendal_mbt_metadata_v1_t *metadata = NULL;
   opendal_mbt_buffer_v1_t *buffer = NULL;
@@ -470,6 +472,7 @@ int main(void) {
   REQUIRE_API_FIELD(writer_abort);
   REQUIRE_API_FIELD(operator_with_timeout);
   REQUIRE_API_FIELD(operator_with_retry);
+  REQUIRE_API_FIELD(operator_with_concurrency_limit);
 #undef REQUIRE_API_FIELD
 
   api_ready = 1;
@@ -511,21 +514,31 @@ int main(void) {
   api.operator_info_free(operator_info);
   operator_info = NULL;
   status = api.operator_with_retry(timeout_operator, UINT32_C(3), UINT64_C(1),
-                                   UINT64_C(5), OPENDAL_MBT_FALSE, &operator_,
-                                   &operator_info,
-                                   &error);
+                                   UINT64_C(5), OPENDAL_MBT_FALSE,
+                                   &retry_operator, &operator_info, &error);
   if (!expect_ok(&api, "operator_with_retry", status, &error) ||
+      retry_operator == NULL || operator_info == NULL) {
+    goto cleanup;
+  }
+  api.operator_info_free(operator_info);
+  operator_info = NULL;
+  status = api.operator_with_concurrency_limit(
+      retry_operator, UINT64_C(8), OPENDAL_MBT_TRUE, UINT64_C(4), &operator_,
+      &operator_info, &error);
+  if (!expect_ok(&api, "operator_with_concurrency_limit", status, &error) ||
       operator_ == NULL || operator_info == NULL) {
     goto cleanup;
   }
   api.operator_info_free(operator_info);
   operator_info = NULL;
 
-  /* The composed handle owns its stack independently of both borrowed inputs. */
+  /* The composed handle owns its stack independently of every borrowed input. */
   api.operator_free(base_operator);
   base_operator = NULL;
   api.operator_free(timeout_operator);
   timeout_operator = NULL;
+  api.operator_free(retry_operator);
+  retry_operator = NULL;
 
   /* Exercise the error snapshot, borrowed error view, and paired free. */
   status = api.operator_read(operator_, &absent_path, NULL,
@@ -715,6 +728,9 @@ cleanup:
     }
     if (timeout_operator != NULL) {
       api.operator_free(timeout_operator);
+    }
+    if (retry_operator != NULL) {
+      api.operator_free(retry_operator);
     }
     if (base_operator != NULL) {
       api.operator_free(base_operator);

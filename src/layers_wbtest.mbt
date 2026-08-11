@@ -31,6 +31,18 @@ test "retry layer validation requires positive ordered bounds" {
 }
 
 ///|
+test "concurrency layer validation requires positive limits" {
+  validate_concurrency_limit_layer(1U, None)
+  validate_concurrency_limit_layer(1U, Some(1U))
+  assert_invalid_layer_argument(() =>
+    validate_concurrency_limit_layer(0U, None)
+  )
+  assert_invalid_layer_argument(() =>
+    validate_concurrency_limit_layer(1U, Some(0U))
+  )
+}
+
+///|
 fn layers_public_contract(operator : Operator) -> Operator raise OpenDalError {
   operator
   .with_timeout(operation_timeout_millis=10000UL, io_timeout_millis=3000UL)
@@ -40,6 +52,7 @@ fn layers_public_contract(operator : Operator) -> Operator raise OpenDalError {
     max_delay_millis=2000UL,
     jitter=true,
   )
+  .with_concurrency_limit(operation_limit=16U, http_request_limit=8U)
 }
 
 ///|
@@ -48,9 +61,17 @@ fn retry_defaults_contract(operator : Operator) -> Operator raise OpenDalError {
 }
 
 ///|
+fn concurrency_defaults_contract(
+  operator : Operator,
+) -> Operator raise OpenDalError {
+  operator.with_concurrency_limit(operation_limit=8U)
+}
+
+///|
 test "layer public facade type-checks" {
   ignore(layers_public_contract)
   ignore(retry_defaults_contract)
+  ignore(concurrency_defaults_contract)
 }
 
 ///|
@@ -65,6 +86,7 @@ test "layered memory operator preserves info and shared storage" {
       max_delay_millis=5UL,
       jitter=false,
     )
+    .with_concurrency_limit(operation_limit=4U, http_request_limit=2U)
   let info = layered.info()
   assert_eq(info.scheme, "memory")
   assert_true(info.capability.can_read())
@@ -97,6 +119,26 @@ test "native layer order and duplicate rules stay explicit" {
     retry.with_timeout(
       operation_timeout_millis=5000UL,
       io_timeout_millis=2000UL,
+    )
+    |> ignore
+  })
+  let limited = retry.with_concurrency_limit(operation_limit=2U)
+  assert_invalid_layer_argument(() => {
+    limited.with_concurrency_limit(operation_limit=2U) |> ignore
+  })
+  assert_invalid_layer_argument(() => {
+    limited.with_timeout(
+      operation_timeout_millis=5000UL,
+      io_timeout_millis=2000UL,
+    )
+    |> ignore
+  })
+  assert_invalid_layer_argument(() => {
+    limited.with_retry(
+      max_retries=1U,
+      min_delay_millis=1UL,
+      max_delay_millis=5UL,
+      jitter=false,
     )
     |> ignore
   })
