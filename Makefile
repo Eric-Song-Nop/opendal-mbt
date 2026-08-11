@@ -39,7 +39,7 @@ coverage: native
 	moon clean
 	OPENDAL_MBT_NATIVE_LIB="$(MOON_NATIVE_LIB)" \
 		moon test $(MOON_TEST_FLAGS) --enable-coverage
-	moon coverage analyze
+	OPENDAL_MBT_NATIVE_LIB="$(MOON_NATIVE_LIB)" moon coverage analyze
 
 abi-smoke:
 	$${CC:-cc} -std=c11 -Wall -Wextra -Werror -Wpedantic \
