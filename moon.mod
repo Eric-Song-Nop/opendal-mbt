@@ -1,6 +1,6 @@
 // MoonBit module metadata for the public contract and future native binding.
 
-name = "eric-song-nop/opendal"
+name = "Eric-Song-Nop/opendal"
 
 version = "0.1.0"
 

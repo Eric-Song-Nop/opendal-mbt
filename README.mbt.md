@@ -6,7 +6,7 @@ the native backend and ships the memory and filesystem service profiles.
 Add it like any other Moon dependency:
 
 ```sh
-moon add eric-song-nop/opendal
+moon add Eric-Song-Nop/opendal
 ```
 
 Import the package normally and select the native target. There are no
@@ -16,7 +16,7 @@ OpenDAL-specific linker flags:
 supported_targets = "native"
 
 import {
-  "eric-song-nop/opendal",
+  "Eric-Song-Nop/opendal",
 }
 
 options(

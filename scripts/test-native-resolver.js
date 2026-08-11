@@ -176,7 +176,7 @@ test('link configuration uses the exact archive path and target flags', () => {
     vars: {},
     link_configs: [
       {
-        package: 'eric-song-nop/opendal',
+        package: 'Eric-Song-Nop/opendal',
         link_flags: "'/tmp/with space/lib'\"'\"'a.a' -lm -ldl",
       },
     ],

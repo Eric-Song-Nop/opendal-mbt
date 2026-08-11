@@ -6,7 +6,7 @@ side manually or reuse an asset built from a different commit.
 ## One-time repository setup
 
 1. Run `moon login` with the mooncakes.io owner of
-   `eric-song-nop/opendal`.
+   `Eric-Song-Nop/opendal`.
 2. Store the exact contents of `~/.moon/credentials.json` as the GitHub
    Actions secret `MOONCAKES_CREDENTIALS_JSON`.
 3. Keep the secret scoped to this repository and rotate it if a release log or
