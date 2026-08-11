@@ -453,12 +453,24 @@ one.
 Reader, Writer, copy, rename, suffix-read, and append capability accessors are
 available with their corresponding MoonBit operations.
 
-## Retry policy
+## Operational layer policy
 
-The first binding version does not install a retry layer. This keeps failures
-and latency faithful to the configured service and avoids inheriting the
-upstream experimental C binding's policy. A future retry API must be explicit
-in the MoonBit surface and must document idempotency and Writer behavior.
+No operational layer is installed by default. `with_timeout`, `with_retry`,
+and `with_concurrency_limit` each return a separately owned derived Operator;
+the input Operator and resources already opened from it do not change.
+
+The only supported composition order is timeout, then retry, then concurrency
+limit. Timeout and retry retain their explicit replay and budget semantics.
+The concurrency limit is installed at most once, is always the outermost
+layer, and prevents a later timeout or retry layer from changing what one
+operation permit represents.
+
+`operation_limit` applies to OpenDAL operations. For a body-style resource,
+including a Reader-created stream, Writer, Lister, Deleter, or Copier, its
+permit is retained for the body lifetime. The optional
+`http_request_limit` is a distinct transport limit whose permit is retained
+until the HTTP response body is dropped. Both limits must be positive; there
+is no implicit or environment-selected limit.
 
 ## Presigned requests (planned Phase 5C.1)
 

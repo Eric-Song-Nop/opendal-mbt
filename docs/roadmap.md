@@ -564,9 +564,9 @@ Start with immutable `Operator::with_retry(...)` and
 `Operator::with_timeout(...)` methods that return a newly layered `Operator`.
 Use optional labelled scalar arguments rather than exporting Rust layer
 builders. Chaining order is public behaviour and examples show only the tested
-composition in which each retry attempt is inside the timeout budget. Add
-concurrency limiting only after its interaction with sequential readers and
-writers is specified.
+composition in which each retry attempt is inside the timeout budget. Follow
+these with one explicit concurrency limit layer whose operation and HTTP
+permit lifetimes are part of the public contract.
 
 Rules to preserve:
 
@@ -585,6 +585,12 @@ Rules to preserve:
   preconditions make replay acceptable;
 - a final public Writer error is still terminal, but it can follow multiple
   hidden upstream attempts and partial remote effects;
+- composition order is timeout, then retry, then concurrency limit; the
+  concurrency limit is outermost, is installed at most once, and prevents
+  later timeout/retry additions;
+- an operation permit remains held for the lifetime of body-style readers,
+  writers, listers, deleters, and copiers, while an optional HTTP permit
+  remains held until its response body is dropped;
 - timeouts and cancellation leave readers/writers in a documented state;
 - each layer is represented by an optional artifact/feature dependency and
   does not enlarge unrelated profiles accidentally.
@@ -601,6 +607,7 @@ first retry/timeout slice.
   or bounded test time;
 - stateful replay is documented, opt-in, and tested under response-loss and
   uncertain-commit failures; no exactly-once claim is made;
+- concurrency limits preserve the documented body lifetime and layer order;
 - default operators retain the `v0.1.0` no-implicit-retry behavior.
 
 #### Phase 5D: Batch deletion and copier tasks

@@ -1,6 +1,7 @@
 # OpenDAL MoonBit C ABI
 
-Status: ABI v1.0 implemented; v1.1 local-lifecycle extension frozen
+Status: ABI v1.5 implemented; append-only v1 extensions frozen through
+concurrency limiting
 
 The executable header is `native/include/opendal_mbt.h`. It is the canonical
 source for exact field order, numeric constants, and function signatures. This
@@ -25,10 +26,10 @@ reference-counted value. This is important because `moonbit.h` explicitly
 describes itself as an unstable runtime API; it must not become the durable
 Rust ABI.
 
-ABI v1 covers the synchronous public contract, including the v1.1 bounded read
-stream and Writer abort additions. It intentionally excludes callbacks, async
-completion, layers, presigning, batch operations, and raw service-specific
-handles.
+ABI v1 covers the synchronous public contract, including bounded read streams,
+Writer abort, the standard S3 constructor, presigning, and explicit timeout,
+retry, and concurrency-limit layers. It intentionally excludes callbacks,
+async completion, batch operations, and raw service-specific handles.
 
 ## Core choices
 
@@ -47,8 +48,8 @@ handles.
   snapshots with borrowed inspection views.
 - Operation and path context belong to the safe MoonBit call site, not the
   OpenDAL error object.
-- ABI v1 adds no retry layer. Retry is neither implicit nor inherited from the
-  upstream experimental C binding.
+- ABI v1 installs no layer implicitly. Retry, timeout, and concurrency limits
+  are selected only through their feature-gated functions.
 
 The upstream C binding remains useful as implementation evidence, but this
 project does not depend on its symbols or ABI.
@@ -170,6 +171,22 @@ drives async work on the process runtime. This prevents a mutex guard from
 being held across `Runtime::block_on`. A successful repeated abort from
 `Aborted` returns `OK`; every other terminal operation returns a binding-owned
 `ResourceClosed` error. Free drops the Writer without calling close or abort.
+
+### ABI v1.5 concurrency-limit extension
+
+ABI v1.5 appends `operator_with_concurrency_limit` under the independent
+`OPENDAL_MBT_FEATURE_CONCURRENCY_LIMIT` group. It borrows an Operator and
+returns a separately owned derived Operator plus the matching immutable
+OperatorInfo snapshot. The operation limit and present HTTP limit must be
+positive and representable as Rust `usize`; the presence flag is exactly zero
+or one, and an absent HTTP limit has a canonical zero value.
+
+The supported layer order is timeout, retry, then concurrency limit. The
+concurrency layer may be installed once and is always outermost; subsequent
+timeout or retry calls are rejected. Operation permits on body-style Reader
+streams, Writers, Listers, Deleters, and Copiers are held until the body is
+dropped. An optional HTTP permit is held until the HTTP response body is
+dropped. The local profile neither compiles nor advertises this group.
 
 Version meaning:
 
@@ -504,6 +521,9 @@ exceptions cannot be converted into normal errors.
 | `open_writer` | `operator_writer` |
 | `Writer::write` | `writer_write` |
 | `Writer::finish` | `writer_close` + metadata view/free |
+| `with_timeout` | `operator_with_timeout`, returning Operator + OperatorInfo |
+| `with_retry` | `operator_with_retry`, returning Operator + OperatorInfo |
+| `with_concurrency_limit` | `operator_with_concurrency_limit`, returning Operator + OperatorInfo |
 
 Materializing `list` over the native lister is not an emulation of a storage
 operation; it is the eager consumption form of the same listing primitive.
