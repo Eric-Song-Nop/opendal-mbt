@@ -1,6 +1,6 @@
 # Public API Semantics
 
-Status: Phase 3 complete
+Status: Phase 5A local-lifecycle contract frozen
 
 This document defines the intended MoonBit-facing behavior of the synchronous
 OpenDAL binding. It deliberately avoids fixing the native ABI or implementation
@@ -39,8 +39,9 @@ It is not a transliteration of either Rust or OCaml:
 | Algebraic input | `ByteRange` | Uses `pub(all)` so callers can construct labelled ranges |
 | Extensible query object | `Capability` | Opaque effective-capability snapshot with getter methods so new capabilities can be added compatibly |
 
-`Operator` is logically immutable and shareable. `Lister` and `Writer` are
-stateful. `Reader` is a random-access reader without an implicit cursor.
+`Operator` is logically immutable and shareable. `Lister`, `ReadStream`, and
+`Writer` are stateful. `Reader` is a random-access reader without an implicit
+cursor.
 
 ## Construction and configuration
 
@@ -213,11 +214,73 @@ leak-safety backstop, not the preferred way to release a Reader promptly.
 
 Every returned value must fit in one MoonBit `Bytes`. Requests or whole-object
 reads exceeding that representable length raise `BufferTooLarge`; callers read
-large objects in bounded ranges.
+large objects with a `ReadStream` or in bounded independent ranges.
 
 The same checked-allocation rule applies to native output strings and
 materialized entry arrays. The wrapper releases any partially converted native
 snapshots before raising `BufferTooLarge`.
+
+## Read streams
+
+Large sequential reads use a distinct cursor-bearing resource. The existing
+`Reader` remains random access and never acquires a hidden position:
+
+```moonbit
+let stream = op.open_read_stream(
+  "large.bin",
+  range=From(offset=4096UL),
+  chunk_size=1024 * 1024,
+)
+while stream.next() is Some(chunk) {
+  consume(chunk)
+}
+stream.close()
+```
+
+The public surface is:
+
+```moonbit
+Operator::open_read_stream(
+  path,
+  range?=Full,
+  chunk_size?=1024 * 1024,
+  version?,
+  if_match?,
+  if_none_match?,
+) -> ReadStream raise OpenDalError
+ReadStream::next() -> Bytes? raise OpenDalError
+ReadStream::close() -> Unit
+```
+
+`ReadStream` is deliberately not named `SequentialReader`: it is a stateful
+byte stream, while `Reader` already names the reusable random-access resource.
+It is not coerced to `Iter[Bytes]`, because an ordinary iterator step cannot
+preserve checked I/O errors.
+
+`chunk_size` is an `Int`, matching the length and allocation domain of MoonBit
+`Bytes`; remote object offsets and ranges remain `UInt64`. It is fixed when the
+stream is opened so every `next` has the same memory and backpressure bound.
+The default is 1 MiB. Values must be positive and no larger than the negotiated
+native output ceiling or `Int::MAX`; invalid values raise `InvalidArgument`
+before a native reader is retained.
+
+The state machine is:
+
+- `Open -> End` when upstream reaches EOF; `next` then returns `None` forever;
+- `Open -> Failed` on an OpenDAL error or contained native panic; the failing
+  call reports that failure and later `next` calls raise `ResourceClosed`;
+- `Open -> Closed` on explicit `close`; `close` is idempotent and later `next`
+  raises `ResourceClosed`;
+- the handle owns everything it needs and can outlive its originating
+  `Operator`;
+- calls on one handle serialize; distinct handles and ordinary `Reader` calls
+  can proceed concurrently;
+- there is no implicit concurrency or prefetch, so opening a stream does not
+  weaken its one-chunk bound.
+
+`Operator::open_read_stream` and `ReadStream::next` use `Operation::Read` for
+error context. The new lifecycle API does not extend the already public,
+exhaustively matchable `Operation` enum.
 
 ## Writer
 
@@ -226,6 +289,11 @@ let writer = op.open_writer(path, content_type="application/octet-stream")
 writer.write(chunk1)
 writer.write(chunk2)
 let metadata = writer.finish()
+
+let speculative = op.open_writer("scratch.bin")
+speculative.write(chunk1)
+speculative.abort()
+speculative.abort() // successful abort is idempotent
 ```
 
 - `write` writes an entire supplied chunk or raises.
@@ -234,17 +302,23 @@ let metadata = writer.finish()
   successfully completed;
 - the first finish attempt is terminal: success produces `Closed`, failure
   produces `Failed`;
+- the first abort attempt is terminal: success produces `Aborted`, failure
+  produces `Failed`;
+- repeating a successful `abort` is harmless, which makes explicit cleanup
+  paths composable; aborting a finished or failed Writer raises
+  `ResourceClosed`;
+- an abort/finish or abort/write race has one winner; the losing call observes
+  `ResourceClosed` and never starts a second upstream operation;
 - later `write` or `finish` calls raise `ResourceClosed`;
 - dropping/finalizing an open or failed Writer never calls `finish` and reports
-  neither success nor an error.
+  neither finish nor abort success.
 
-No public `abort` is frozen yet. OpenDAL's blocking Writer does not expose a
-reliable abort operation. Before finish succeeds, a write/finish failure or drop
-can therefore leave visible partial data or orphan multipart state depending
-on the backend. The binding promises neither rollback nor “no partial
-effects”; callers treat only a successful `finish` as completed. An abort API
-can be added only if the Rust shim owns an async Writer and can define its
-synchronous failure behavior precisely.
+The native shim owns OpenDAL's async Writer and synchronously drives its
+explicit `abort`. A successful abort means OpenDAL reported that cleanup
+succeeded; it does not promise rollback of effects a backend had already made
+visible. If a write, finish, abort, panic, or finalizer ends the resource without
+a successful abort, partial data or orphan multipart state can remain. Both
+`finish` and `abort` use `Operation::Write` for error context.
 
 ## Metadata and entries
 
