@@ -52,3 +52,52 @@ test "layer public facade type-checks" {
   ignore(layers_public_contract)
   ignore(retry_defaults_contract)
 }
+
+///|
+test "layered memory operator preserves info and shared storage" {
+  let base = Operator::new("memory")
+  base.write("layers/before.txt", b"before") |> ignore
+  let layered = base
+    .with_timeout(operation_timeout_millis=5000UL, io_timeout_millis=2000UL)
+    .with_retry(
+      max_retries=2U,
+      min_delay_millis=1UL,
+      max_delay_millis=5UL,
+      jitter=false,
+    )
+  let info = layered.info()
+  assert_eq(info.scheme, "memory")
+  assert_true(info.capability.can_read())
+  assert_eq(layered.read("layers/before.txt"), b"before")
+  layered.write("layers/after.txt", b"after") |> ignore
+  assert_eq(base.read("layers/after.txt"), b"after")
+}
+
+///|
+test "native layer order and duplicate rules stay explicit" {
+  let base = Operator::new("memory")
+  let timeout = base.with_timeout(
+    operation_timeout_millis=5000UL,
+    io_timeout_millis=2000UL,
+  )
+  assert_invalid_layer_argument(() => {
+    timeout.with_timeout(
+      operation_timeout_millis=5000UL,
+      io_timeout_millis=2000UL,
+    )
+    |> ignore
+  })
+  let retry = base.with_retry(
+    max_retries=1U,
+    min_delay_millis=1UL,
+    max_delay_millis=5UL,
+    jitter=false,
+  )
+  assert_invalid_layer_argument(() => {
+    retry.with_timeout(
+      operation_timeout_millis=5000UL,
+      io_timeout_millis=2000UL,
+    )
+    |> ignore
+  })
+}
