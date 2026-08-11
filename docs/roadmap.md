@@ -154,7 +154,8 @@ Delivered:
 
 ### Phase 4: Distribution and service profiles
 
-Status: in progress.
+Status: implementation complete; public activation awaits the `v0.1.0`
+release after this stack merges.
 
 The distribution contract is now fixed: `moon add`, a normal package import,
 and the native target must be sufficient for consumers. Rust, a source
@@ -179,6 +180,28 @@ toolchains are MoonBit `0.10.6+80dc50f24` and Rust `1.91.0`; the temporary
 prebuild configuration mechanism requires Node.js 18 or newer at consumer
 build time. See `docs/design/native-distribution.md` for the artifact, trust,
 cache, and release contracts.
+
+Delivered:
+
+- deterministic target-native archives whose manifests record the exact ABI,
+  dependency, compatibility, integrity, and system-link contracts;
+- Apple silicon macOS and x86-64 glibc Linux release builders;
+- a host-selecting Moon configuration script with pinned SHA-256 values,
+  atomic installation, concurrent locking, corruption recovery, and offline
+  hot-cache behavior;
+- exact local-archive overrides for maintainer tests without consumer-facing
+  linker configuration;
+- a published package surface without Cargo manifests, Rust sources, or
+  maintainer tooling;
+- clean downstream debug and release gates without Cargo, Rust homes,
+  `LIBRARY_PATH`, manual link flags, or repository source;
+- one tag pipeline that publishes verified GitHub assets, publishes the same
+  version to mooncakes.io, and executes the registry package afterward.
+
+The remaining action is operational rather than a code-design phase: configure
+the mooncakes credential secret, merge the stack, and push `v0.1.0`. Until the
+tag workflow publishes both registries, the release URLs pinned for `0.1.0`
+intentionally do not exist.
 
 The initial platform target is macOS and Linux. Windows support requires a
 separate linker and artifact-distribution decision.

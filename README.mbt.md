@@ -3,29 +3,51 @@
 Safe, checked MoonBit bindings for Apache OpenDAL. The current release supports
 the native backend and ships the memory and filesystem service profiles.
 
-Build the pinned Rust static library before running MoonBit code:
+Add it like any other Moon dependency:
 
 ```sh
-OPENDAL_MBT_SOURCE=/path/to/unpacked/opendal-mbt
-cargo build --manifest-path "$OPENDAL_MBT_SOURCE/Cargo.toml" --workspace --locked
-LIBRARY_PATH="$OPENDAL_MBT_SOURCE/target/debug" \
-  moon test --target native --frozen
+moon add eric-song-nop/opendal
 ```
 
-The current release is source-built. Prebuilt native artifacts and automatic
-installation are deferred until the distribution contract is designed. A
-`moon add` alone therefore does not build the required Rust archive: keep a
-source checkout or unpacked source release available for the build above.
-
-The final native package or executable also links that archive. Add the
-following entry to its `moon.pkg`, and point `LIBRARY_PATH` at the matching
-Cargo profile directory when invoking `moon`:
+Import the package normally and select the native target. There are no
+OpenDAL-specific linker flags:
 
 ```moonbit nocheck
+supported_targets = "native"
+
+import {
+  "eric-song-nop/opendal",
+}
+
 options(
-  link: { "native": { "cc-link-flags": "-lopendal_mbt_native -lm" } },
+  "is-main": true,
 )
 ```
+
+```mbt nocheck
+fn main raise {
+  let operator = @opendal.Operator::new("memory")
+  operator.write("hello.txt", b"hello from MoonBit") |> ignore
+  println(operator.read("hello.txt"))
+}
+```
+
+Then use the ordinary Moon command:
+
+```sh
+moon run --target native cmd/main
+```
+
+The first native build downloads one pinned release artifact into Moon's
+shared content-addressed cache. Later builds validate and reuse that cache,
+including offline builds. Consumers do not need Cargo, Rust, this repository,
+`LIBRARY_PATH`, or a project-specific installer.
+
+The initial prebuilt matrix supports Apple silicon macOS 11 or newer and
+x86-64 glibc Linux 2.35 or newer. Moon's current native dependency hook is
+experimental and runs the package `build.js`, so Node.js 18 or newer and
+`tar` must be available during native builds. Unsupported hosts fail before a
+download and list the supported targets.
 
 ## Whole-object storage
 
