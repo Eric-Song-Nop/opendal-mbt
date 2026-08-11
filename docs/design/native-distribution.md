@@ -61,18 +61,23 @@ install the S3 HTTP transport.
 
 ## Supported host matrix
 
-The first host matrix is intentionally small:
+The immutable `local` v0.1 release remains available on its original two
+hosts. The `standard` profile expands the next release to four target-native
+builders:
 
-| Host | Release target | Compatibility floor |
-| --- | --- | --- |
-| Apple silicon macOS | `aarch64-apple-darwin` | macOS 11.0 |
-| x86-64 Linux | `x86_64-unknown-linux-gnu` | glibc 2.35 |
+| Host | Release target | Compatibility floor | Profile |
+| --- | --- | --- | --- |
+| Apple silicon macOS | `aarch64-apple-darwin` | macOS 11.0 | `local`, `standard` |
+| Intel macOS | `x86_64-apple-darwin` | macOS 11.0 | `standard` |
+| arm64 Linux | `aarch64-unknown-linux-gnu` | glibc 2.35 | `standard` |
+| x86-64 Linux | `x86_64-unknown-linux-gnu` | glibc 2.35 | `local`, `standard` |
 
-The module and package declare native-only support. Unsupported hosts fail
-before downloading with a message listing the supported matrix. Windows,
-Intel macOS, Linux arm64, and musl require separately built and tested
-artifacts; the installer never guesses that one target is compatible with
-another.
+Every `standard` archive is built and linked on a GitHub-hosted runner with
+the same architecture; no cross-compiled archive is presented as target-native
+validation. The module and package remain native-only. Unsupported hosts fail
+before downloading with a message listing the selected profile's matrix.
+Windows and musl require separately built and tested artifacts; the installer
+never guesses that one target is compatible with another.
 
 ## Published artifact
 

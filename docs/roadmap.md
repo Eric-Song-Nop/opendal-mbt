@@ -712,9 +712,10 @@ in-flight `next`, and Writers have at most one in-flight lifecycle operation.
 ### Parallel track A: Platform and artifact expansion
 
 Additional targets are independent release lanes, not checkboxes added to a
-generic support claim. Candidate targets include Linux arm64, macOS x86-64,
-musl Linux, and Windows. Prioritize them from user demand, CI availability,
-artifact size, and maintenance cost.
+generic support claim. The Phase 5 `standard` profile adds target-native Linux
+arm64 and macOS x86-64 builders alongside the original two hosts. Musl Linux
+and Windows remain later candidates and require their own ABI and packaging
+work.
 
 Every new target requires:
 
