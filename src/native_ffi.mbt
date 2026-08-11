@@ -58,6 +58,10 @@ priv type NativeResult
 priv type NativeMetadata
 
 ///|
+/// Temporary owned native presigned-request snapshot.
+priv type NativePresignedRequest
+
+///|
 #borrow(scheme, keys, values)
 extern "C" fn native_operator_new(
   scheme : String,
@@ -117,6 +121,20 @@ extern "C" fn native_operator_stat(
 
 ///|
 #borrow(operator, path, version, if_match, if_none_match)
+extern "C" fn native_operator_presign_stat(
+  operator : Operator,
+  path : String,
+  expires_in_seconds : UInt64,
+  has_version : Bool,
+  version : String,
+  has_if_match : Bool,
+  if_match : String,
+  has_if_none_match : Bool,
+  if_none_match : String,
+) -> NativeResult = "moonbit_opendal_operator_presign_stat"
+
+///|
+#borrow(operator, path, version, if_match, if_none_match)
 extern "C" fn native_operator_read(
   operator : Operator,
   path : String,
@@ -130,6 +148,23 @@ extern "C" fn native_operator_read(
   has_if_none_match : Bool,
   if_none_match : String,
 ) -> NativeResult = "moonbit_opendal_operator_read"
+
+///|
+#borrow(operator, path, version, if_match, if_none_match)
+extern "C" fn native_operator_presign_read(
+  operator : Operator,
+  path : String,
+  expires_in_seconds : UInt64,
+  range_kind : UInt,
+  range_offset : UInt64,
+  range_length : UInt64,
+  has_version : Bool,
+  version : String,
+  has_if_match : Bool,
+  if_match : String,
+  has_if_none_match : Bool,
+  if_none_match : String,
+) -> NativeResult = "moonbit_opendal_operator_presign_read"
 
 ///|
 #borrow(operator, path, version, if_match, if_none_match)
@@ -204,6 +239,27 @@ extern "C" fn native_operator_write(
   has_if_none_match : Bool,
   if_none_match : String,
 ) -> NativeResult = "moonbit_opendal_operator_write"
+
+///|
+#borrow(operator, path, content_type, content_disposition, content_encoding, cache_control, if_match, if_none_match)
+extern "C" fn native_operator_presign_write(
+  operator : Operator,
+  path : String,
+  expires_in_seconds : UInt64,
+  append : Bool,
+  has_content_type : Bool,
+  content_type : String,
+  has_content_disposition : Bool,
+  content_disposition : String,
+  has_content_encoding : Bool,
+  content_encoding : String,
+  has_cache_control : Bool,
+  cache_control : String,
+  has_if_match : Bool,
+  if_match : String,
+  has_if_none_match : Bool,
+  if_none_match : String,
+) -> NativeResult = "moonbit_opendal_operator_presign_write"
 
 ///|
 #borrow(operator, path, content_type, content_disposition, content_encoding, cache_control, if_match, if_none_match)
@@ -355,6 +411,12 @@ extern "C" fn native_result_take_metadata(
 
 ///|
 #borrow(result)
+extern "C" fn native_result_take_presigned_request(
+  result : NativeResult,
+) -> NativePresignedRequest = "moonbit_opendal_result_take_presigned_request"
+
+///|
+#borrow(result)
 extern "C" fn native_result_release(result : NativeResult) -> Unit = "moonbit_opendal_result_release"
 
 ///|
@@ -467,6 +529,44 @@ extern "C" fn native_metadata_version(metadata : NativeMetadata) -> Bytes = "moo
 ///|
 #borrow(metadata)
 extern "C" fn native_metadata_release(metadata : NativeMetadata) -> Unit = "moonbit_opendal_metadata_release"
+
+///|
+#borrow(request)
+extern "C" fn native_presigned_request_method(
+  request : NativePresignedRequest,
+) -> Bytes = "moonbit_opendal_presigned_request_method"
+
+///|
+#borrow(request)
+extern "C" fn native_presigned_request_uri(
+  request : NativePresignedRequest,
+) -> Bytes = "moonbit_opendal_presigned_request_uri"
+
+///|
+#borrow(request)
+extern "C" fn native_presigned_request_header_count(
+  request : NativePresignedRequest,
+) -> UInt64 = "moonbit_opendal_presigned_request_header_count"
+
+///|
+#borrow(request)
+extern "C" fn native_presigned_request_header_name(
+  request : NativePresignedRequest,
+  index : Int,
+) -> Bytes = "moonbit_opendal_presigned_request_header_name"
+
+///|
+#borrow(request)
+extern "C" fn native_presigned_request_header_value(
+  request : NativePresignedRequest,
+  index : Int,
+) -> Bytes = "moonbit_opendal_presigned_request_header_value"
+
+///|
+#borrow(request)
+extern "C" fn native_presigned_request_release(
+  request : NativePresignedRequest,
+) -> Unit = "moonbit_opendal_presigned_request_release"
 
 ///|
 fn abi_text_error(

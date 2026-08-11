@@ -82,3 +82,21 @@ pub fn Capability::can_list_with_start_after(self : Capability) -> Bool {
 pub fn Capability::can_list_recursive(self : Capability) -> Bool {
   self.has(12)
 }
+
+///|
+/// Return whether stat requests can be presigned through this binding.
+pub fn Capability::can_presign_stat(self : Capability) -> Bool {
+  self.has(13)
+}
+
+///|
+/// Return whether read requests can be presigned through this binding.
+pub fn Capability::can_presign_read(self : Capability) -> Bool {
+  self.has(14)
+}
+
+///|
+/// Return whether write requests can be presigned through this binding.
+pub fn Capability::can_presign_write(self : Capability) -> Bool {
+  self.has(15)
+}

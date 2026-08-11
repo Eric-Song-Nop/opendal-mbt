@@ -122,3 +122,27 @@ pub struct OperatorInfo {
   name : String
   capability : Capability
 }
+
+///|
+/// One owned HTTP header from a presigned request.
+///
+/// Header values remain bytes because a valid HTTP field value is not
+/// required to be UTF-8. This type deliberately has no Debug or Show
+/// implementation because signing material can appear in header values.
+pub struct PresignedHeader {
+  name : String
+  value : Bytes
+} derive(Eq)
+
+///|
+/// A fully owned HTTP request snapshot produced by an OpenDAL presign
+/// operation.
+///
+/// Header order and duplicate names are preserved. The URI and headers can
+/// contain bearer-equivalent signing material, so this type deliberately has
+/// no Debug or Show implementation.
+pub struct PresignedRequest {
+  http_method : String
+  uri : String
+  headers : Array[PresignedHeader]
+} derive(Eq)

@@ -34,6 +34,9 @@ pub fn Capability::can_list(Self) -> Bool
 pub fn Capability::can_list_recursive(Self) -> Bool
 pub fn Capability::can_list_with_limit(Self) -> Bool
 pub fn Capability::can_list_with_start_after(Self) -> Bool
+pub fn Capability::can_presign_read(Self) -> Bool
+pub fn Capability::can_presign_stat(Self) -> Bool
+pub fn Capability::can_presign_write(Self) -> Bool
 pub fn Capability::can_read(Self) -> Bool
 pub fn Capability::can_read_suffix(Self) -> Bool
 pub fn Capability::can_rename(Self) -> Bool
@@ -139,6 +142,9 @@ pub fn Operator::open_lister(Self, StringView, recursive? : Bool, limit? : UInt6
 pub fn Operator::open_read_stream(Self, StringView, range? : ByteRange, chunk_size? : Int, version? : StringView, if_match? : StringView, if_none_match? : StringView) -> ReadStream raise OpenDalError
 pub fn Operator::open_reader(Self, StringView, version? : StringView, if_match? : StringView, if_none_match? : StringView) -> Reader raise OpenDalError
 pub fn Operator::open_writer(Self, StringView, append? : Bool, content_type? : StringView, content_disposition? : StringView, content_encoding? : StringView, cache_control? : StringView, if_match? : StringView, if_none_match? : StringView) -> Writer raise OpenDalError
+pub fn Operator::presign_read(Self, StringView, expires_in_seconds~ : UInt64, range? : ByteRange, version? : StringView, if_match? : StringView, if_none_match? : StringView) -> PresignedRequest raise OpenDalError
+pub fn Operator::presign_stat(Self, StringView, expires_in_seconds~ : UInt64, version? : StringView, if_match? : StringView, if_none_match? : StringView) -> PresignedRequest raise OpenDalError
+pub fn Operator::presign_write(Self, StringView, expires_in_seconds~ : UInt64, append? : Bool, content_type? : StringView, content_disposition? : StringView, content_encoding? : StringView, cache_control? : StringView, if_match? : StringView, if_none_match? : StringView) -> PresignedRequest raise OpenDalError
 pub fn Operator::read(Self, StringView, range? : ByteRange, version? : StringView, if_match? : StringView, if_none_match? : StringView) -> Bytes raise OpenDalError
 pub fn Operator::rename(Self, StringView, StringView) -> Unit raise OpenDalError
 pub fn Operator::s3(StringView, region~ : StringView, root? : StringView, endpoint? : StringView, auth? : S3Auth, virtual_host_style? : Bool) -> Self raise OpenDalError
@@ -151,6 +157,17 @@ pub struct OperatorInfo {
   name : String
   capability : Capability
 }
+
+pub struct PresignedHeader {
+  name : String
+  value : Bytes
+} derive(Eq)
+
+pub struct PresignedRequest {
+  http_method : String
+  uri : String
+  headers : Array[PresignedHeader]
+} derive(Eq)
 
 pub struct ReadStream {
   // private fields
