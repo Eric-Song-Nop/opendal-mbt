@@ -127,6 +127,7 @@ A release is eligible only when all of the following pass:
    `moon test --target native` commands on every advertised host.
 
 The release workflow publishes the two archives under the package version
-tag. Adding a target means building it in CI, recording its own compatibility
-floor and native link flags, extending the pinned artifact table, and adding
-the same clean-consumer gate for that host.
+tag, then publishes that exact source tree to mooncakes.io and executes a
+fresh registry consumer. Adding a target means building it in CI, recording
+its own compatibility floor and native link flags, extending the pinned
+artifact table, and adding the same clean-consumer gate for that host.
