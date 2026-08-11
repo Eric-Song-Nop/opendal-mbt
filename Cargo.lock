@@ -966,6 +966,7 @@ dependencies = [
 name = "opendal-mbt-native"
 version = "0.1.0"
 dependencies = [
+ "http",
  "opendal",
  "static_assertions",
  "tokio",

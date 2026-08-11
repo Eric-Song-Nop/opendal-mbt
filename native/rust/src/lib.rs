@@ -12,11 +12,13 @@ use std::ptr;
 use std::slice;
 use std::str;
 use std::sync::{Condvar, Mutex, MutexGuard, OnceLock};
+use std::time::Duration;
 
 use abi::*;
 use opendal::options::{
     DeleteOptions, ListOptions, ReadOptions, ReaderOptions, StatOptions, WriteOptions,
 };
+use opendal::raw::PresignedRequest;
 use opendal::{BytesRange, Capability, EntryMode, ErrorKind, Metadata};
 use tokio::runtime::Runtime;
 
@@ -1190,9 +1192,60 @@ fn capability_view(capability: Capability) -> CapabilityV1 {
     if capability.list_with_recursive {
         word0 |= CAP_LIST_RECURSIVE;
     }
+    if capability.presign_stat {
+        word0 |= CAP_PRESIGN_STAT;
+    }
+    if capability.presign_read {
+        word0 |= CAP_PRESIGN_READ;
+    }
+    if capability.presign_write {
+        word0 |= CAP_PRESIGN_WRITE;
+    }
     CapabilityV1 {
         words: [word0, 0, 0, 0],
     }
+}
+
+fn checked_presigned_request(request: PresignedRequest) -> CallResult<PresignedRequestV1> {
+    let method = request.method().as_str().to_owned();
+    let uri = request.uri().to_string();
+    let mut total_len = method
+        .len()
+        .checked_add(uri.len())
+        .ok_or_else(|| buffer_too_large("presigned request exceeds the binding output limit"))?;
+    let mut headers = Vec::with_capacity(request.header().len());
+    for (name, value) in request.header() {
+        let name = name.as_str().to_owned();
+        let value = value.as_bytes().to_vec();
+        total_len = total_len
+            .checked_add(name.len())
+            .and_then(|length| length.checked_add(value.len()))
+            .ok_or_else(|| {
+                buffer_too_large("presigned request exceeds the binding output limit")
+            })?;
+        headers.push(PresignedHeaderV1 { name, value });
+    }
+    if u64::try_from(total_len).map_or(true, |length| length > MAX_OUTPUT_BYTES)
+        || u64::try_from(headers.len()).map_or(true, |length| length > MAX_OUTPUT_BYTES)
+    {
+        return Err(buffer_too_large(
+            "presigned request exceeds the binding output limit",
+        ));
+    }
+    Ok(PresignedRequestV1 {
+        method,
+        uri,
+        headers,
+    })
+}
+
+fn presign_expiry(seconds: u64) -> CallResult<Duration> {
+    if seconds == 0 {
+        return Err(invalid_argument(
+            "presign expires_in_seconds must be greater than zero",
+        ));
+    }
+    Ok(Duration::from_secs(seconds))
 }
 
 fn check_output_string(value: Option<&str>) -> CallResult<()> {
@@ -3228,6 +3281,200 @@ unsafe extern "C" fn writer_abort(writer: *mut WriterV1, out_error: *mut *mut Er
     }
 }
 
+unsafe extern "C" fn operator_presign_read(
+    operator: *mut OperatorV1,
+    path: *const BytesViewV1,
+    options: *const ReadOptionsV1,
+    expires_in_seconds: u64,
+    out_request: *mut *mut PresignedRequestV1,
+    out_error: *mut *mut ErrorV1,
+) -> Status {
+    catch_status(|| {
+        let outputs = [
+            unsafe { clear_required_output(out_request, ptr::null_mut()) },
+            unsafe { clear_error_output(out_error) },
+        ];
+        if let Err(failure) = combine_output_validation(outputs) {
+            return unsafe { finish_failure(failure, out_error) };
+        }
+        let result = (|| -> CallResult<Box<PresignedRequestV1>> {
+            // SAFETY: handle, path, and option carriers are validated and copied.
+            let operator = unsafe { borrow_required(operator.cast_const())? };
+            let path = unsafe { read_text(path, "path")? };
+            let options = unsafe { parse_read_options(options)? };
+            let expiry = presign_expiry(expires_in_seconds)?;
+            let request = operator
+                .inner
+                .presign_read_options(&path, expiry, options)
+                .map_err(opendal_error)?;
+            Ok(Box::new(checked_presigned_request(request)?))
+        })();
+        match result {
+            Ok(request) => {
+                // SAFETY: output was validated and remains exclusively writable.
+                unsafe { out_request.write(Box::into_raw(request)) };
+                STATUS_OK
+            }
+            Err(failure) => unsafe { finish_failure(failure, out_error) },
+        }
+    })
+}
+
+unsafe extern "C" fn operator_presign_write(
+    operator: *mut OperatorV1,
+    path: *const BytesViewV1,
+    options: *const WriteOptionsV1,
+    expires_in_seconds: u64,
+    out_request: *mut *mut PresignedRequestV1,
+    out_error: *mut *mut ErrorV1,
+) -> Status {
+    catch_status(|| {
+        let outputs = [
+            unsafe { clear_required_output(out_request, ptr::null_mut()) },
+            unsafe { clear_error_output(out_error) },
+        ];
+        if let Err(failure) = combine_output_validation(outputs) {
+            return unsafe { finish_failure(failure, out_error) };
+        }
+        let result = (|| -> CallResult<Box<PresignedRequestV1>> {
+            // SAFETY: handle, path, and option carriers are validated and copied.
+            let operator = unsafe { borrow_required(operator.cast_const())? };
+            let path = unsafe { read_text(path, "path")? };
+            let options = unsafe { parse_write_options(options)? };
+            let expiry = presign_expiry(expires_in_seconds)?;
+            let request = operator
+                .inner
+                .presign_write_options(&path, expiry, options)
+                .map_err(opendal_error)?;
+            Ok(Box::new(checked_presigned_request(request)?))
+        })();
+        match result {
+            Ok(request) => {
+                // SAFETY: output was validated and remains exclusively writable.
+                unsafe { out_request.write(Box::into_raw(request)) };
+                STATUS_OK
+            }
+            Err(failure) => unsafe { finish_failure(failure, out_error) },
+        }
+    })
+}
+
+unsafe extern "C" fn operator_presign_stat(
+    operator: *mut OperatorV1,
+    path: *const BytesViewV1,
+    options: *const StatOptionsV1,
+    expires_in_seconds: u64,
+    out_request: *mut *mut PresignedRequestV1,
+    out_error: *mut *mut ErrorV1,
+) -> Status {
+    catch_status(|| {
+        let outputs = [
+            unsafe { clear_required_output(out_request, ptr::null_mut()) },
+            unsafe { clear_error_output(out_error) },
+        ];
+        if let Err(failure) = combine_output_validation(outputs) {
+            return unsafe { finish_failure(failure, out_error) };
+        }
+        let result = (|| -> CallResult<Box<PresignedRequestV1>> {
+            // SAFETY: handle, path, and option carriers are validated and copied.
+            let operator = unsafe { borrow_required(operator.cast_const())? };
+            let path = unsafe { read_text(path, "path")? };
+            let options = unsafe { parse_stat_options(options)? };
+            let expiry = presign_expiry(expires_in_seconds)?;
+            let request = operator
+                .inner
+                .presign_stat_options(&path, expiry, options)
+                .map_err(opendal_error)?;
+            Ok(Box::new(checked_presigned_request(request)?))
+        })();
+        match result {
+            Ok(request) => {
+                // SAFETY: output was validated and remains exclusively writable.
+                unsafe { out_request.write(Box::into_raw(request)) };
+                STATUS_OK
+            }
+            Err(failure) => unsafe { finish_failure(failure, out_error) },
+        }
+    })
+}
+
+unsafe extern "C" fn presigned_request_view(
+    request: *const PresignedRequestV1,
+    output: *mut PresignedRequestViewV1,
+) -> Status {
+    catch_status(|| {
+        // SAFETY: output is validated and cleared before the handle is inspected.
+        let header = match unsafe { prepare_view(output) } {
+            Ok(header) => header,
+            Err(failure) => return unsafe { finish_failure(failure, ptr::null_mut()) },
+        };
+        // SAFETY: opaque handle validity is a caller lifetime obligation.
+        let request = match unsafe { borrow_required(request) } {
+            Ok(request) => request,
+            Err(failure) => return unsafe { finish_failure(failure, ptr::null_mut()) },
+        };
+        let header_count = match u64::try_from(request.headers.len()) {
+            Ok(count) => count,
+            Err(_) => return STATUS_PANIC,
+        };
+        let view = PresignedRequestViewV1 {
+            struct_size: header.struct_size,
+            struct_version: header.struct_version,
+            reserved0: 0,
+            method: string_view(&request.method),
+            uri: string_view(&request.uri),
+            header_count,
+        };
+        // SAFETY: prepare_view validated complete writable storage.
+        unsafe { output.write(view) };
+        STATUS_OK
+    })
+}
+
+unsafe extern "C" fn presigned_request_header_view(
+    request: *const PresignedRequestV1,
+    index: u64,
+    output: *mut PresignedHeaderViewV1,
+) -> Status {
+    catch_status(|| {
+        // SAFETY: output is validated and cleared before the handle is inspected.
+        let view_header = match unsafe { prepare_view(output) } {
+            Ok(header) => header,
+            Err(failure) => return unsafe { finish_failure(failure, ptr::null_mut()) },
+        };
+        // SAFETY: opaque handle validity is a caller lifetime obligation.
+        let request = match unsafe { borrow_required(request) } {
+            Ok(request) => request,
+            Err(failure) => return unsafe { finish_failure(failure, ptr::null_mut()) },
+        };
+        let Some(header) = usize::try_from(index)
+            .ok()
+            .and_then(|index| request.headers.get(index))
+        else {
+            return STATUS_END;
+        };
+        let view = PresignedHeaderViewV1 {
+            struct_size: view_header.struct_size,
+            struct_version: view_header.struct_version,
+            reserved0: 0,
+            name: string_view(&header.name),
+            value: bytes_view(&header.value),
+        };
+        // SAFETY: prepare_view validated complete writable storage.
+        unsafe { output.write(view) };
+        STATUS_OK
+    })
+}
+
+unsafe extern "C" fn presigned_request_free(request: *mut PresignedRequestV1) {
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        if !request.is_null() {
+            // SAFETY: every non-null handle is uniquely owned and freed once.
+            unsafe { drop(Box::from_raw(request)) };
+        }
+    }));
+}
+
 unsafe extern "C" fn writer_free(writer: *mut WriterV1) {
     let _ = catch_unwind(AssertUnwindSafe(|| {
         if writer.is_null() {
@@ -3256,6 +3503,7 @@ fn stage_api() -> Option<ApiV1> {
             | FEATURE_CHUNKED_WRITER
             | FEATURE_READ_STREAM
             | FEATURE_WRITER_ABORT
+            | FEATURE_PRESIGN
             | PROFILE_FEATURE_BITS,
         max_output_bytes: MAX_OUTPUT_BYTES,
         library_info: Some(library_info),
@@ -3303,6 +3551,12 @@ fn stage_api() -> Option<ApiV1> {
         operator_s3: Some(operator_s3),
         #[cfg(not(feature = "profile-standard"))]
         operator_s3: None,
+        operator_presign_read: Some(operator_presign_read),
+        operator_presign_write: Some(operator_presign_write),
+        operator_presign_stat: Some(operator_presign_stat),
+        presigned_request_view: Some(presigned_request_view),
+        presigned_request_header_view: Some(presigned_request_header_view),
+        presigned_request_free: Some(presigned_request_free),
     })
 }
 
@@ -3378,6 +3632,12 @@ unsafe fn install_api(base: *mut u8, caller_size: usize, staged: &ApiV1) {
     install_field!(read_stream_free);
     install_field!(writer_abort);
     install_field!(operator_s3);
+    install_field!(operator_presign_read);
+    install_field!(operator_presign_write);
+    install_field!(operator_presign_stat);
+    install_field!(presigned_request_view);
+    install_field!(presigned_request_header_view);
+    install_field!(presigned_request_free);
 }
 
 /// Negotiate the stable v1 function table.
@@ -4174,6 +4434,7 @@ mod tests {
                 | FEATURE_CHUNKED_WRITER
                 | FEATURE_READ_STREAM
                 | FEATURE_WRITER_ABORT
+                | FEATURE_PRESIGN
                 | PROFILE_FEATURE_BITS,
         );
         assert!(api.library_info.is_some());
@@ -4200,6 +4461,12 @@ mod tests {
         assert!(api.operator_s3.is_some());
         #[cfg(not(feature = "profile-standard"))]
         assert!(api.operator_s3.is_none());
+        assert!(api.operator_presign_read.is_some());
+        assert!(api.operator_presign_write.is_some());
+        assert!(api.operator_presign_stat.is_some());
+        assert!(api.presigned_request_view.is_some());
+        assert!(api.presigned_request_header_view.is_some());
+        assert!(api.presigned_request_free.is_some());
     }
 
     #[cfg(feature = "profile-standard")]
@@ -4414,6 +4681,12 @@ mod tests {
             read_stream_free,
             writer_abort,
             operator_s3,
+            operator_presign_read,
+            operator_presign_write,
+            operator_presign_stat,
+            presigned_request_view,
+            presigned_request_header_view,
+            presigned_request_free,
         );
 
         for caller_size in API_PREFIX_SIZE..=size_of::<ApiV1>() + 16 {
@@ -6472,6 +6745,152 @@ mod tests {
     }
 
     #[test]
+    fn presigned_snapshot_preserves_duplicate_binary_headers_and_borrowed_views() {
+        let api = api();
+        let mut headers = http::HeaderMap::new();
+        headers.append("x-repeat", http::HeaderValue::from_static("first"));
+        headers.append(
+            "x-repeat",
+            http::HeaderValue::from_bytes(&[0x80, b'z']).expect("binary header is valid"),
+        );
+        let request = PresignedRequest::new(
+            http::Method::GET,
+            "https://example.invalid/object?signature=secret"
+                .parse()
+                .expect("test URI is valid"),
+            headers,
+        );
+        let snapshot = match checked_presigned_request(request) {
+            Ok(snapshot) => snapshot,
+            Err(_) => panic!("snapshot is within bounds"),
+        };
+        let request = Box::into_raw(Box::new(snapshot));
+        let mut request_view = PresignedRequestViewV1 {
+            struct_size: size_of::<PresignedRequestViewV1>() as u32,
+            struct_version: STRUCT_VERSION,
+            reserved0: u64::MAX,
+            method: bytes(b"poison"),
+            uri: bytes(b"poison"),
+            header_count: u64::MAX,
+        };
+        // SAFETY: the request handle and complete output view are live.
+        assert_eq!(
+            unsafe {
+                api.presigned_request_view
+                    .expect("PRESIGN request view is installed")(
+                    request, &mut request_view
+                )
+            },
+            STATUS_OK,
+        );
+        assert_eq!(copy_view(request_view.method), b"GET");
+        assert_eq!(
+            copy_view(request_view.uri),
+            b"https://example.invalid/object?signature=secret"
+        );
+        assert_eq!(request_view.header_count, 2);
+
+        let mut observed = Vec::new();
+        for index in 0..request_view.header_count {
+            let mut header_view = PresignedHeaderViewV1 {
+                struct_size: size_of::<PresignedHeaderViewV1>() as u32,
+                struct_version: STRUCT_VERSION,
+                reserved0: u64::MAX,
+                name: bytes(b"poison"),
+                value: bytes(b"poison"),
+            };
+            // SAFETY: the request handle and complete output view are live.
+            assert_eq!(
+                unsafe {
+                    api.presigned_request_header_view
+                        .expect("PRESIGN header view is installed")(
+                        request,
+                        index,
+                        &mut header_view,
+                    )
+                },
+                STATUS_OK,
+            );
+            observed.push((copy_view(header_view.name), copy_view(header_view.value)));
+        }
+        assert_eq!(
+            observed,
+            vec![
+                (b"x-repeat".to_vec(), b"first".to_vec()),
+                (b"x-repeat".to_vec(), vec![0x80, b'z']),
+            ]
+        );
+
+        let mut outside = PresignedHeaderViewV1 {
+            struct_size: size_of::<PresignedHeaderViewV1>() as u32,
+            struct_version: STRUCT_VERSION,
+            reserved0: u64::MAX,
+            name: bytes(b"poison"),
+            value: bytes(b"poison"),
+        };
+        // SAFETY: the request handle and complete output view are live.
+        assert_eq!(
+            unsafe {
+                api.presigned_request_header_view
+                    .expect("PRESIGN header view is installed")(
+                    request,
+                    request_view.header_count,
+                    &mut outside,
+                )
+            },
+            STATUS_END,
+        );
+        assert_eq!(outside.name.len, 0);
+        assert_eq!(outside.value.len, 0);
+        // SAFETY: this test owns the request handle exactly once.
+        unsafe {
+            api.presigned_request_free
+                .expect("PRESIGN free is installed")(request)
+        };
+    }
+
+    #[test]
+    fn presign_validates_expiry_atomically_and_maps_capabilities() {
+        let api = api();
+        let (operator, info) = memory_operator(&api);
+        let path = bytes(b"object");
+        let mut request = NonNull::<PresignedRequestV1>::dangling().as_ptr();
+        let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: all carriers and output slots are valid for this call.
+        let status = unsafe {
+            api.operator_presign_read
+                .expect("PRESIGN read is installed")(
+                operator,
+                &path,
+                ptr::null(),
+                0,
+                &mut request,
+                &mut error,
+            )
+        };
+        assert_eq!(status, STATUS_ERROR);
+        assert!(request.is_null());
+        assert_eq!(take_error_kind(&api, error), ERROR_INVALID_ARGUMENT);
+
+        let capability = Capability {
+            presign_stat: true,
+            presign_read: true,
+            presign_write: true,
+            ..Capability::default()
+        };
+        assert_eq!(
+            capability_view(capability).words[0]
+                & (CAP_PRESIGN_STAT | CAP_PRESIGN_READ | CAP_PRESIGN_WRITE),
+            CAP_PRESIGN_STAT | CAP_PRESIGN_READ | CAP_PRESIGN_WRITE,
+        );
+        // SAFETY: this test uniquely owns both handles.
+        unsafe {
+            api.operator_info_free.expect("BASE info free is installed")(info);
+            api.operator_free.expect("BASE operator free is installed")(operator);
+        }
+    }
+
+    #[test]
     fn abi_thread_promises_are_send_and_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<OperatorV1>();
@@ -6484,5 +6903,6 @@ mod tests {
         assert_send_sync::<ReaderV1>();
         assert_send_sync::<WriterV1>();
         assert_send_sync::<ReadStreamV1>();
+        assert_send_sync::<PresignedRequestV1>();
     }
 }
