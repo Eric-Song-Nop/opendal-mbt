@@ -13,7 +13,9 @@
     "services-s3",
     "http-transport-reqwest",
     "http-transport-reqwest-rustls",
-    "executors-tokio"
+    "executors-tokio",
+    "layers-retry",
+    "layers-timeout"
   ],
   "cargo_features": [
     "profile-standard"

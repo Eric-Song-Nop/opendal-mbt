@@ -202,6 +202,8 @@ def load_profile(
             "http-transport-reqwest",
             "http-transport-reqwest-rustls",
             "executors-tokio",
+            "layers-retry",
+            "layers-timeout",
         ]
         if profile.get("rust_features") != expected_features:
             raise ArtifactError("the standard profile Rust features are inconsistent")

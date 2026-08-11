@@ -37,11 +37,13 @@ default = ["profile-standard"]
 profile-local = ["opendal/blocking", "opendal/services-fs"]
 profile-standard = [
   "profile-local",
+  "layers-timeout-retry",
   "opendal/services-s3",
   "opendal/http-transport-reqwest",
   "opendal/http-transport-reqwest-rustls",
   "opendal/executors-tokio",
 ]
+layers-timeout-retry = ["opendal/layers-retry", "opendal/layers-timeout"]
 
 [dependencies]
 opendal = { version = "=0.58.1", default-features = false }
@@ -89,6 +91,8 @@ opendal = { version = "=0.58.1", default-features = false }
                         "http-transport-reqwest",
                         "http-transport-reqwest-rustls",
                         "executors-tokio",
+                        "layers-retry",
+                        "layers-timeout",
                     ],
                     "cargo_features": ["profile-standard"],
                     "runtime_initialization": "install_default",

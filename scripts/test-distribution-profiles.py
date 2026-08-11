@@ -17,6 +17,8 @@ STANDARD_FEATURES = [
     "http-transport-reqwest",
     "http-transport-reqwest-rustls",
     "executors-tokio",
+    "layers-retry",
+    "layers-timeout",
 ]
 STANDARD_TARGETS = {
     "aarch64-apple-darwin": {
@@ -107,6 +109,7 @@ class DistributionProfilesTest(unittest.TestCase):
             features["profile-standard"],
             [
                 "profile-local",
+                "layers-timeout-retry",
                 "opendal/services-s3",
                 "opendal/http-transport-reqwest",
                 "opendal/http-transport-reqwest-rustls",

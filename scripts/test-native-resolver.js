@@ -52,6 +52,8 @@ async function fixture(serviceProfile = 'local') {
           'http-transport-reqwest',
           'http-transport-reqwest-rustls',
           'executors-tokio',
+          'layers-retry',
+          'layers-timeout',
         ]
       : ['blocking', 'services-fs'],
     rust_target: 'aarch64-apple-darwin',
