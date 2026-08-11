@@ -24,6 +24,11 @@ priv type NativeReadStream
 priv type NativeWriter
 
 ///|
+/// Native same-Operator copier storage finalized by the C stub without
+/// finishing or aborting the copy implicitly.
+priv type NativeCopier
+
+///|
 /// Temporary owned native entry snapshot.
 priv type NativeEntry
 
@@ -364,6 +369,26 @@ extern "C" fn native_operator_delete_many(
 ) -> NativeResult = "moonbit_opendal_operator_delete_many"
 
 ///|
+#borrow(operator, source, destination)
+extern "C" fn native_operator_copier(
+  operator : Operator,
+  source : String,
+  destination : String,
+) -> NativeResult = "moonbit_opendal_operator_copier"
+
+///|
+#borrow(copier)
+extern "C" fn native_copier_next(copier : NativeCopier) -> NativeResult = "moonbit_opendal_copier_next"
+
+///|
+#borrow(copier)
+extern "C" fn native_copier_finish(copier : NativeCopier) -> NativeResult = "moonbit_opendal_copier_finish"
+
+///|
+#borrow(copier)
+extern "C" fn native_copier_abort(copier : NativeCopier) -> NativeResult = "moonbit_opendal_copier_abort"
+
+///|
 #borrow(operator, path, start_after)
 extern "C" fn native_operator_lister(
   operator : Operator,
@@ -427,11 +452,19 @@ extern "C" fn native_result_take_writer(result : NativeResult) -> NativeWriter =
 
 ///|
 #borrow(result)
+extern "C" fn native_result_take_copier(result : NativeResult) -> NativeCopier = "moonbit_opendal_result_take_copier"
+
+///|
+#borrow(result)
 extern "C" fn native_result_take_entry(result : NativeResult) -> NativeEntry = "moonbit_opendal_result_take_entry"
 
 ///|
 #borrow(result)
 extern "C" fn native_result_take_bool(result : NativeResult) -> Bool = "moonbit_opendal_result_take_bool"
+
+///|
+#borrow(result)
+extern "C" fn native_result_take_uint64(result : NativeResult) -> UInt64 = "moonbit_opendal_result_take_uint64"
 
 ///|
 #borrow(result)
