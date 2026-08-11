@@ -44,7 +44,7 @@ extern "C" {
 #endif
 
 #define OPENDAL_MBT_ABI_V1_MAJOR UINT32_C(1)
-#define OPENDAL_MBT_ABI_V1_MINOR UINT32_C(2)
+#define OPENDAL_MBT_ABI_V1_MINOR UINT32_C(3)
 #define OPENDAL_MBT_ABI_V1_PATCH UINT32_C(0)
 #define OPENDAL_MBT_STRUCT_VERSION_V1 UINT32_C(1)
 #define OPENDAL_MBT_EXTENSIBLE_CODE_MAX UINT32_C(0x7fffffff)
@@ -126,6 +126,7 @@ typedef uint32_t opendal_mbt_range_kind_t;
 #define OPENDAL_MBT_FEATURE_READ_STREAM (UINT64_C(1) << 5)
 #define OPENDAL_MBT_FEATURE_WRITER_ABORT (UINT64_C(1) << 6)
 #define OPENDAL_MBT_FEATURE_S3 (UINT64_C(1) << 7)
+#define OPENDAL_MBT_FEATURE_PRESIGN (UINT64_C(1) << 8)
 
 /* Capability bit positions. */
 #define OPENDAL_MBT_CAP_STAT (UINT64_C(1) << 0)
@@ -141,6 +142,9 @@ typedef uint32_t opendal_mbt_range_kind_t;
 #define OPENDAL_MBT_CAP_LIST_LIMIT (UINT64_C(1) << 10)
 #define OPENDAL_MBT_CAP_LIST_START_AFTER (UINT64_C(1) << 11)
 #define OPENDAL_MBT_CAP_LIST_RECURSIVE (UINT64_C(1) << 12)
+#define OPENDAL_MBT_CAP_PRESIGN_STAT (UINT64_C(1) << 13)
+#define OPENDAL_MBT_CAP_PRESIGN_READ (UINT64_C(1) << 14)
+#define OPENDAL_MBT_CAP_PRESIGN_WRITE (UINT64_C(1) << 15)
 
 /*
  * Frozen by-value leaf layouts for ABI major v1. A byte view is borrowed for
@@ -431,6 +435,23 @@ typedef struct opendal_mbt_library_info_view_v1 {
   opendal_mbt_bytes_view_v1_t service_profile;
 } opendal_mbt_library_info_view_v1_t;
 
+typedef struct opendal_mbt_presigned_request_view_v1 {
+  uint32_t struct_size;
+  uint32_t struct_version;
+  uint64_t reserved0;
+  opendal_mbt_bytes_view_v1_t method;
+  opendal_mbt_bytes_view_v1_t uri;
+  uint64_t header_count;
+} opendal_mbt_presigned_request_view_v1_t;
+
+typedef struct opendal_mbt_presigned_header_view_v1 {
+  uint32_t struct_size;
+  uint32_t struct_version;
+  uint64_t reserved0;
+  opendal_mbt_bytes_view_v1_t name;
+  opendal_mbt_bytes_view_v1_t value;
+} opendal_mbt_presigned_header_view_v1_t;
+
 /* Rust-owned opaque handles. */
 typedef struct opendal_mbt_operator_v1 opendal_mbt_operator_v1_t;
 typedef struct opendal_mbt_lister_v1 opendal_mbt_lister_v1_t;
@@ -442,6 +463,8 @@ typedef struct opendal_mbt_error_v1 opendal_mbt_error_v1_t;
 typedef struct opendal_mbt_metadata_v1 opendal_mbt_metadata_v1_t;
 typedef struct opendal_mbt_entry_v1 opendal_mbt_entry_v1_t;
 typedef struct opendal_mbt_operator_info_v1 opendal_mbt_operator_info_v1_t;
+typedef struct opendal_mbt_presigned_request_v1
+    opendal_mbt_presigned_request_v1_t;
 
 /*
  * Append-only v1 function table. All table function pointers use the C calling
@@ -651,6 +674,40 @@ typedef struct opendal_mbt_api_v1 {
       opendal_mbt_operator_v1_t **out_operator,
       opendal_mbt_operator_info_v1_t **out_info,
       opendal_mbt_error_v1_t **out_error);
+
+  /*
+   * OPENDAL_MBT_FEATURE_PRESIGN: appended in ABI v1.3. Request and header
+   * views borrow from the immutable request handle until it is freed. Header
+   * order and repeated names are preserved; header values are arbitrary bytes.
+   */
+  opendal_mbt_status_t(OPENDAL_MBT_CALL *operator_presign_read)(
+      opendal_mbt_operator_v1_t *operator_,
+      const opendal_mbt_bytes_view_v1_t *path,
+      const opendal_mbt_read_options_v1_t *options, uint64_t expires_in_seconds,
+      opendal_mbt_presigned_request_v1_t **out_request,
+      opendal_mbt_error_v1_t **out_error);
+  opendal_mbt_status_t(OPENDAL_MBT_CALL *operator_presign_write)(
+      opendal_mbt_operator_v1_t *operator_,
+      const opendal_mbt_bytes_view_v1_t *path,
+      const opendal_mbt_write_options_v1_t *options,
+      uint64_t expires_in_seconds,
+      opendal_mbt_presigned_request_v1_t **out_request,
+      opendal_mbt_error_v1_t **out_error);
+  opendal_mbt_status_t(OPENDAL_MBT_CALL *operator_presign_stat)(
+      opendal_mbt_operator_v1_t *operator_,
+      const opendal_mbt_bytes_view_v1_t *path,
+      const opendal_mbt_stat_options_v1_t *options, uint64_t expires_in_seconds,
+      opendal_mbt_presigned_request_v1_t **out_request,
+      opendal_mbt_error_v1_t **out_error);
+  opendal_mbt_status_t(OPENDAL_MBT_CALL *presigned_request_view)(
+      const opendal_mbt_presigned_request_v1_t *request,
+      opendal_mbt_presigned_request_view_v1_t *out_view);
+  /* Returns END when index is outside [0, header_count). */
+  opendal_mbt_status_t(OPENDAL_MBT_CALL *presigned_request_header_view)(
+      const opendal_mbt_presigned_request_v1_t *request, uint64_t index,
+      opendal_mbt_presigned_header_view_v1_t *out_view);
+  void(OPENDAL_MBT_CALL *presigned_request_free)(
+      opendal_mbt_presigned_request_v1_t *request);
 } opendal_mbt_api_v1_t;
 
 /* End offset of one complete table field; never read a partially covered one. */

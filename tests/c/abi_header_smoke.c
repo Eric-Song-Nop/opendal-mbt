@@ -56,6 +56,10 @@ ABI_STATIC_ASSERT(sizeof(opendal_mbt_error_view_v1_t) == 48,
                   "error view layout drifted");
 ABI_STATIC_ASSERT(sizeof(opendal_mbt_library_info_view_v1_t) == 64,
                   "library info view layout drifted");
+ABI_STATIC_ASSERT(sizeof(opendal_mbt_presigned_request_view_v1_t) == 56,
+                  "presigned request view layout drifted");
+ABI_STATIC_ASSERT(sizeof(opendal_mbt_presigned_header_view_v1_t) == 48,
+                  "presigned header view layout drifted");
 ABI_STATIC_ASSERT(offsetof(opendal_mbt_api_v1_t, struct_size) == 0,
                   "bootstrap size must be first");
 ABI_STATIC_ASSERT(offsetof(opendal_mbt_api_v1_t, requested_major) == 4,
@@ -71,8 +75,10 @@ ABI_STATIC_ASSERT(OPENDAL_MBT_API_V1_INPUT_SIZE == 8,
 #if UINTPTR_MAX == UINT64_MAX
 ABI_STATIC_ASSERT(offsetof(opendal_mbt_api_v1_t, operator_s3) == 368,
                   "v1.2 function table offset drifted");
-ABI_STATIC_ASSERT(sizeof(opendal_mbt_api_v1_t) == 376,
-                  "v1.2 function table size drifted");
+ABI_STATIC_ASSERT(offsetof(opendal_mbt_api_v1_t, operator_presign_read) == 376,
+                  "v1.3 function table offset drifted");
+ABI_STATIC_ASSERT(sizeof(opendal_mbt_api_v1_t) == 424,
+                  "v1.3 function table size drifted");
 #endif
 ABI_STATIC_ASSERT(OPENDAL_MBT_API_V1_FIELD_END(library_info) <=
                       OPENDAL_MBT_API_V1_FIELD_END(error_view),
@@ -83,6 +89,12 @@ ABI_STATIC_ASSERT(OPENDAL_MBT_API_V1_FIELD_END(read_stream_free) <=
 ABI_STATIC_ASSERT(OPENDAL_MBT_API_V1_FIELD_END(writer_abort) <=
                       OPENDAL_MBT_API_V1_FIELD_END(operator_s3),
                   "v1.2 append order drifted");
+ABI_STATIC_ASSERT(OPENDAL_MBT_API_V1_FIELD_END(operator_s3) <=
+                      OPENDAL_MBT_API_V1_FIELD_END(operator_presign_read),
+                  "presign append order drifted");
+ABI_STATIC_ASSERT(OPENDAL_MBT_API_V1_FIELD_END(presigned_request_header_view) <=
+                      OPENDAL_MBT_API_V1_FIELD_END(presigned_request_free),
+                  "presign view group order drifted");
 ABI_STATIC_ASSERT(OPENDAL_MBT_READ_OPTIONS_V1_MIN_SIZE <=
                       sizeof(opendal_mbt_read_options_v1_t),
                   "read options v1.0 prefix drifted");

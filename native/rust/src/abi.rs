@@ -5,7 +5,7 @@
 pub(crate) type Status = u32;
 
 pub(crate) const ABI_MAJOR: u32 = 1;
-pub(crate) const ABI_MINOR: u32 = 2;
+pub(crate) const ABI_MINOR: u32 = 3;
 pub(crate) const ABI_PATCH: u32 = 0;
 pub(crate) const STRUCT_VERSION: u32 = 1;
 
@@ -57,6 +57,7 @@ pub(crate) const FEATURE_CHUNKED_WRITER: u64 = 1 << 4;
 pub(crate) const FEATURE_READ_STREAM: u64 = 1 << 5;
 pub(crate) const FEATURE_WRITER_ABORT: u64 = 1 << 6;
 pub(crate) const FEATURE_S3: u64 = 1 << 7;
+pub(crate) const FEATURE_PRESIGN: u64 = 1 << 8;
 
 pub(crate) const CAP_STAT: u64 = 1 << 0;
 pub(crate) const CAP_READ: u64 = 1 << 1;
@@ -71,6 +72,9 @@ pub(crate) const CAP_WRITE_APPEND: u64 = 1 << 9;
 pub(crate) const CAP_LIST_LIMIT: u64 = 1 << 10;
 pub(crate) const CAP_LIST_START_AFTER: u64 = 1 << 11;
 pub(crate) const CAP_LIST_RECURSIVE: u64 = 1 << 12;
+pub(crate) const CAP_PRESIGN_STAT: u64 = 1 << 13;
+pub(crate) const CAP_PRESIGN_READ: u64 = 1 << 14;
+pub(crate) const CAP_PRESIGN_WRITE: u64 = 1 << 15;
 
 pub(crate) const READ_VERSION_PRESENT: u64 = 1 << 0;
 pub(crate) const READ_IF_MATCH_PRESENT: u64 = 1 << 1;
@@ -341,6 +345,27 @@ pub(crate) struct LibraryInfoViewV1 {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
+pub(crate) struct PresignedRequestViewV1 {
+    pub(crate) struct_size: u32,
+    pub(crate) struct_version: u32,
+    pub(crate) reserved0: u64,
+    pub(crate) method: BytesViewV1,
+    pub(crate) uri: BytesViewV1,
+    pub(crate) header_count: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(crate) struct PresignedHeaderViewV1 {
+    pub(crate) struct_size: u32,
+    pub(crate) struct_version: u32,
+    pub(crate) reserved0: u64,
+    pub(crate) name: BytesViewV1,
+    pub(crate) value: BytesViewV1,
+}
+
+#[repr(C)]
 pub(crate) struct OperatorV1 {
     pub(crate) async_inner: opendal::Operator,
     pub(crate) inner: opendal::blocking::Operator,
@@ -377,6 +402,18 @@ pub(crate) struct OperatorInfoV1 {
     pub(crate) root: String,
     pub(crate) name: String,
     pub(crate) capability: CapabilityV1,
+}
+
+#[repr(C)]
+pub(crate) struct PresignedRequestV1 {
+    pub(crate) method: String,
+    pub(crate) uri: String,
+    pub(crate) headers: Vec<PresignedHeaderV1>,
+}
+
+pub(crate) struct PresignedHeaderV1 {
+    pub(crate) name: String,
+    pub(crate) value: Vec<u8>,
 }
 
 #[repr(C)]
@@ -562,6 +599,35 @@ pub(crate) type OperatorS3Fn = unsafe extern "C" fn(
     *mut *mut OperatorInfoV1,
     *mut *mut ErrorV1,
 ) -> Status;
+pub(crate) type OperatorPresignReadFn = unsafe extern "C" fn(
+    *mut OperatorV1,
+    *const BytesViewV1,
+    *const ReadOptionsV1,
+    u64,
+    *mut *mut PresignedRequestV1,
+    *mut *mut ErrorV1,
+) -> Status;
+pub(crate) type OperatorPresignWriteFn = unsafe extern "C" fn(
+    *mut OperatorV1,
+    *const BytesViewV1,
+    *const WriteOptionsV1,
+    u64,
+    *mut *mut PresignedRequestV1,
+    *mut *mut ErrorV1,
+) -> Status;
+pub(crate) type OperatorPresignStatFn = unsafe extern "C" fn(
+    *mut OperatorV1,
+    *const BytesViewV1,
+    *const StatOptionsV1,
+    u64,
+    *mut *mut PresignedRequestV1,
+    *mut *mut ErrorV1,
+) -> Status;
+pub(crate) type PresignedRequestViewFn =
+    unsafe extern "C" fn(*const PresignedRequestV1, *mut PresignedRequestViewV1) -> Status;
+pub(crate) type PresignedRequestHeaderViewFn =
+    unsafe extern "C" fn(*const PresignedRequestV1, u64, *mut PresignedHeaderViewV1) -> Status;
+pub(crate) type PresignedRequestFreeFn = unsafe extern "C" fn(*mut PresignedRequestV1);
 
 #[repr(C)]
 pub(crate) struct ApiV1 {
@@ -615,6 +681,12 @@ pub(crate) struct ApiV1 {
     pub(crate) read_stream_free: Option<ReadStreamFreeFn>,
     pub(crate) writer_abort: Option<WriterAbortFn>,
     pub(crate) operator_s3: Option<OperatorS3Fn>,
+    pub(crate) operator_presign_read: Option<OperatorPresignReadFn>,
+    pub(crate) operator_presign_write: Option<OperatorPresignWriteFn>,
+    pub(crate) operator_presign_stat: Option<OperatorPresignStatFn>,
+    pub(crate) presigned_request_view: Option<PresignedRequestViewFn>,
+    pub(crate) presigned_request_header_view: Option<PresignedRequestHeaderViewFn>,
+    pub(crate) presigned_request_free: Option<PresignedRequestFreeFn>,
 }
 
 pub(crate) const API_INPUT_SIZE: usize =
@@ -645,7 +717,10 @@ const _: () = {
     assert!(core::mem::size_of::<ErrorViewV1>() == 48);
     assert!(core::mem::size_of::<LibraryInfoViewV1>() == 64);
     assert!(core::mem::offset_of!(ApiV1, operator_s3) == 368);
-    assert!(core::mem::size_of::<ApiV1>() == 376);
+    assert!(core::mem::size_of::<PresignedRequestViewV1>() == 56);
+    assert!(core::mem::size_of::<PresignedHeaderViewV1>() == 48);
+    assert!(core::mem::offset_of!(ApiV1, operator_presign_read) == 376);
+    assert!(core::mem::size_of::<ApiV1>() == 424);
     assert!(API_INPUT_SIZE == 8);
     assert!(API_PREFIX_SIZE == 40);
 };
