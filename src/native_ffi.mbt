@@ -211,6 +211,10 @@ extern "C" fn native_writer_write(
 extern "C" fn native_writer_close(writer : NativeWriter) -> NativeResult = "moonbit_opendal_writer_close"
 
 ///|
+#borrow(writer)
+extern "C" fn native_writer_abort(writer : NativeWriter) -> NativeResult = "moonbit_opendal_writer_abort"
+
+///|
 #borrow(operator, source, destination)
 extern "C" fn native_operator_copy(
   operator : Operator,
