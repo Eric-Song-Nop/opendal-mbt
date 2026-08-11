@@ -110,13 +110,26 @@ pub fn Operator::stat(
 }
 
 ///|
-/// Read an entire path into one owned Bytes value.
+/// Read a path or byte range into one owned Bytes value.
 pub fn Operator::read(
   self : Operator,
   path : StringView,
+  range? : ByteRange = Full,
+  version? : StringView,
+  if_match? : StringView,
+  if_none_match? : StringView,
 ) -> Bytes raise OpenDalError {
   let path = path.to_owned()
-  let result = native_operator_read(self, path)
+  let (range_kind, range_offset, range_length) = range.native_parts(path)
+  let (has_version, version) = normalize_optional_text(version)
+  let (has_if_match, if_match) = normalize_optional_text(if_match)
+  let (has_if_none_match, if_none_match) = normalize_optional_text(
+    if_none_match,
+  )
+  let result = native_operator_read(
+    self, path, range_kind, range_offset, range_length, has_version, version, has_if_match,
+    if_match, has_if_none_match, if_none_match,
+  )
   if native_result_status(result) != 0U {
     raise error_from_native_result(result, Read, Some(path), None)
   }
@@ -135,9 +148,47 @@ pub fn Operator::write(
   self : Operator,
   path : StringView,
   data : BytesView,
+  append? : Bool = false,
+  content_type? : StringView,
+  content_disposition? : StringView,
+  content_encoding? : StringView,
+  cache_control? : StringView,
+  if_match? : StringView,
+  if_none_match? : StringView,
 ) -> Metadata raise OpenDalError {
   let path = path.to_owned()
-  let result = native_operator_write(self, path, data.to_owned())
+  let (has_content_type, content_type) = normalize_optional_text(content_type)
+  let (has_content_disposition, content_disposition) = normalize_optional_text(
+    content_disposition,
+  )
+  let (has_content_encoding, content_encoding) = normalize_optional_text(
+    content_encoding,
+  )
+  let (has_cache_control, cache_control) = normalize_optional_text(
+    cache_control,
+  )
+  let (has_if_match, if_match) = normalize_optional_text(if_match)
+  let (has_if_none_match, if_none_match) = normalize_optional_text(
+    if_none_match,
+  )
+  let result = native_operator_write(
+    self,
+    path,
+    data.to_owned(),
+    append,
+    has_content_type,
+    content_type,
+    has_content_disposition,
+    content_disposition,
+    has_content_encoding,
+    content_encoding,
+    has_cache_control,
+    cache_control,
+    has_if_match,
+    if_match,
+    has_if_none_match,
+    if_none_match,
+  )
   if native_result_status(result) != 0U {
     raise error_from_native_result(result, Write, Some(path), None)
   }
@@ -178,6 +229,65 @@ pub fn Operator::delete(
   )
   if native_result_status(result) != 0U {
     raise error_from_native_result(result, Delete, Some(path), None)
+  }
+  native_result_release(result)
+}
+
+///|
+/// Copy one object with the backend's native copy operation and return the
+/// destination metadata. This is never emulated with read plus write.
+pub fn Operator::copy(
+  self : Operator,
+  source : StringView,
+  destination : StringView,
+) -> Metadata raise OpenDalError {
+  let source = source.to_owned()
+  let destination = destination.to_owned()
+  let result = native_operator_copy(self, source, destination)
+  if native_result_status(result) != 0U {
+    raise error_from_native_result(
+      result,
+      Copy,
+      Some(source),
+      Some(destination),
+    )
+  }
+  let metadata = native_result_take_metadata(result)
+  if native_result_status(result) != 0U {
+    raise error_from_native_result(
+      result,
+      Copy,
+      Some(source),
+      Some(destination),
+    )
+  }
+  native_result_release(result)
+  metadata_from_native(
+    metadata,
+    Copy,
+    Some(source),
+    destination_path=destination,
+  )
+}
+
+///|
+/// Rename one object with the backend's native rename operation. This is never
+/// emulated with copy plus delete.
+pub fn Operator::rename(
+  self : Operator,
+  source : StringView,
+  destination : StringView,
+) -> Unit raise OpenDalError {
+  let source = source.to_owned()
+  let destination = destination.to_owned()
+  let result = native_operator_rename(self, source, destination)
+  if native_result_status(result) != 0U {
+    raise error_from_native_result(
+      result,
+      Rename,
+      Some(source),
+      Some(destination),
+    )
   }
   native_result_release(result)
 }

@@ -1,15 +1,14 @@
 # Public API Semantics
 
-Status: Phase 3 design proposal; only implemented operations are published
+Status: Phase 3 complete
 
 This document defines the intended MoonBit-facing behavior of the synchronous
 OpenDAL binding. It deliberately avoids fixing the native ABI or implementation
 layout; those are Phase 1 concerns and must implement this contract.
 
-This document includes forward-looking Reader, Writer, copy, and rename
-semantics. Those sections are proposals until their complete MoonBit, C, and
-Rust slices land. The generated `pkg.generated.mbti` is the authoritative
-current public surface and contains implemented operations only.
+This document defines the implemented synchronous Reader, Writer, copy, and
+rename semantics. The generated `pkg.generated.mbti` is the authoritative
+current public surface.
 
 ## Design stance
 
@@ -34,10 +33,10 @@ It is not a transliteration of either Rust or OCaml:
 
 | Category | Types | Contract |
 |---|---|---|
-| Native resources | `Operator`, `Lister`, and proposed `Reader`/`Writer` | Opaque and impossible for callers to fabricate |
+| Native resources | `Operator`, `Lister`, `Reader`, and `Writer` | Opaque and impossible for callers to fabricate |
 | Read-only snapshots | `Metadata`, `Entry`, `ErrorInfo`, `OperatorInfo`, `Timestamp` | Fields are readable but values are produced by the binding |
 | Read-only algebraic outputs | `EntryMode`, `ErrorKind`, `ErrorStatus`, `Operation` | Callers can inspect and pattern-match values but cannot fabricate them |
-| Proposed algebraic input | `ByteRange` | Uses `pub(all)` when Reader lands so callers can construct labelled ranges |
+| Algebraic input | `ByteRange` | Uses `pub(all)` so callers can construct labelled ranges |
 | Extensible query object | `Capability` | Opaque effective-capability snapshot with getter methods so new capabilities can be added compatibly |
 
 `Operator` is logically immutable and shareable. `Lister` and `Writer` are
@@ -132,14 +131,13 @@ The core synchronous methods are:
 ```moonbit
 op.exists(path) -> Bool raise OpenDalError
 op.stat(path, version?, if_match?, if_none_match?) -> Metadata raise OpenDalError
-op.read(path) -> Bytes raise OpenDalError
-op.write(path, data : BytesView) -> Metadata raise OpenDalError
+op.read(path, range?, version?, if_match?, if_none_match?) -> Bytes raise OpenDalError
+op.write(path, data : BytesView, append?, content_type?, content_disposition?, content_encoding?, cache_control?, if_match?, if_none_match?) -> Metadata raise OpenDalError
 op.create_dir(path) -> Unit raise OpenDalError
 op.delete(path, version?, recursive?) -> Unit raise OpenDalError
+op.copy(source, destination) -> Metadata raise OpenDalError
+op.rename(source, destination) -> Unit raise OpenDalError
 ```
-
-Copy, rename, read options, and write options are not published until their
-complete Phase 3 slices are available.
 
 Important guarantees and non-guarantees:
 
@@ -153,6 +151,8 @@ Important guarantees and non-guarantees:
 - `copy` and `rename` retain upstream semantics. The binding never implements
   rename as copy plus delete because that would change atomicity and failure
   behavior.
+- `copy` returns the metadata supplied by the backend. It can be partial; use
+  `stat(destination)` when complete destination metadata is required.
 - unsupported operations raise `Unsupported`; they are not silently emulated.
 
 ## Listing
@@ -184,10 +184,10 @@ The first API does not coerce `Lister` into `Iter[Entry]`. MoonBit's ordinary
 iterator step does not naturally carry checked I/O errors, and hiding errors in
 an iterator would weaken the contract.
 
-## Proposed Reader
+## Reader
 
-The Phase 3 Reader will follow OpenDAL's random-access Reader rather than the
-cursor-bearing C `StdReader` adapter:
+The Reader follows OpenDAL's random-access Reader rather than the cursor-bearing
+C `StdReader` adapter:
 
 ```moonbit
 let reader = op.open_reader(path, if_match="etag")
@@ -219,7 +219,7 @@ The same checked-allocation rule applies to native output strings and
 materialized entry arrays. The wrapper releases any partially converted native
 snapshots before raising `BufferTooLarge`.
 
-## Proposed Writer
+## Writer
 
 ```moonbit
 let writer = op.open_writer(path, content_type="application/octet-stream")
@@ -282,7 +282,7 @@ must not claim a stricter universal policy unless it implements and documents
 one.
 
 Reader, Writer, copy, rename, suffix-read, and append capability accessors are
-added only with their callable MoonBit operations.
+available with their corresponding MoonBit operations.
 
 ## Retry policy
 

@@ -142,7 +142,9 @@ builds its native archive in isolation, and runs the downstream consumer.
 
 ### Phase 3: Streaming and operation options
 
-Add:
+Status: complete.
+
+Delivered:
 
 - random-access `Reader` range reads without a hidden cursor;
 - `Writer` with explicit `open/closed/failed` state;
@@ -152,10 +154,54 @@ Add:
 
 ### Phase 4: Distribution and service profiles
 
-- Decide and document source-build versus prebuilt-artifact installation.
-- Publish checksummed native artifacts for selected OS/architecture pairs.
-- Keep service features explicit and grouped into supported profiles.
-- Establish the minimum MoonBit and Rust toolchains.
+Status: implementation complete; public activation awaits the `v0.1.0`
+release after this stack merges.
+
+The distribution contract is now fixed: `moon add`, a normal package import,
+and the native target must be sufficient for consumers. Rust, a source
+checkout, `LIBRARY_PATH`, and consumer-owned linker flags are not part of the
+installation contract.
+
+The implementation order is:
+
+1. build reproducible `local` profile artifacts for Apple silicon macOS and
+   x86-64 glibc Linux;
+2. install the selected artifact through Moon's prebuild configuration hook,
+   with pinned digests and a content-addressed shared cache;
+3. prove cold-cache, hot-cache/offline, corruption, and concurrent-install
+   behavior;
+4. run a packaged downstream consumer without Cargo, Rust, manual linker
+   settings, or repository files;
+5. publish the artifacts and package from the same version tag.
+
+The `local` profile contains the memory and filesystem services. The initial
+compatibility floors are macOS 11.0 and glibc 2.35. The minimum maintainer
+toolchains are MoonBit `0.10.6+80dc50f24` and Rust `1.91.0`; the temporary
+prebuild configuration mechanism requires Node.js 18 or newer at consumer
+build time. See `docs/design/native-distribution.md` for the artifact, trust,
+cache, and release contracts.
+
+Delivered:
+
+- deterministic target-native archives whose manifests record the exact ABI,
+  dependency, compatibility, integrity, and system-link contracts;
+- Apple silicon macOS and x86-64 glibc Linux release builders;
+- a host-selecting Moon configuration script with pinned SHA-256 values,
+  atomic installation, concurrent locking, corruption recovery, and offline
+  hot-cache behavior;
+- exact local-archive overrides for maintainer tests without consumer-facing
+  linker configuration;
+- a published package surface without Cargo manifests, Rust sources, or
+  maintainer tooling;
+- clean downstream debug and release gates without Cargo, Rust homes,
+  `LIBRARY_PATH`, manual link flags, or repository source;
+- one tag pipeline that publishes verified GitHub assets, publishes the same
+  version to mooncakes.io, and executes the registry package afterward.
+
+The remaining action is operational rather than a code-design phase: configure
+the mooncakes credential secret, merge the stack, and push `v0.1.0`. Until the
+tag workflow publishes both registries, the release URLs pinned for `0.1.0`
+intentionally do not exist.
 
 The initial platform target is macOS and Linux. Windows support requires a
 separate linker and artifact-distribution decision.
@@ -189,4 +235,3 @@ cross-thread callbacks, and exactly-once completion.
   conditional-read semantics across backends.
 - A reliable public Writer abort operation, which requires an async-writer
   implementation in the Rust shim rather than OpenDAL's blocking Writer.
-- Source-build and prebuilt-library installation contract.

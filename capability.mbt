@@ -18,9 +18,21 @@ pub fn Capability::can_read(self : Capability) -> Bool {
 }
 
 ///|
+/// Return whether suffix ranges are supported for reads through this binding.
+pub fn Capability::can_read_suffix(self : Capability) -> Bool {
+  self.has(8)
+}
+
+///|
 /// Return whether whole-object writes are available through this binding.
 pub fn Capability::can_write(self : Capability) -> Bool {
   self.has(2)
+}
+
+///|
+/// Return whether append mode is supported for writes through this binding.
+pub fn Capability::can_write_append(self : Capability) -> Bool {
+  self.has(9)
 }
 
 ///|
@@ -33,6 +45,18 @@ pub fn Capability::can_create_dir(self : Capability) -> Bool {
 /// Return whether deletion is available through this binding.
 pub fn Capability::can_delete(self : Capability) -> Bool {
   self.has(4)
+}
+
+///|
+/// Return whether server-side copy is available through this binding.
+pub fn Capability::can_copy(self : Capability) -> Bool {
+  self.has(6)
+}
+
+///|
+/// Return whether native rename is available through this binding.
+pub fn Capability::can_rename(self : Capability) -> Bool {
+  self.has(7)
 }
 
 ///|

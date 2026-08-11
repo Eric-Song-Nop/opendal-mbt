@@ -1,0 +1,173 @@
+name: Native release artifacts
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/native-release.yml
+      - build.js
+      - "*.mbt"
+      - Cargo.lock
+      - Cargo.toml
+      - integration/consumer/**
+      - moon.mod
+      - moon.pkg
+      - native/distribution-profile.json
+      - native/artifacts.json
+      - native/include/opendal_mbt.h
+      - native/rust/**
+      - rust-toolchain.toml
+      - scripts/check-packaged-consumer.sh
+      - scripts/package-native-artifact.py
+      - scripts/prepare-test-native-cache.js
+      - scripts/test-package-native-artifact.py
+  push:
+    tags:
+      - v*
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  MOONBIT_VERSION: 0.10.6+80dc50f24
+
+jobs:
+  artifact:
+    name: ${{ matrix.rust_target }} artifact
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            rust_target: aarch64-apple-darwin
+            macos_deployment_target: "11.0"
+          - os: ubuntu-22.04
+            rust_target: x86_64-unknown-linux-gnu
+            macos_deployment_target: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust toolchain
+        run: rustup show active-toolchain
+      - name: Install MoonBit
+        run: |
+          curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash -s "$MOONBIT_VERSION"
+          echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
+      - name: Test artifact packager
+        run: python3 scripts/test-package-native-artifact.py
+      - name: Build release static library
+        env:
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos_deployment_target }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p target/native-release
+          CARGO_TERM_COLOR=never cargo rustc \
+            -p opendal-mbt-native --locked --release \
+            -- --print native-static-libs 2>&1 | \
+            tee target/native-release/native-static-libs.log
+          grep -q 'native-static-libs:' \
+            target/native-release/native-static-libs.log
+          actual_target=$(rustc -vV | sed -n 's/^host: //p')
+          test "$actual_target" = '${{ matrix.rust_target }}'
+      - name: Package release artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/package-native-artifact.py \
+            --repo-root . \
+            --library target/release/libopendal_mbt_native.a \
+            --native-static-libs-log \
+              target/native-release/native-static-libs.log \
+            --rust-target '${{ matrix.rust_target }}' \
+            --output-dir target/native-dist \
+            --verify-pinned native/artifacts.json | \
+            tee target/native-release/package-result.json
+      - name: Test clean packaged Moon consumer
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive=$(find target/native-dist -name '*.tar.gz' -type f)
+          test -n "$archive"
+          make packaged-consumer NATIVE_ARTIFACT="$archive"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.rust_target }}
+          path: target/native-dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish native release assets
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: artifact
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
+          path: target/native-dist
+          merge-multiple: true
+      - name: Verify release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' moon.mod)
+          test "$GITHUB_REF_NAME" = "v$version"
+      - name: Install MoonBit
+        run: |
+          curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash -s "$MOONBIT_VERSION"
+          echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
+      - name: Configure Moon package credentials
+        env:
+          MOONCAKES_CREDENTIALS_JSON: ${{ secrets.MOONCAKES_CREDENTIALS_JSON }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$MOONCAKES_CREDENTIALS_JSON"
+          mkdir -p "$HOME/.moon"
+          umask 077
+          printf '%s' "$MOONCAKES_CREDENTIALS_JSON" > \
+            "$HOME/.moon/credentials.json"
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          assets=(
+            target/native-dist/*.tar.gz
+            target/native-dist/*.tar.gz.sha256
+            target/native-dist/*.manifest.json
+          )
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
+              --generate-notes \
+              --title "opendal-mbt $GITHUB_REF_NAME"
+          fi
+      - name: Publish Moon package
+        run: moon publish --frozen
+      - name: Verify the published package from a clean registry consumer
+        shell: bash
+        run: |
+          set -euo pipefail
+          consumer=target/published-consumer
+          mkdir -p "$consumer"
+          cp integration/consumer/moon.mod "$consumer/moon.mod"
+          cp integration/consumer/moon.pkg "$consumer/moon.pkg"
+          cp integration/consumer/consumer_test.mbt "$consumer/consumer_test.mbt"
+          cd "$consumer"
+          for attempt in 1 2 3 4 5; do
+            if moon update && moon test --target native \
+              --warn-list '-68+73' --deny-warn; then
+              exit 0
+            fi
+            moon clean
+            sleep 10
+          done
+          exit 1

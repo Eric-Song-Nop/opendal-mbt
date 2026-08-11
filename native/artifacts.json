@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "artifacts": {
+    "darwin-arm64": {
+      "artifact": "opendal-mbt-0.1.0-r1-local-aarch64-apple-darwin",
+      "artifact_revision": "r1",
+      "binding_version": "0.1.0",
+      "abi_version": {
+        "major": 1,
+        "minor": 0,
+        "patch": 0
+      },
+      "opendal_version": "0.58.1",
+      "rust_version": "1.91",
+      "service_profile": "local",
+      "services": [
+        "memory",
+        "fs"
+      ],
+      "rust_features": [
+        "blocking",
+        "services-fs"
+      ],
+      "rust_target": "aarch64-apple-darwin",
+      "host_key": "darwin-arm64",
+      "minimum_macos_version": "11.0",
+      "static_library": "lib/libopendal_mbt_native.a",
+      "static_library_size": 26307544,
+      "static_library_sha256": "82052652b5f523683e2d2102c4bfb24a985eee12f6eeb10650f2a4f23963707b",
+      "system_link_flags": [
+        "-liconv",
+        "-lSystem",
+        "-lc",
+        "-lm"
+      ],
+      "archive_name": "opendal-mbt-0.1.0-r1-local-aarch64-apple-darwin.tar.gz",
+      "archive_size": 8953940,
+      "archive_sha256": "33b2e516bc7a50b0e036fea6a6fa654f2eed9e72e428383037add63c9b59bc9d",
+      "url": "https://github.com/Eric-Song-Nop/opendal-mbt/releases/download/v0.1.0/opendal-mbt-0.1.0-r1-local-aarch64-apple-darwin.tar.gz"
+    },
+    "linux-x64": {
+      "artifact": "opendal-mbt-0.1.0-r1-local-x86_64-unknown-linux-gnu",
+      "artifact_revision": "r1",
+      "binding_version": "0.1.0",
+      "abi_version": {
+        "major": 1,
+        "minor": 0,
+        "patch": 0
+      },
+      "opendal_version": "0.58.1",
+      "rust_version": "1.91",
+      "service_profile": "local",
+      "services": [
+        "memory",
+        "fs"
+      ],
+      "rust_features": [
+        "blocking",
+        "services-fs"
+      ],
+      "rust_target": "x86_64-unknown-linux-gnu",
+      "host_key": "linux-x64",
+      "minimum_glibc_version": "2.35",
+      "static_library": "lib/libopendal_mbt_native.a",
+      "static_library_size": 35358054,
+      "static_library_sha256": "dcd3ccccce0545441d3db2e9cd9448273acebe519de71db3fdb155ac56410bce",
+      "system_link_flags": [
+        "-lc",
+        "-lm",
+        "-lrt",
+        "-lpthread",
+        "-lgcc_s",
+        "-lutil",
+        "-lrt",
+        "-lpthread",
+        "-lm",
+        "-ldl",
+        "-lc"
+      ],
+      "archive_name": "opendal-mbt-0.1.0-r1-local-x86_64-unknown-linux-gnu.tar.gz",
+      "archive_size": 9479922,
+      "archive_sha256": "625d0d956b09cf1aae0959f90ac0e67751b63aedd9426ba195b5c3b1d2fff8ed",
+      "url": "https://github.com/Eric-Song-Nop/opendal-mbt/releases/download/v0.1.0/opendal-mbt-0.1.0-r1-local-x86_64-unknown-linux-gnu.tar.gz"
+    }
+  }
+}

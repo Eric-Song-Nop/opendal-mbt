@@ -48,6 +48,23 @@ static TEST_READER_READ_TARGET: std::sync::atomic::AtomicUsize =
 static TEST_READER_READ_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
 #[cfg(test)]
+const TEST_WRITER_WRITE_ERROR: u8 = 1;
+#[cfg(test)]
+const TEST_WRITER_WRITE_PANIC: u8 = 2;
+#[cfg(test)]
+const TEST_WRITER_CLOSE_ERROR: u8 = 3;
+#[cfg(test)]
+const TEST_WRITER_CLOSE_PANIC: u8 = 4;
+#[cfg(test)]
+static TEST_WRITER_CALL_TARGET: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+static TEST_WRITER_CALL_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+#[cfg(test)]
+static TEST_WRITER_NATIVE_CLOSES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
 fn install_lister_next_test_mode(lister: *mut ListerV1, mode: u8) {
     use std::sync::atomic::Ordering;
 
@@ -88,6 +105,29 @@ fn take_reader_read_test_mode(reader: &ReaderV1) -> u8 {
         .is_ok()
     {
         TEST_READER_READ_MODE.swap(0, Ordering::Relaxed)
+    } else {
+        0
+    }
+}
+
+#[cfg(test)]
+fn install_writer_call_test_mode(writer: *mut WriterV1, mode: u8) {
+    use std::sync::atomic::Ordering;
+
+    TEST_WRITER_CALL_MODE.store(mode, Ordering::Relaxed);
+    TEST_WRITER_CALL_TARGET.store(writer.addr(), Ordering::Release);
+}
+
+#[cfg(test)]
+fn take_writer_call_test_mode(writer: &WriterV1) -> u8 {
+    use std::sync::atomic::Ordering;
+
+    let address = ptr::from_ref(writer).addr();
+    if TEST_WRITER_CALL_TARGET
+        .compare_exchange(address, 0, Ordering::Acquire, Ordering::Relaxed)
+        .is_ok()
+    {
+        TEST_WRITER_CALL_MODE.swap(0, Ordering::Relaxed)
     } else {
         0
     }
@@ -821,6 +861,51 @@ fn close_reader_state(reader: &ReaderV1) {
     if let Some(inner) = open {
         drop_blocking_reader_contained(inner);
     }
+}
+
+fn drop_blocking_writer_contained(writer: opendal::blocking::Writer) {
+    let _ = catch_unwind(AssertUnwindSafe(|| drop(writer)));
+}
+
+fn fail_writer_state(writer: &WriterV1) {
+    let open = {
+        let mut state = match writer.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let previous = std::mem::replace(&mut *state, WriterStateV1::Failed);
+        writer.state.clear_poison();
+        match previous {
+            WriterStateV1::Open(inner) => Some(inner),
+            WriterStateV1::Failed | WriterStateV1::Closed => None,
+        }
+    };
+    if let Some(inner) = open {
+        drop_blocking_writer_contained(inner);
+    }
+}
+
+fn writer_lock_failure(writer: &WriterV1) -> CallFailure {
+    let open = {
+        let mut state = match writer.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let previous = std::mem::replace(&mut *state, WriterStateV1::Failed);
+        writer.state.clear_poison();
+        match previous {
+            WriterStateV1::Open(inner) => Some(inner),
+            WriterStateV1::Failed | WriterStateV1::Closed => None,
+        }
+    };
+    if let Some(inner) = open {
+        drop_blocking_writer_contained(inner);
+    }
+    binding_error(
+        ERROR_UNEXPECTED,
+        "Unexpected",
+        "writer state lock was poisoned",
+    )
 }
 
 fn checked_read_buffer(
@@ -1918,6 +2003,241 @@ unsafe extern "C" fn reader_free(reader: *mut ReaderV1) {
     }));
 }
 
+unsafe extern "C" fn operator_writer(
+    operator: *mut OperatorV1,
+    path: *const BytesViewV1,
+    options: *const WriteOptionsV1,
+    out_writer: *mut *mut WriterV1,
+    out_error: *mut *mut ErrorV1,
+) -> Status {
+    catch_status(|| {
+        // SAFETY: outputs are validated and cleared before input/work.
+        let outputs = [
+            unsafe { clear_required_output(out_writer, ptr::null_mut()) },
+            unsafe { clear_error_output(out_error) },
+        ];
+        if let Err(failure) = combine_output_validation(outputs) {
+            return unsafe { finish_failure(failure, out_error) };
+        }
+        let result = (|| -> CallResult<Box<WriterV1>> {
+            // SAFETY: handle/text/options are validated and copied as needed.
+            let operator = unsafe { borrow_required(operator.cast_const())? };
+            let path = unsafe { read_text(path, "path")? };
+            let options = unsafe { parse_write_options(options)? };
+            let writer = operator
+                .inner
+                .writer_options(&path, options)
+                .map_err(opendal_error)?;
+            Ok(Box::new(WriterV1 {
+                state: Mutex::new(WriterStateV1::Open(writer)),
+            }))
+        })();
+        match result {
+            Ok(writer) => {
+                // SAFETY: output was validated above.
+                unsafe { out_writer.write(Box::into_raw(writer)) };
+                STATUS_OK
+            }
+            Err(failure) => unsafe { finish_failure(failure, out_error) },
+        }
+    })
+}
+
+unsafe extern "C" fn writer_write(
+    writer: *mut WriterV1,
+    data: *const BytesViewV1,
+    out_error: *mut *mut ErrorV1,
+) -> Status {
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY: optional error output is cleared before input/work.
+        if let Err(failure) = unsafe { clear_error_output(out_error) } {
+            return unsafe { finish_failure(failure, out_error) };
+        }
+        // SAFETY: opaque handle validity is a caller lifetime obligation.
+        let writer = match unsafe { borrow_required(writer.cast_const()) } {
+            Ok(writer) => writer,
+            Err(failure) => return unsafe { finish_failure(failure, out_error) },
+        };
+        // SAFETY: the binary carrier is copied before entering native state.
+        let data = match unsafe { read_binary(data) } {
+            Ok(data) => data,
+            Err(failure) => return unsafe { finish_failure(failure, out_error) },
+        };
+        #[cfg(test)]
+        let test_mode = take_writer_call_test_mode(writer);
+        let mut state = match writer.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => {
+                drop(poisoned);
+                let failure = writer_lock_failure(writer);
+                return unsafe { finish_failure(failure, out_error) };
+            }
+        };
+        let current = std::mem::replace(&mut *state, WriterStateV1::Failed);
+        let mut inner = match current {
+            WriterStateV1::Open(inner) => inner,
+            terminal @ (WriterStateV1::Failed | WriterStateV1::Closed) => {
+                *state = terminal;
+                return unsafe {
+                    finish_failure(
+                        binding_error(ERROR_RESOURCE_CLOSED, "ResourceClosed", "writer is closed"),
+                        out_error,
+                    )
+                };
+            }
+        };
+        // State is already Failed while fallible or panicking native work runs.
+        let step = catch_unwind(AssertUnwindSafe(|| -> CallResult<()> {
+            #[cfg(test)]
+            match test_mode {
+                TEST_WRITER_WRITE_ERROR => {
+                    return Err(binding_error(
+                        ERROR_UNEXPECTED,
+                        "Unexpected",
+                        "injected writer write error",
+                    ));
+                }
+                TEST_WRITER_WRITE_PANIC => panic!("injected writer write panic"),
+                _ => {}
+            }
+            inner.write(data).map_err(opendal_error)
+        }));
+        match step {
+            Ok(Ok(())) => {
+                *state = WriterStateV1::Open(inner);
+                STATUS_OK
+            }
+            Ok(Err(failure)) => {
+                drop(state);
+                drop_blocking_writer_contained(inner);
+                unsafe { finish_failure(failure, out_error) }
+            }
+            Err(_) => {
+                drop(state);
+                drop_blocking_writer_contained(inner);
+                STATUS_PANIC
+            }
+        }
+    }));
+    match outcome {
+        Ok(status) => status,
+        Err(_) => {
+            if !writer.is_null() && is_aligned(writer) {
+                // SAFETY: non-null live handle validity remains the caller's obligation.
+                fail_writer_state(unsafe { &*writer });
+            }
+            STATUS_PANIC
+        }
+    }
+}
+
+unsafe extern "C" fn writer_close(
+    writer: *mut WriterV1,
+    out_metadata: *mut *mut MetadataV1,
+    out_error: *mut *mut ErrorV1,
+) -> Status {
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY: outputs are validated and cleared before the handle is inspected.
+        let outputs = [
+            unsafe { clear_required_output(out_metadata, ptr::null_mut()) },
+            unsafe { clear_error_output(out_error) },
+        ];
+        if let Err(failure) = combine_output_validation(outputs) {
+            return unsafe { finish_failure(failure, out_error) };
+        }
+        // SAFETY: opaque handle validity is a caller lifetime obligation.
+        let writer = match unsafe { borrow_required(writer.cast_const()) } {
+            Ok(writer) => writer,
+            Err(failure) => return unsafe { finish_failure(failure, out_error) },
+        };
+        #[cfg(test)]
+        let test_mode = take_writer_call_test_mode(writer);
+        let mut state = match writer.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => {
+                drop(poisoned);
+                let failure = writer_lock_failure(writer);
+                return unsafe { finish_failure(failure, out_error) };
+            }
+        };
+        let current = std::mem::replace(&mut *state, WriterStateV1::Failed);
+        let mut inner = match current {
+            WriterStateV1::Open(inner) => inner,
+            terminal @ (WriterStateV1::Failed | WriterStateV1::Closed) => {
+                *state = terminal;
+                return unsafe {
+                    finish_failure(
+                        binding_error(ERROR_RESOURCE_CLOSED, "ResourceClosed", "writer is closed"),
+                        out_error,
+                    )
+                };
+            }
+        };
+        // The first close attempt is terminal before native close begins.
+        let step = catch_unwind(AssertUnwindSafe(|| -> CallResult<Box<MetadataV1>> {
+            #[cfg(test)]
+            match test_mode {
+                TEST_WRITER_CLOSE_ERROR => {
+                    return Err(binding_error(
+                        ERROR_UNEXPECTED,
+                        "Unexpected",
+                        "injected writer close error",
+                    ));
+                }
+                TEST_WRITER_CLOSE_PANIC => panic!("injected writer close panic"),
+                _ => {}
+            }
+            #[cfg(test)]
+            TEST_WRITER_NATIVE_CLOSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let metadata = inner.close().map_err(opendal_error)?;
+            Ok(Box::new(checked_metadata(metadata)?))
+        }));
+        match step {
+            Ok(Ok(metadata)) => {
+                *state = WriterStateV1::Closed;
+                drop(state);
+                drop_blocking_writer_contained(inner);
+                // SAFETY: output was validated above.
+                unsafe { out_metadata.write(Box::into_raw(metadata)) };
+                STATUS_OK
+            }
+            Ok(Err(failure)) => {
+                drop(state);
+                drop_blocking_writer_contained(inner);
+                unsafe { finish_failure(failure, out_error) }
+            }
+            Err(_) => {
+                drop(state);
+                drop_blocking_writer_contained(inner);
+                STATUS_PANIC
+            }
+        }
+    }));
+    match outcome {
+        Ok(status) => status,
+        Err(_) => {
+            if !writer.is_null() && is_aligned(writer) {
+                // SAFETY: non-null live handle validity remains the caller's obligation.
+                fail_writer_state(unsafe { &*writer });
+            }
+            STATUS_PANIC
+        }
+    }
+}
+
+unsafe extern "C" fn writer_free(writer: *mut WriterV1) {
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        if writer.is_null() {
+            return;
+        }
+        // SAFETY: every non-null handle is uniquely owned and freed once.
+        let writer = unsafe { Box::from_raw(writer) };
+        // This only drops the native Writer; it never invokes close/finish.
+        fail_writer_state(&writer);
+        drop(writer);
+    }));
+}
+
 fn stage_api() -> Option<ApiV1> {
     Some(ApiV1 {
         struct_size: 0,
@@ -1926,7 +2246,11 @@ fn stage_api() -> Option<ApiV1> {
         library_minor: ABI_MINOR,
         library_patch: ABI_PATCH,
         reserved0: 0,
-        feature_bits: FEATURE_BASE | FEATURE_WHOLE_OBJECT | FEATURE_LISTING | FEATURE_RANDOM_READER,
+        feature_bits: FEATURE_BASE
+            | FEATURE_WHOLE_OBJECT
+            | FEATURE_LISTING
+            | FEATURE_RANDOM_READER
+            | FEATURE_CHUNKED_WRITER,
         max_output_bytes: MAX_OUTPUT_BYTES,
         library_info: Some(library_info),
         error_view: Some(error_view),
@@ -1960,10 +2284,10 @@ fn stage_api() -> Option<ApiV1> {
         reader_read: Some(reader_read),
         reader_close: Some(reader_close),
         reader_free: Some(reader_free),
-        operator_writer: None,
-        writer_write: None,
-        writer_close: None,
-        writer_free: None,
+        operator_writer: Some(operator_writer),
+        writer_write: Some(writer_write),
+        writer_close: Some(writer_close),
+        writer_free: Some(writer_free),
     })
 }
 
@@ -2029,7 +2353,10 @@ unsafe fn install_api(base: *mut u8, caller_size: usize, staged: &ApiV1) {
     install_field!(reader_read);
     install_field!(reader_close);
     install_field!(reader_free);
-    // The disabled Writer group is intentionally left zero by the bounded clear.
+    install_field!(operator_writer);
+    install_field!(writer_write);
+    install_field!(writer_close);
+    install_field!(writer_free);
 }
 
 /// Negotiate the stable v1 function table.
@@ -2113,6 +2440,37 @@ mod tests {
                 &scheme,
                 ptr::null(),
                 0,
+                &mut operator,
+                &mut info,
+                &mut error,
+            )
+        };
+        assert_eq!(status, STATUS_OK);
+        assert!(!operator.is_null());
+        assert!(!info.is_null());
+        assert!(error.is_null());
+        (operator, info)
+    }
+
+    fn filesystem_operator(
+        api: &ApiV1,
+        root: &std::path::Path,
+    ) -> (*mut OperatorV1, *mut OperatorInfoV1) {
+        let mut operator = ptr::null_mut();
+        let mut info = ptr::null_mut();
+        let mut error = ptr::null_mut();
+        let scheme = bytes(b"fs");
+        let root = root.to_string_lossy();
+        let config = [KvV1 {
+            key: bytes(b"root"),
+            value: bytes(root.as_bytes()),
+        }];
+        // SAFETY: all views, the config element, and output slots are live.
+        let status = unsafe {
+            api.operator_new.expect("BASE constructor is installed")(
+                &scheme,
+                config.as_ptr(),
+                1,
                 &mut operator,
                 &mut info,
                 &mut error,
@@ -2363,6 +2721,112 @@ mod tests {
         reader
     }
 
+    fn memory_writer(
+        api: &ApiV1,
+        operator: *mut OperatorV1,
+        path: &[u8],
+        options: *const WriteOptionsV1,
+    ) -> *mut WriterV1 {
+        let path = bytes(path);
+        let mut writer = NonNull::<WriterV1>::dangling().as_ptr();
+        let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: all input carriers and output slots are valid for this call.
+        let status = unsafe {
+            api.operator_writer
+                .expect("CHUNKED_WRITER constructor is installed")(
+                operator,
+                &path,
+                options,
+                &mut writer,
+                &mut error,
+            )
+        };
+        assert_eq!(status, STATUS_OK);
+        assert!(!writer.is_null());
+        assert!(error.is_null());
+        writer
+    }
+
+    fn write_writer_chunk(api: &ApiV1, writer: *mut WriterV1, data: &[u8]) {
+        let data = bytes(data);
+        let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the writer, input carrier, and error slot remain live for the call.
+        let status = unsafe {
+            api.writer_write.expect("CHUNKED_WRITER write is installed")(writer, &data, &mut error)
+        };
+        assert_eq!(status, STATUS_OK);
+        assert!(error.is_null());
+    }
+
+    fn finish_writer(api: &ApiV1, writer: *mut WriterV1) -> *mut MetadataV1 {
+        let mut metadata = NonNull::<MetadataV1>::dangling().as_ptr();
+        let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the writer and both output slots remain live for the call.
+        let status = unsafe {
+            api.writer_close.expect("CHUNKED_WRITER close is installed")(
+                writer,
+                &mut metadata,
+                &mut error,
+            )
+        };
+        assert_eq!(status, STATUS_OK);
+        assert!(!metadata.is_null());
+        assert!(error.is_null());
+        metadata
+    }
+
+    fn take_metadata_content_length(api: &ApiV1, metadata: *mut MetadataV1) -> u64 {
+        let absent = bytes(b"");
+        let mut view = MetadataViewV1 {
+            struct_size: size_of::<MetadataViewV1>() as u32,
+            struct_version: STRUCT_VERSION,
+            present_bits: 0,
+            mode: ENTRY_MODE_UNKNOWN,
+            is_current: 0,
+            is_deleted: 0,
+            reserved0: 0,
+            content_length: 0,
+            last_modified: TimestampV1::default(),
+            cache_control: absent,
+            content_disposition: absent,
+            content_encoding: absent,
+            content_md5: absent,
+            content_type: absent,
+            etag: absent,
+            version: absent,
+        };
+        // SAFETY: metadata is live and view is complete writable storage.
+        unsafe {
+            assert_eq!(
+                api.metadata_view.expect("BASE metadata view is installed")(metadata, &mut view),
+                STATUS_OK,
+            );
+            api.metadata_free.expect("BASE metadata free is installed")(metadata);
+        }
+        view.content_length
+    }
+
+    fn read_object(api: &ApiV1, operator: *mut OperatorV1, path: &[u8]) -> Vec<u8> {
+        let path = bytes(path);
+        let mut buffer = NonNull::<BufferV1>::dangling().as_ptr();
+        let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the operator, path, and output slots remain live for the call.
+        let status = unsafe {
+            api.operator_read.expect("WHOLE_OBJECT read is installed")(
+                operator,
+                &path,
+                ptr::null(),
+                MAX_OUTPUT_BYTES,
+                &mut buffer,
+                &mut error,
+            )
+        };
+        assert_eq!(status, STATUS_OK);
+        assert!(!buffer.is_null());
+        assert!(error.is_null());
+        take_buffer(api, buffer)
+    }
+
     fn byte_range(kind: u32, offset: u64, length: u64) -> ByteRangeV1 {
         ByteRangeV1 {
             struct_size: size_of::<ByteRangeV1>() as u32,
@@ -2467,7 +2931,11 @@ mod tests {
         assert_eq!(api.library_struct_size as usize, size_of::<ApiV1>());
         assert_eq!(
             api.feature_bits,
-            FEATURE_BASE | FEATURE_WHOLE_OBJECT | FEATURE_LISTING | FEATURE_RANDOM_READER,
+            FEATURE_BASE
+                | FEATURE_WHOLE_OBJECT
+                | FEATURE_LISTING
+                | FEATURE_RANDOM_READER
+                | FEATURE_CHUNKED_WRITER,
         );
         assert!(api.library_info.is_some());
         assert!(api.operator_new.is_some());
@@ -2480,7 +2948,10 @@ mod tests {
         assert!(api.reader_read.is_some());
         assert!(api.reader_close.is_some());
         assert!(api.reader_free.is_some());
-        assert!(api.operator_writer.is_none());
+        assert!(api.operator_writer.is_some());
+        assert!(api.writer_write.is_some());
+        assert!(api.writer_close.is_some());
+        assert!(api.writer_free.is_some());
     }
 
     #[test]
@@ -3719,6 +4190,420 @@ mod tests {
     }
 
     #[test]
+    fn copy_and_rename_preserve_backend_semantics_and_atomic_outputs() {
+        let api = api();
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time is after the Unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "opendal-mbt-copy-rename-{}-{unique}",
+            std::process::id(),
+        ));
+        let (operator, info) = filesystem_operator(&api, &root);
+        write_memory_object(&api, operator, b"moves/source.bin", b"copy-rename");
+        let copy = api.operator_copy.expect("WHOLE_OBJECT copy is installed");
+        let rename = api
+            .operator_rename
+            .expect("WHOLE_OBJECT rename is installed");
+        let source = bytes(b"moves/source.bin");
+        let copied = bytes(b"moves/copied.bin");
+        let renamed = bytes(b"moves/renamed.bin");
+
+        let mut metadata = NonNull::<MetadataV1>::dangling().as_ptr();
+        let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: all path carriers and output slots remain live for this call.
+        assert_eq!(
+            unsafe { copy(operator, &source, &copied, &mut metadata, &mut error) },
+            STATUS_OK,
+        );
+        assert!(error.is_null());
+        let _ = take_metadata_content_length(&api, metadata);
+        assert_eq!(
+            read_object(&api, operator, b"moves/source.bin"),
+            b"copy-rename"
+        );
+        assert_eq!(
+            read_object(&api, operator, b"moves/copied.bin"),
+            b"copy-rename"
+        );
+
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: source/destination and optional error output are valid.
+        assert_eq!(
+            unsafe { rename(operator, &copied, &renamed, &mut error) },
+            STATUS_OK,
+        );
+        assert!(error.is_null());
+        assert!(!memory_object_exists(&api, operator, b"moves/copied.bin"));
+        assert_eq!(
+            read_object(&api, operator, b"moves/renamed.bin"),
+            b"copy-rename"
+        );
+
+        let missing = bytes(b"moves/missing.bin");
+        metadata = NonNull::<MetadataV1>::dangling().as_ptr();
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: a backend NotFound must clear metadata and return one owned error.
+        assert_eq!(
+            unsafe { copy(operator, &missing, &copied, &mut metadata, &mut error) },
+            STATUS_ERROR,
+        );
+        assert!(metadata.is_null());
+        assert_eq!(take_error_kind(&api, error), ERROR_NOT_FOUND);
+
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the required metadata output is deliberately NULL.
+        assert_eq!(
+            unsafe { copy(operator, &source, &copied, ptr::null_mut(), &mut error) },
+            STATUS_ABI_MISMATCH,
+        );
+        assert!(error.is_null());
+
+        let invalid_utf8 = [0xFF];
+        let invalid_destination = bytes(&invalid_utf8);
+        metadata = NonNull::<MetadataV1>::dangling().as_ptr();
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the destination bytes are readable but intentionally invalid UTF-8.
+        assert_eq!(
+            unsafe {
+                copy(
+                    operator,
+                    &source,
+                    &invalid_destination,
+                    &mut metadata,
+                    &mut error,
+                )
+            },
+            STATUS_ERROR,
+        );
+        assert!(metadata.is_null());
+        assert_eq!(take_error_kind(&api, error), ERROR_INVALID_ARGUMENT);
+
+        // SAFETY: both constructor outputs remain uniquely owned.
+        unsafe {
+            api.operator_info_free.expect("BASE info free is installed")(info);
+            api.operator_free.expect("BASE operator free is installed")(operator);
+        }
+        std::fs::remove_dir_all(&root).expect("isolated filesystem root is removable");
+    }
+
+    #[test]
+    fn chunked_writer_commits_chunks_outlives_operator_and_is_terminal() {
+        let api = api();
+        let (operator, info) = memory_operator(&api);
+        let writer = memory_writer(&api, operator, b"writer/outlives.bin", ptr::null());
+
+        // The Writer owns all state needed after construction.
+        // SAFETY: both constructor outputs remain uniquely owned here.
+        unsafe {
+            api.operator_info_free.expect("BASE info free is installed")(info);
+            api.operator_free.expect("BASE operator free is installed")(operator);
+        }
+
+        write_writer_chunk(&api, writer, b"chunked-");
+        write_writer_chunk(&api, writer, b"writer");
+        let metadata = finish_writer(&api, writer);
+        assert_eq!(take_metadata_content_length(&api, metadata), 14);
+
+        let close = api.writer_close.expect("CHUNKED_WRITER close is installed");
+        let write = api.writer_write.expect("CHUNKED_WRITER write is installed");
+        let mut repeated_metadata = NonNull::<MetadataV1>::dangling().as_ptr();
+        let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the closed outer handle and output slots remain live.
+        assert_eq!(
+            unsafe { close(writer, &mut repeated_metadata, &mut error) },
+            STATUS_ERROR,
+        );
+        assert!(repeated_metadata.is_null());
+        assert_eq!(take_error_kind(&api, error), ERROR_RESOURCE_CLOSED);
+
+        let data = bytes(b"late");
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the closed outer handle remains live for deterministic reporting.
+        assert_eq!(unsafe { write(writer, &data, &mut error) }, STATUS_ERROR);
+        assert_eq!(take_error_kind(&api, error), ERROR_RESOURCE_CLOSED);
+
+        // SAFETY: NULL destruction is a no-op and the live handle is freed once.
+        unsafe {
+            api.writer_free.expect("CHUNKED_WRITER free is installed")(ptr::null_mut());
+            api.writer_free.expect("CHUNKED_WRITER free is installed")(writer);
+        }
+    }
+
+    #[test]
+    fn chunked_writer_serializes_same_handle_calls_and_free_never_closes() {
+        use std::sync::atomic::Ordering;
+
+        let api = api();
+        let (operator, info) = memory_operator(&api);
+        let writer = memory_writer(&api, operator, b"writer/concurrent.bin", ptr::null());
+        let writer_ref = unsafe { &*writer };
+        std::thread::scope(|scope| {
+            let left = scope.spawn(|| {
+                write_writer_chunk(&api, ptr::from_ref(writer_ref).cast_mut(), b"left");
+            });
+            let right = scope.spawn(|| {
+                write_writer_chunk(&api, ptr::from_ref(writer_ref).cast_mut(), b"right");
+            });
+            left.join().expect("left writer call did not panic");
+            right.join().expect("right writer call did not panic");
+        });
+        let metadata = finish_writer(&api, writer);
+        assert_eq!(take_metadata_content_length(&api, metadata), 9);
+        let content = read_object(&api, operator, b"writer/concurrent.bin");
+        assert!(content == b"leftright" || content == b"rightleft");
+
+        let unfinished = memory_writer(&api, operator, b"writer/unfinished.bin", ptr::null());
+        write_writer_chunk(&api, unfinished, b"not-finished");
+        let closes_before = TEST_WRITER_NATIVE_CLOSES.load(Ordering::Relaxed);
+        // SAFETY: freeing this uniquely owned open writer must only drop it.
+        unsafe { api.writer_free.expect("CHUNKED_WRITER free is installed")(unfinished) };
+        assert_eq!(
+            TEST_WRITER_NATIVE_CLOSES.load(Ordering::Relaxed),
+            closes_before,
+        );
+
+        // SAFETY: all remaining resources are uniquely owned.
+        unsafe {
+            api.writer_free.expect("CHUNKED_WRITER free is installed")(writer);
+            api.operator_info_free.expect("BASE info free is installed")(info);
+            api.operator_free.expect("BASE operator free is installed")(operator);
+        }
+    }
+
+    #[test]
+    fn chunked_writer_options_and_inputs_fail_atomically() {
+        let api = api();
+        let (operator, info) = memory_operator(&api);
+        let constructor = api
+            .operator_writer
+            .expect("CHUNKED_WRITER constructor is installed");
+        let path = bytes(b"writer/options.bin");
+        let absent = bytes(b"");
+
+        let mut required_output_error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the required writer output is NULL while the error output is valid.
+        assert_eq!(
+            unsafe {
+                constructor(
+                    operator,
+                    &path,
+                    ptr::null(),
+                    ptr::null_mut(),
+                    &mut required_output_error,
+                )
+            },
+            STATUS_ABI_MISMATCH,
+        );
+        assert!(required_output_error.is_null());
+
+        let assert_abi_mismatch = |options: &WriteOptionsV1| {
+            let mut writer = NonNull::<WriterV1>::dangling().as_ptr();
+            let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+            // SAFETY: the complete options carrier intentionally violates one invariant.
+            assert_eq!(
+                unsafe { constructor(operator, &path, options, &mut writer, &mut error) },
+                STATUS_ABI_MISMATCH,
+            );
+            assert!(writer.is_null());
+            assert!(error.is_null());
+        };
+
+        let mut options = WriteOptionsV1 {
+            struct_size: size_of::<WriteOptionsV1>() as u32,
+            struct_version: STRUCT_VERSION,
+            present_bits: 1 << 63,
+            flags: 0,
+            content_type: absent,
+            content_disposition: absent,
+            content_encoding: absent,
+            cache_control: absent,
+            if_match: absent,
+            if_none_match: absent,
+        };
+        assert_abi_mismatch(&options);
+        options.present_bits = 0;
+        options.flags = 1 << 63;
+        assert_abi_mismatch(&options);
+        options.flags = 0;
+        options.content_type = bytes(b"noncanonical-absent");
+        assert_abi_mismatch(&options);
+        options.content_type = absent;
+        options.struct_version = STRUCT_VERSION + 1;
+        assert_abi_mismatch(&options);
+
+        let invalid_utf8 = [0xFF];
+        options.struct_version = STRUCT_VERSION;
+        options.present_bits = WRITE_CONTENT_TYPE_PRESENT;
+        options.content_type = bytes(&invalid_utf8);
+        let mut invalid_writer = NonNull::<WriterV1>::dangling().as_ptr();
+        let mut invalid_error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the present text is readable but intentionally invalid UTF-8.
+        assert_eq!(
+            unsafe {
+                constructor(
+                    operator,
+                    &path,
+                    &options,
+                    &mut invalid_writer,
+                    &mut invalid_error,
+                )
+            },
+            STATUS_ERROR,
+        );
+        assert!(invalid_writer.is_null());
+        assert_eq!(take_error_kind(&api, invalid_error), ERROR_INVALID_ARGUMENT);
+
+        let writer = memory_writer(&api, operator, b"writer/input.bin", ptr::null());
+        let malformed = BytesViewV1 {
+            data: ptr::null(),
+            len: 1,
+        };
+        let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the malformed carrier is readable and should not enter Writer state.
+        assert_eq!(
+            unsafe {
+                api.writer_write.expect("CHUNKED_WRITER write is installed")(
+                    writer, &malformed, &mut error,
+                )
+            },
+            STATUS_ABI_MISMATCH,
+        );
+        assert!(error.is_null());
+        write_writer_chunk(&api, writer, b"still-open");
+        let metadata = finish_writer(&api, writer);
+        assert_eq!(take_metadata_content_length(&api, metadata), 10);
+
+        // SAFETY: all resources remain uniquely owned.
+        unsafe {
+            api.writer_free.expect("CHUNKED_WRITER free is installed")(writer);
+            api.operator_info_free.expect("BASE info free is installed")(info);
+            api.operator_free.expect("BASE operator free is installed")(operator);
+        }
+    }
+
+    #[test]
+    fn chunked_writer_error_panic_and_poison_are_terminal() {
+        let api = api();
+        let (operator, info) = memory_operator(&api);
+        let write = api.writer_write.expect("CHUNKED_WRITER write is installed");
+        let close = api.writer_close.expect("CHUNKED_WRITER close is installed");
+        let free = api.writer_free.expect("CHUNKED_WRITER free is installed");
+        let data = bytes(b"value");
+
+        let write_error = memory_writer(&api, operator, b"writer/write-error", ptr::null());
+        install_writer_call_test_mode(write_error, TEST_WRITER_WRITE_ERROR);
+        let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the test hook injects one ordinary native write failure.
+        assert_eq!(
+            unsafe { write(write_error, &data, &mut error) },
+            STATUS_ERROR,
+        );
+        assert_eq!(take_error_kind(&api, error), ERROR_UNEXPECTED);
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the failed handle remains live but terminal.
+        assert_eq!(
+            unsafe { write(write_error, &data, &mut error) },
+            STATUS_ERROR,
+        );
+        assert_eq!(take_error_kind(&api, error), ERROR_RESOURCE_CLOSED);
+
+        let write_panic = memory_writer(&api, operator, b"writer/write-panic", ptr::null());
+        install_writer_call_test_mode(write_panic, TEST_WRITER_WRITE_PANIC);
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the injected panic is contained at the ABI boundary.
+        assert_eq!(
+            unsafe { write(write_panic, &data, &mut error) },
+            STATUS_PANIC,
+        );
+        assert!(error.is_null());
+        let mut metadata = NonNull::<MetadataV1>::dangling().as_ptr();
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: a contained panic left the handle terminal.
+        assert_eq!(
+            unsafe { close(write_panic, &mut metadata, &mut error) },
+            STATUS_ERROR,
+        );
+        assert!(metadata.is_null());
+        assert_eq!(take_error_kind(&api, error), ERROR_RESOURCE_CLOSED);
+
+        let close_error = memory_writer(&api, operator, b"writer/close-error", ptr::null());
+        write_writer_chunk(&api, close_error, b"value");
+        install_writer_call_test_mode(close_error, TEST_WRITER_CLOSE_ERROR);
+        metadata = NonNull::<MetadataV1>::dangling().as_ptr();
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the first close attempt injects an ordinary failure.
+        assert_eq!(
+            unsafe { close(close_error, &mut metadata, &mut error) },
+            STATUS_ERROR,
+        );
+        assert!(metadata.is_null());
+        assert_eq!(take_error_kind(&api, error), ERROR_UNEXPECTED);
+        metadata = NonNull::<MetadataV1>::dangling().as_ptr();
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: every later close observes the terminal state.
+        assert_eq!(
+            unsafe { close(close_error, &mut metadata, &mut error) },
+            STATUS_ERROR,
+        );
+        assert_eq!(take_error_kind(&api, error), ERROR_RESOURCE_CLOSED);
+
+        let close_panic = memory_writer(&api, operator, b"writer/close-panic", ptr::null());
+        install_writer_call_test_mode(close_panic, TEST_WRITER_CLOSE_PANIC);
+        metadata = NonNull::<MetadataV1>::dangling().as_ptr();
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the injected close panic is contained and terminal.
+        assert_eq!(
+            unsafe { close(close_panic, &mut metadata, &mut error) },
+            STATUS_PANIC,
+        );
+        assert!(metadata.is_null());
+        assert!(error.is_null());
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the terminal handle rejects later writes.
+        assert_eq!(
+            unsafe { write(close_panic, &data, &mut error) },
+            STATUS_ERROR,
+        );
+        assert_eq!(take_error_kind(&api, error), ERROR_RESOURCE_CLOSED);
+
+        let poisoned_writer = memory_writer(&api, operator, b"writer/poison", ptr::null());
+        let poisoned = catch_unwind(AssertUnwindSafe(|| {
+            // SAFETY: this test owns the live handle and intentionally poisons its mutex.
+            let writer = unsafe { &*poisoned_writer };
+            let _guard = writer.state.lock().expect("fresh writer lock is healthy");
+            panic!("intentionally poison writer state");
+        }));
+        assert!(poisoned.is_err());
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: poison is reported once while transitioning to Failed.
+        assert_eq!(
+            unsafe { write(poisoned_writer, &data, &mut error) },
+            STATUS_ERROR,
+        );
+        assert_eq!(take_error_kind(&api, error), ERROR_UNEXPECTED);
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the cleared mutex now exposes the deterministic terminal state.
+        assert_eq!(
+            unsafe { write(poisoned_writer, &data, &mut error) },
+            STATUS_ERROR,
+        );
+        assert_eq!(take_error_kind(&api, error), ERROR_RESOURCE_CLOSED);
+
+        // SAFETY: all handles and constructor outputs remain uniquely owned.
+        unsafe {
+            free(write_error);
+            free(write_panic);
+            free(close_error);
+            free(close_panic);
+            free(poisoned_writer);
+            api.operator_info_free.expect("BASE info free is installed")(info);
+            api.operator_free.expect("BASE operator free is installed")(operator);
+        }
+    }
+
+    #[test]
     fn buffer_copy_is_atomic_for_sizing_errors_and_success_tail() {
         let api = api();
         let copy = api.buffer_copy.expect("BASE buffer copy is installed");
@@ -3804,5 +4689,6 @@ mod tests {
         assert_send_sync::<OperatorInfoV1>();
         assert_send_sync::<ListerV1>();
         assert_send_sync::<ReaderV1>();
+        assert_send_sync::<WriterV1>();
     }
 }

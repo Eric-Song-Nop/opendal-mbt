@@ -12,6 +12,14 @@ pub type Capability
 priv type NativeLister
 
 ///|
+/// Native random-access reader storage finalized by the C stub.
+priv type NativeReader
+
+///|
+/// Native chunked writer storage finalized by the C stub without finishing.
+priv type NativeWriter
+
+///|
 /// Temporary owned native entry snapshot.
 priv type NativeEntry
 
@@ -19,6 +27,20 @@ priv type NativeEntry
 /// Safe lister wrapper retaining the prefix used for error context.
 pub struct Lister {
   priv native : NativeLister
+  priv path : String
+}
+
+///|
+/// Safe random-access reader retaining the path used for error context.
+pub struct Reader {
+  priv native : NativeReader
+  priv path : String
+}
+
+///|
+/// Safe chunked writer retaining the path used for error context.
+pub struct Writer {
+  priv native : NativeWriter
   priv path : String
 }
 
@@ -64,19 +86,114 @@ extern "C" fn native_operator_stat(
 ) -> NativeResult = "moonbit_opendal_operator_stat"
 
 ///|
-#borrow(operator, path)
+#borrow(operator, path, version, if_match, if_none_match)
 extern "C" fn native_operator_read(
   operator : Operator,
   path : String,
+  range_kind : UInt,
+  range_offset : UInt64,
+  range_length : UInt64,
+  has_version : Bool,
+  version : String,
+  has_if_match : Bool,
+  if_match : String,
+  has_if_none_match : Bool,
+  if_none_match : String,
 ) -> NativeResult = "moonbit_opendal_operator_read"
 
 ///|
-#borrow(operator, path, data)
+#borrow(operator, path, version, if_match, if_none_match)
+extern "C" fn native_operator_reader(
+  operator : Operator,
+  path : String,
+  has_version : Bool,
+  version : String,
+  has_if_match : Bool,
+  if_match : String,
+  has_if_none_match : Bool,
+  if_none_match : String,
+) -> NativeResult = "moonbit_opendal_operator_reader"
+
+///|
+#borrow(reader)
+extern "C" fn native_reader_read(
+  reader : NativeReader,
+  range_kind : UInt,
+  range_offset : UInt64,
+  range_length : UInt64,
+) -> NativeResult = "moonbit_opendal_reader_read"
+
+///|
+#borrow(reader)
+extern "C" fn native_reader_close(reader : NativeReader) -> Unit = "moonbit_opendal_reader_close"
+
+///|
+#borrow(operator, path, data, content_type, content_disposition, content_encoding, cache_control, if_match, if_none_match)
 extern "C" fn native_operator_write(
   operator : Operator,
   path : String,
   data : Bytes,
+  append : Bool,
+  has_content_type : Bool,
+  content_type : String,
+  has_content_disposition : Bool,
+  content_disposition : String,
+  has_content_encoding : Bool,
+  content_encoding : String,
+  has_cache_control : Bool,
+  cache_control : String,
+  has_if_match : Bool,
+  if_match : String,
+  has_if_none_match : Bool,
+  if_none_match : String,
 ) -> NativeResult = "moonbit_opendal_operator_write"
+
+///|
+#borrow(operator, path, content_type, content_disposition, content_encoding, cache_control, if_match, if_none_match)
+extern "C" fn native_operator_writer(
+  operator : Operator,
+  path : String,
+  append : Bool,
+  has_content_type : Bool,
+  content_type : String,
+  has_content_disposition : Bool,
+  content_disposition : String,
+  has_content_encoding : Bool,
+  content_encoding : String,
+  has_cache_control : Bool,
+  cache_control : String,
+  has_if_match : Bool,
+  if_match : String,
+  has_if_none_match : Bool,
+  if_none_match : String,
+) -> NativeResult = "moonbit_opendal_operator_writer"
+
+///|
+#borrow(writer, data)
+extern "C" fn native_writer_write(
+  writer : NativeWriter,
+  data : Bytes,
+) -> NativeResult = "moonbit_opendal_writer_write"
+
+///|
+#borrow(writer)
+extern "C" fn native_writer_close(writer : NativeWriter) -> NativeResult = "moonbit_opendal_writer_close"
+
+///|
+#borrow(operator, source, destination)
+extern "C" fn native_operator_copy(
+  operator : Operator,
+  source : String,
+  destination : String,
+) -> NativeResult = "moonbit_opendal_operator_copy"
+
+///|
+#borrow(operator, source, destination)
+extern "C" fn native_operator_rename(
+  operator : Operator,
+  source : String,
+  destination : String,
+) -> NativeResult = "moonbit_opendal_operator_rename"
 
 ///|
 #borrow(operator, path)
@@ -142,6 +259,14 @@ extern "C" fn native_result_take_operator(result : NativeResult) -> Operator = "
 ///|
 #borrow(result)
 extern "C" fn native_result_take_lister(result : NativeResult) -> NativeLister = "moonbit_opendal_result_take_lister"
+
+///|
+#borrow(result)
+extern "C" fn native_result_take_reader(result : NativeResult) -> NativeReader = "moonbit_opendal_result_take_reader"
+
+///|
+#borrow(result)
+extern "C" fn native_result_take_writer(result : NativeResult) -> NativeWriter = "moonbit_opendal_result_take_writer"
 
 ///|
 #borrow(result)
@@ -396,9 +521,10 @@ fn optional_metadata_text(
   bytes : Bytes,
   operation : Operation,
   path : String?,
+  destination_path : String?,
 ) -> String? raise OpenDalError {
   if present {
-    Some(decode_abi_text(bytes, operation, path, None))
+    Some(decode_abi_text(bytes, operation, path, destination_path))
   } else {
     None
   }
@@ -409,6 +535,7 @@ fn metadata_from_native(
   metadata : NativeMetadata,
   operation : Operation,
   path : String?,
+  destination_path? : String,
 ) -> Metadata raise OpenDalError {
   let bits = native_metadata_present_bits(metadata)
   let mode_code = native_metadata_mode(metadata)
@@ -453,36 +580,42 @@ fn metadata_from_native(
       cache_control_bytes,
       operation,
       path,
+      destination_path,
     ),
     content_disposition: optional_metadata_text(
       metadata_bit(bits, 3),
       content_disposition_bytes,
       operation,
       path,
+      destination_path,
     ),
     content_encoding: optional_metadata_text(
       metadata_bit(bits, 4),
       content_encoding_bytes,
       operation,
       path,
+      destination_path,
     ),
     content_md5: optional_metadata_text(
       metadata_bit(bits, 5),
       content_md5_bytes,
       operation,
       path,
+      destination_path,
     ),
     content_type: optional_metadata_text(
       metadata_bit(bits, 6),
       content_type_bytes,
       operation,
       path,
+      destination_path,
     ),
     etag: optional_metadata_text(
       metadata_bit(bits, 7),
       etag_bytes,
       operation,
       path,
+      destination_path,
     ),
     last_modified,
     version: optional_metadata_text(
@@ -490,6 +623,7 @@ fn metadata_from_native(
       version_bytes,
       operation,
       path,
+      destination_path,
     ),
   }
 }

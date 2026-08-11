@@ -1,6 +1,4 @@
-// OpenDAL operations are currently implemented only for the native target.
-// Gate implementation and contract tests per file so other targets can still
-// resolve the package without seeing declaration-only operations.
+supported_targets = "native"
 
 import {
   "moonbitlang/core/debug",
@@ -13,21 +11,4 @@ import {
 
 options(
   "native-stub": [ "opendal_stub.c" ],
-  targets: {
-    "opendal_types.mbt": [ "native" ],
-    "native_ffi.mbt": [ "native" ],
-    "operator.mbt": [ "native" ],
-    "listing.mbt": [ "native" ],
-    "metadata.mbt": [ "native" ],
-    "capability.mbt": [ "native" ],
-    "error.mbt": [ "native" ],
-    "error_wbtest.mbt": [ "native" ],
-    "opendal_easy_test.mbt": [ "native" ],
-    "opendal_mid_test.mbt": [ "native" ],
-    "opendal_difficult_test.mbt": [ "native" ],
-    "opendal_native_test.mbt": [ "native" ],
-  },
-  // The build entry point supplies the active Cargo profile through
-  // LIBRARY_PATH so debug and release MoonBit tests link the matching archive.
-  link: { "native": { "cc-link-flags": "-lopendal_mbt_native -lm" } },
 )

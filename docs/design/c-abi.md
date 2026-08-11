@@ -1,6 +1,6 @@
 # OpenDAL MoonBit C ABI
 
-Status: ABI v1.0 implemented for BASE, WHOLE_OBJECT, LISTING, and RANDOM_READER
+Status: ABI v1.0 implemented for all five feature groups
 
 The executable header is `native/include/opendal_mbt.h`. It is the canonical
 source for exact field order, numeric constants, and function signatures. This
@@ -445,18 +445,18 @@ exceptions cannot be converted into normal errors.
 | `write` | `operator_write` + metadata view/free |
 | `create_dir` | `operator_create_dir` |
 | `delete` | `operator_delete` |
-| proposed `copy` | `operator_copy` + metadata view/free |
-| proposed `rename` | `operator_rename` |
+| `copy` | `operator_copy` + metadata view/free |
+| `rename` | `operator_rename` |
 | `open_lister` | `operator_lister` |
 | `list` | materialize `operator_lister` + repeated `lister_next` |
 | `Lister::next` | `lister_next` + entry views/free |
 | `Lister::close` | `lister_close` |
-| proposed `open_reader` | `operator_reader` |
-| proposed `Reader::read` | `reader_read` + buffer length/copy/free |
-| proposed `Reader::close` | `reader_close` |
-| proposed `open_writer` | `operator_writer` |
-| proposed `Writer::write` | `writer_write` |
-| proposed `Writer::finish` | `writer_close` + metadata view/free |
+| `open_reader` | `operator_reader` |
+| `Reader::read` | `reader_read` + buffer length/copy/free |
+| `Reader::close` | `reader_close` |
+| `open_writer` | `operator_writer` |
+| `Writer::write` | `writer_write` |
+| `Writer::finish` | `writer_close` + metadata view/free |
 
 Materializing `list` over the native lister is not an emulation of a storage
 operation; it is the eager consumption form of the same listing primitive.

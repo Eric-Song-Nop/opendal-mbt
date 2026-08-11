@@ -3,29 +3,51 @@
 Safe, checked MoonBit bindings for Apache OpenDAL. The current release supports
 the native backend and ships the memory and filesystem service profiles.
 
-Build the pinned Rust static library before running MoonBit code:
+Add it like any other Moon dependency:
 
 ```sh
-OPENDAL_MBT_SOURCE=/path/to/unpacked/opendal-mbt
-cargo build --manifest-path "$OPENDAL_MBT_SOURCE/Cargo.toml" --workspace --locked
-LIBRARY_PATH="$OPENDAL_MBT_SOURCE/target/debug" \
-  moon test --target native --frozen
+moon add eric-song-nop/opendal
 ```
 
-The current release is source-built. Prebuilt native artifacts and automatic
-installation are deferred until the distribution contract is designed. A
-`moon add` alone therefore does not build the required Rust archive: keep a
-source checkout or unpacked source release available for the build above.
-
-The final native package or executable also links that archive. Add the
-following entry to its `moon.pkg`, and point `LIBRARY_PATH` at the matching
-Cargo profile directory when invoking `moon`:
+Import the package normally and select the native target. There are no
+OpenDAL-specific linker flags:
 
 ```moonbit nocheck
+supported_targets = "native"
+
+import {
+  "eric-song-nop/opendal",
+}
+
 options(
-  link: { "native": { "cc-link-flags": "-lopendal_mbt_native -lm" } },
+  "is-main": true,
 )
 ```
+
+```mbt nocheck
+fn main raise {
+  let operator = @opendal.Operator::new("memory")
+  operator.write("hello.txt", b"hello from MoonBit") |> ignore
+  println(operator.read("hello.txt"))
+}
+```
+
+Then use the ordinary Moon command:
+
+```sh
+moon run --target native cmd/main
+```
+
+The first native build downloads one pinned release artifact into Moon's
+shared content-addressed cache. Later builds validate and reuse that cache,
+including offline builds. Consumers do not need Cargo, Rust, this repository,
+`LIBRARY_PATH`, or a project-specific installer.
+
+The initial prebuilt matrix supports Apple silicon macOS 11 or newer and
+x86-64 glibc Linux 2.35 or newer. Moon's current native dependency hook is
+experimental and runs the package `build.js`, so Node.js 18 or newer and
+`tar` must be available during native builds. Unsupported hosts fail before a
+download and list the supported targets.
 
 ## Whole-object storage
 
@@ -39,6 +61,26 @@ test "README quickstart" {
   let payload : BytesView = storage[2:20]
   operator.write("hello.txt", payload) |> ignore
   assert_eq(operator.read("hello.txt"), b"hello from MoonBit")
+}
+```
+
+Range reads use an explicit algebraic value. An opened Reader is random access:
+each call supplies its own range and does not advance a hidden cursor.
+
+```mbt check
+///|
+test "README random reader" {
+  let operator = @opendal.Operator::new("memory")
+  operator.write("archive.bin", b"0123456789") |> ignore
+  assert_eq(
+    operator.read("archive.bin", range=Range(offset=2UL, length=4UL)),
+    b"2345",
+  )
+
+  let reader = operator.open_reader("archive.bin")
+  assert_eq(reader.read(From(offset=6UL)), b"6789")
+  assert_eq(reader.read(Suffix(length=3UL)), b"789")
+  reader.close()
 }
 ```
 
@@ -79,6 +121,27 @@ test "README listing" {
 }
 ```
 
+## Chunked writes
+
+An opened Writer accepts complete chunks and reports success only after an
+explicit finish. Dropping an unfinished Writer does not finish it implicitly.
+
+```mbt check
+///|
+test "README chunked writer" {
+  let operator = @opendal.Operator::new("memory")
+  let writer = operator.open_writer(
+    "upload.bin",
+    content_type="application/octet-stream",
+  )
+  writer.write(b"hello ")
+  writer.write(b"from MoonBit")
+  let metadata = writer.finish()
+  assert_eq(metadata.content_length, 18UL)
+  assert_eq(operator.read("upload.bin"), b"hello from MoonBit")
+}
+```
+
 ## Checked errors
 
 Storage failures use OpenDalError rather than stringly typed Result values.
@@ -100,6 +163,9 @@ test "README checked errors" {
 }
 ```
 
+`copy(source, destination)` and `rename(source, destination)` invoke the
+backend operations directly. Check `can_copy()` and `can_rename()` when code
+must adapt across services; unsupported backends raise `Unsupported` with both
+paths retained in the error context.
+
 The generated pkg.generated.mbti file is the authoritative public surface.
-Reader, Writer, copy, rename, and additional read/write options will be added
-only when their complete MoonBit, C, and Rust vertical slices are implemented.

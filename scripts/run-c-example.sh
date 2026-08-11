@@ -3,23 +3,26 @@ set -euo pipefail
 
 profile_name="${1:-release}"
 case "$profile_name" in
-  debug)
-    cargo_profile_args=()
-    ;;
-  release)
-    cargo_profile_args=(--release)
-    ;;
+  debug | release) ;;
   *)
     printf 'profile must be debug or release, got: %s\n' "$profile_name" >&2
     exit 2
     ;;
 esac
 
-rustc_output="$({
-  CARGO_TERM_COLOR=never cargo rustc \
-    -p opendal-mbt-native --locked "${cargo_profile_args[@]}" \
-    -- --print native-static-libs
-} 2>&1)"
+if [[ "$profile_name" == release ]]; then
+  rustc_output="$({
+    CARGO_TERM_COLOR=never cargo rustc \
+      -p opendal-mbt-native --locked --release \
+      -- --print native-static-libs
+  } 2>&1)"
+else
+  rustc_output="$({
+    CARGO_TERM_COLOR=never cargo rustc \
+      -p opendal-mbt-native --locked \
+      -- --print native-static-libs
+  } 2>&1)"
+fi
 printf '%s\n' "$rustc_output"
 
 native_libraries="$({
