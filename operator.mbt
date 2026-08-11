@@ -232,3 +232,62 @@ pub fn Operator::delete(
   }
   native_result_release(result)
 }
+
+///|
+/// Copy one object with the backend's native copy operation and return the
+/// destination metadata. This is never emulated with read plus write.
+pub fn Operator::copy(
+  self : Operator,
+  source : StringView,
+  destination : StringView,
+) -> Metadata raise OpenDalError {
+  let source = source.to_owned()
+  let destination = destination.to_owned()
+  let result = native_operator_copy(self, source, destination)
+  if native_result_status(result) != 0U {
+    raise error_from_native_result(
+      result,
+      Copy,
+      Some(source),
+      Some(destination),
+    )
+  }
+  let metadata = native_result_take_metadata(result)
+  if native_result_status(result) != 0U {
+    raise error_from_native_result(
+      result,
+      Copy,
+      Some(source),
+      Some(destination),
+    )
+  }
+  native_result_release(result)
+  metadata_from_native(
+    metadata,
+    Copy,
+    Some(source),
+    destination_path=destination,
+  )
+}
+
+///|
+/// Rename one object with the backend's native rename operation. This is never
+/// emulated with copy plus delete.
+pub fn Operator::rename(
+  self : Operator,
+  source : StringView,
+  destination : StringView,
+) -> Unit raise OpenDalError {
+  let source = source.to_owned()
+  let destination = destination.to_owned()
+  let result = native_operator_rename(self, source, destination)
+  if native_result_status(result) != 0U {
+    raise error_from_native_result(
+      result,
+      Rename,
+      Some(source),
+      Some(destination),
+    )
+  }
+  native_result_release(result)
+}

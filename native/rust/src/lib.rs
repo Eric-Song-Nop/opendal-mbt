@@ -2452,6 +2452,37 @@ mod tests {
         (operator, info)
     }
 
+    fn filesystem_operator(
+        api: &ApiV1,
+        root: &std::path::Path,
+    ) -> (*mut OperatorV1, *mut OperatorInfoV1) {
+        let mut operator = ptr::null_mut();
+        let mut info = ptr::null_mut();
+        let mut error = ptr::null_mut();
+        let scheme = bytes(b"fs");
+        let root = root.to_string_lossy();
+        let config = [KvV1 {
+            key: bytes(b"root"),
+            value: bytes(root.as_bytes()),
+        }];
+        // SAFETY: all views, the config element, and output slots are live.
+        let status = unsafe {
+            api.operator_new.expect("BASE constructor is installed")(
+                &scheme,
+                config.as_ptr(),
+                1,
+                &mut operator,
+                &mut info,
+                &mut error,
+            )
+        };
+        assert_eq!(status, STATUS_OK);
+        assert!(!operator.is_null());
+        assert!(!info.is_null());
+        assert!(error.is_null());
+        (operator, info)
+    }
+
     fn take_error_kind(api: &ApiV1, error: *mut ErrorV1) -> u32 {
         assert!(!error.is_null());
         let mut view = ErrorViewV1 {
@@ -2775,7 +2806,7 @@ mod tests {
         view.content_length
     }
 
-    fn read_memory_object(api: &ApiV1, operator: *mut OperatorV1, path: &[u8]) -> Vec<u8> {
+    fn read_object(api: &ApiV1, operator: *mut OperatorV1, path: &[u8]) -> Vec<u8> {
         let path = bytes(path);
         let mut buffer = NonNull::<BufferV1>::dangling().as_ptr();
         let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
@@ -4159,6 +4190,105 @@ mod tests {
     }
 
     #[test]
+    fn copy_and_rename_preserve_backend_semantics_and_atomic_outputs() {
+        let api = api();
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time is after the Unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "opendal-mbt-copy-rename-{}-{unique}",
+            std::process::id(),
+        ));
+        let (operator, info) = filesystem_operator(&api, &root);
+        write_memory_object(&api, operator, b"moves/source.bin", b"copy-rename");
+        let copy = api.operator_copy.expect("WHOLE_OBJECT copy is installed");
+        let rename = api
+            .operator_rename
+            .expect("WHOLE_OBJECT rename is installed");
+        let source = bytes(b"moves/source.bin");
+        let copied = bytes(b"moves/copied.bin");
+        let renamed = bytes(b"moves/renamed.bin");
+
+        let mut metadata = NonNull::<MetadataV1>::dangling().as_ptr();
+        let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: all path carriers and output slots remain live for this call.
+        assert_eq!(
+            unsafe { copy(operator, &source, &copied, &mut metadata, &mut error) },
+            STATUS_OK,
+        );
+        assert!(error.is_null());
+        let _ = take_metadata_content_length(&api, metadata);
+        assert_eq!(
+            read_object(&api, operator, b"moves/source.bin"),
+            b"copy-rename"
+        );
+        assert_eq!(
+            read_object(&api, operator, b"moves/copied.bin"),
+            b"copy-rename"
+        );
+
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: source/destination and optional error output are valid.
+        assert_eq!(
+            unsafe { rename(operator, &copied, &renamed, &mut error) },
+            STATUS_OK,
+        );
+        assert!(error.is_null());
+        assert!(!memory_object_exists(&api, operator, b"moves/copied.bin"));
+        assert_eq!(
+            read_object(&api, operator, b"moves/renamed.bin"),
+            b"copy-rename"
+        );
+
+        let missing = bytes(b"moves/missing.bin");
+        metadata = NonNull::<MetadataV1>::dangling().as_ptr();
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: a backend NotFound must clear metadata and return one owned error.
+        assert_eq!(
+            unsafe { copy(operator, &missing, &copied, &mut metadata, &mut error) },
+            STATUS_ERROR,
+        );
+        assert!(metadata.is_null());
+        assert_eq!(take_error_kind(&api, error), ERROR_NOT_FOUND);
+
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the required metadata output is deliberately NULL.
+        assert_eq!(
+            unsafe { copy(operator, &source, &copied, ptr::null_mut(), &mut error) },
+            STATUS_ABI_MISMATCH,
+        );
+        assert!(error.is_null());
+
+        let invalid_utf8 = [0xFF];
+        let invalid_destination = bytes(&invalid_utf8);
+        metadata = NonNull::<MetadataV1>::dangling().as_ptr();
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the destination bytes are readable but intentionally invalid UTF-8.
+        assert_eq!(
+            unsafe {
+                copy(
+                    operator,
+                    &source,
+                    &invalid_destination,
+                    &mut metadata,
+                    &mut error,
+                )
+            },
+            STATUS_ERROR,
+        );
+        assert!(metadata.is_null());
+        assert_eq!(take_error_kind(&api, error), ERROR_INVALID_ARGUMENT);
+
+        // SAFETY: both constructor outputs remain uniquely owned.
+        unsafe {
+            api.operator_info_free.expect("BASE info free is installed")(info);
+            api.operator_free.expect("BASE operator free is installed")(operator);
+        }
+        std::fs::remove_dir_all(&root).expect("isolated filesystem root is removable");
+    }
+
+    #[test]
     fn chunked_writer_commits_chunks_outlives_operator_and_is_terminal() {
         let api = api();
         let (operator, info) = memory_operator(&api);
@@ -4221,7 +4351,7 @@ mod tests {
         });
         let metadata = finish_writer(&api, writer);
         assert_eq!(take_metadata_content_length(&api, metadata), 9);
-        let content = read_memory_object(&api, operator, b"writer/concurrent.bin");
+        let content = read_object(&api, operator, b"writer/concurrent.bin");
         assert!(content == b"leftright" || content == b"rightleft");
 
         let unfinished = memory_writer(&api, operator, b"writer/unfinished.bin", ptr::null());

@@ -169,6 +169,36 @@ test "native memory: write metadata and conditions cross the ABI" {
 }
 
 ///|
+test "native memory: unsupported copy and rename preserve both paths" {
+  let operator = @opendal.Operator::new("memory")
+  let capability = operator.info().capability
+  assert_false(capability.can_copy())
+  assert_false(capability.can_rename())
+  operator.write("copy/source.bin", b"value") |> ignore
+  try operator.copy("copy/source.bin", "copy/destination.bin") catch {
+    OpenDalError(info) => {
+      assert_true(info.kind is Unsupported)
+      assert_true(info.operation is Copy)
+      assert_eq(info.path, Some("copy/source.bin"))
+      assert_eq(info.destination_path, Some("copy/destination.bin"))
+    }
+  } noraise {
+    _ => fail("expected unsupported copy to raise")
+  }
+  try operator.rename("copy/source.bin", "copy/destination.bin") catch {
+    OpenDalError(info) => {
+      assert_true(info.kind is Unsupported)
+      assert_true(info.operation is Rename)
+      assert_eq(info.path, Some("copy/source.bin"))
+      assert_eq(info.destination_path, Some("copy/destination.bin"))
+    }
+  } noraise {
+    _ => fail("expected unsupported rename to raise")
+  }
+  assert_eq(operator.read("copy/source.bin"), b"value")
+}
+
+///|
 test "native memory: StringView and BytesView use only the selected slice" {
   let operator = @opendal.Operator::new("memory")
   let path_storage = "__slice.bin__"
@@ -345,6 +375,37 @@ test "native fs: chunked writer supports explicit append" {
   assert_eq(metadata.content_length, 9UL)
   assert_eq(operator.read("append.bin"), b"base-tail")
   operator.delete("append.bin")
+}
+
+///|
+test "native fs: copy and rename use backend-native semantics" {
+  guard @env.current_dir() is Some(cwd) else {
+    fail("current working directory is unavailable")
+  }
+  let root = "\{cwd}/target/opendal-mbt-fs-copy-rename-\{@env.now()}"
+  let operator = @opendal.Operator::new("fs", config={ "root": root })
+  let capability = operator.info().capability
+  assert_true(capability.can_copy())
+  assert_true(capability.can_rename())
+  operator.write("moves/source.bin", b"copy-rename") |> ignore
+  let copied = operator.copy("moves/source.bin", "moves/copied.bin")
+  ignore(copied)
+  assert_eq(operator.read("moves/source.bin"), b"copy-rename")
+  assert_eq(operator.read("moves/copied.bin"), b"copy-rename")
+  operator.rename("moves/copied.bin", "moves/renamed.bin")
+  assert_false(operator.exists("moves/copied.bin"))
+  assert_eq(operator.read("moves/renamed.bin"), b"copy-rename")
+  try operator.rename("moves/missing.bin", "moves/target.bin") catch {
+    OpenDalError(info) => {
+      assert_true(info.kind is NotFound)
+      assert_true(info.operation is Rename)
+      assert_eq(info.path, Some("moves/missing.bin"))
+      assert_eq(info.destination_path, Some("moves/target.bin"))
+    }
+  } noraise {
+    _ => fail("expected missing rename source to raise")
+  }
+  operator.delete("moves/", recursive=true)
 }
 
 ///|

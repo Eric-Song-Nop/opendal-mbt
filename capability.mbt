@@ -48,6 +48,18 @@ pub fn Capability::can_delete(self : Capability) -> Bool {
 }
 
 ///|
+/// Return whether server-side copy is available through this binding.
+pub fn Capability::can_copy(self : Capability) -> Bool {
+  self.has(6)
+}
+
+///|
+/// Return whether native rename is available through this binding.
+pub fn Capability::can_rename(self : Capability) -> Bool {
+  self.has(7)
+}
+
+///|
 /// Return whether prefix listing is available through this binding.
 pub fn Capability::can_list(self : Capability) -> Bool {
   self.has(5)

@@ -59,6 +59,8 @@ pub enum Operation {
   Stat
   Delete
   List
+  Copy
+  Rename
 } derive(Eq, @debug.Debug)
 
 ///|
