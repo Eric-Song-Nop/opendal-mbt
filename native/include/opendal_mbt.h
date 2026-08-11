@@ -712,8 +712,9 @@ typedef struct opendal_mbt_api_v1 {
 
   /*
    * OPENDAL_MBT_FEATURE_LAYERS: appended in ABI v1.4 and dependent on BASE.
-   * Each call borrows operator_ and returns a separately owned Operator. The
-   * input Operator and every resource already opened from it are unchanged.
+   * Each call borrows operator_ and returns a separately owned Operator plus
+   * its immutable OperatorInfo snapshot. The input Operator and every resource
+   * already opened from it are unchanged.
    * Layer order is exactly call order: the newly requested layer is appended
    * outside the input Operator's existing layer stack. Timeout values and
    * delay bounds must be nonzero; min_delay_millis must not exceed
@@ -725,12 +726,14 @@ typedef struct opendal_mbt_api_v1 {
       const opendal_mbt_operator_v1_t *operator_,
       uint64_t operation_timeout_millis, uint64_t io_timeout_millis,
       opendal_mbt_operator_v1_t **out_operator,
+      opendal_mbt_operator_info_v1_t **out_info,
       opendal_mbt_error_v1_t **out_error);
   opendal_mbt_status_t(OPENDAL_MBT_CALL *operator_with_retry)(
       const opendal_mbt_operator_v1_t *operator_, uint32_t max_retries,
       uint64_t min_delay_millis, uint64_t max_delay_millis,
       opendal_mbt_bool_t jitter,
       opendal_mbt_operator_v1_t **out_operator,
+      opendal_mbt_operator_info_v1_t **out_info,
       opendal_mbt_error_v1_t **out_error);
 } opendal_mbt_api_v1_t;
 

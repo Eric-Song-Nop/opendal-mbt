@@ -635,6 +635,7 @@ pub(crate) type OperatorWithTimeoutFn = unsafe extern "C" fn(
     u64,
     u64,
     *mut *mut OperatorV1,
+    *mut *mut OperatorInfoV1,
     *mut *mut ErrorV1,
 ) -> Status;
 pub(crate) type OperatorWithRetryFn = unsafe extern "C" fn(
@@ -644,6 +645,7 @@ pub(crate) type OperatorWithRetryFn = unsafe extern "C" fn(
     u64,
     u32,
     *mut *mut OperatorV1,
+    *mut *mut OperatorInfoV1,
     *mut *mut ErrorV1,
 ) -> Status;
 

@@ -502,18 +502,24 @@ int main(void) {
 
   status = api.operator_with_timeout(base_operator, UINT64_C(5000),
                                      UINT64_C(2000), &timeout_operator,
+                                     &operator_info,
                                      &error);
   if (!expect_ok(&api, "operator_with_timeout", status, &error) ||
-      timeout_operator == NULL) {
+      timeout_operator == NULL || operator_info == NULL) {
     goto cleanup;
   }
+  api.operator_info_free(operator_info);
+  operator_info = NULL;
   status = api.operator_with_retry(timeout_operator, UINT32_C(3), UINT64_C(1),
                                    UINT64_C(5), OPENDAL_MBT_FALSE, &operator_,
+                                   &operator_info,
                                    &error);
   if (!expect_ok(&api, "operator_with_retry", status, &error) ||
-      operator_ == NULL) {
+      operator_ == NULL || operator_info == NULL) {
     goto cleanup;
   }
+  api.operator_info_free(operator_info);
+  operator_info = NULL;
 
   /* The composed handle owns its stack independently of both borrowed inputs. */
   api.operator_free(base_operator);

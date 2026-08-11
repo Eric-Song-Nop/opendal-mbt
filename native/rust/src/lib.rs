@@ -2034,8 +2034,9 @@ unsafe fn read_config(config: *const KvV1, config_len: u64) -> CallResult<Vec<(S
     Ok(output)
 }
 
-fn operator_handles(
+fn operator_handles_with_layers(
     async_operator: opendal::Operator,
+    layer_bits: u32,
 ) -> CallResult<(Box<OperatorV1>, Box<OperatorInfoV1>)> {
     let operator =
         opendal::blocking::Operator::new(async_operator.clone()).map_err(construction_error)?;
@@ -2060,10 +2061,16 @@ fn operator_handles(
         Box::new(OperatorV1 {
             async_inner: async_operator,
             inner: operator,
-            layer_bits: 0,
+            layer_bits,
         }),
         Box::new(info),
     ))
+}
+
+fn operator_handles(
+    async_operator: opendal::Operator,
+) -> CallResult<(Box<OperatorV1>, Box<OperatorInfoV1>)> {
+    operator_handles_with_layers(async_operator, 0)
 }
 
 #[cfg(feature = "profile-standard")]
@@ -2266,16 +2273,10 @@ fn retry_count(value: u32) -> CallResult<usize> {
 fn rebuild_layered_operator(
     async_inner: opendal::Operator,
     layer_bits: u32,
-) -> CallResult<Box<OperatorV1>> {
+) -> CallResult<(Box<OperatorV1>, Box<OperatorInfoV1>)> {
     let runtime = runtime()?;
     let _guard = runtime.enter();
-    let inner =
-        opendal::blocking::Operator::new(async_inner.clone()).map_err(construction_error)?;
-    Ok(Box::new(OperatorV1 {
-        async_inner,
-        inner,
-        layer_bits,
-    }))
+    operator_handles_with_layers(async_inner, layer_bits)
 }
 
 #[cfg(feature = "layers-timeout-retry")]
@@ -2284,19 +2285,22 @@ unsafe extern "C" fn operator_with_timeout(
     operation_timeout_millis: u64,
     io_timeout_millis: u64,
     out_operator: *mut *mut OperatorV1,
+    out_info: *mut *mut OperatorInfoV1,
     out_error: *mut *mut ErrorV1,
 ) -> Status {
     catch_status(|| {
         let outputs = [
             // SAFETY: output slots are validated and cleared before inputs are inspected.
             unsafe { clear_required_output(out_operator, ptr::null_mut()) },
+            // SAFETY: output slots are validated and cleared before inputs are inspected.
+            unsafe { clear_required_output(out_info, ptr::null_mut()) },
             // SAFETY: the optional error slot is cleared before work begins.
             unsafe { clear_error_output(out_error) },
         ];
         if let Err(failure) = combine_output_validation(outputs) {
             return unsafe { finish_failure(failure, out_error) };
         }
-        let result = (|| -> CallResult<Box<OperatorV1>> {
+        let result = (|| -> CallResult<(Box<OperatorV1>, Box<OperatorInfoV1>)> {
             // SAFETY: opaque handle validity is a caller lifetime obligation.
             let operator = unsafe { borrow_required(operator)? };
             let operation_timeout =
@@ -2319,9 +2323,12 @@ unsafe extern "C" fn operator_with_timeout(
             )
         })();
         match result {
-            Ok(operator) => {
-                // SAFETY: the required output slot was validated and remains writable.
-                unsafe { out_operator.write(Box::into_raw(operator)) };
+            Ok((operator, info)) => {
+                // SAFETY: both required output slots were validated and remain writable.
+                unsafe {
+                    out_operator.write(Box::into_raw(operator));
+                    out_info.write(Box::into_raw(info));
+                }
                 STATUS_OK
             }
             Err(failure) => unsafe { finish_failure(failure, out_error) },
@@ -2337,19 +2344,22 @@ unsafe extern "C" fn operator_with_retry(
     max_delay_millis: u64,
     jitter: u32,
     out_operator: *mut *mut OperatorV1,
+    out_info: *mut *mut OperatorInfoV1,
     out_error: *mut *mut ErrorV1,
 ) -> Status {
     catch_status(|| {
         let outputs = [
             // SAFETY: output slots are validated and cleared before inputs are inspected.
             unsafe { clear_required_output(out_operator, ptr::null_mut()) },
+            // SAFETY: output slots are validated and cleared before inputs are inspected.
+            unsafe { clear_required_output(out_info, ptr::null_mut()) },
             // SAFETY: the optional error slot is cleared before work begins.
             unsafe { clear_error_output(out_error) },
         ];
         if let Err(failure) = combine_output_validation(outputs) {
             return unsafe { finish_failure(failure, out_error) };
         }
-        let result = (|| -> CallResult<Box<OperatorV1>> {
+        let result = (|| -> CallResult<(Box<OperatorV1>, Box<OperatorInfoV1>)> {
             // SAFETY: opaque handle validity is a caller lifetime obligation.
             let operator = unsafe { borrow_required(operator)? };
             if jitter > 1 {
@@ -2379,9 +2389,12 @@ unsafe extern "C" fn operator_with_retry(
             )
         })();
         match result {
-            Ok(operator) => {
-                // SAFETY: the required output slot was validated and remains writable.
-                unsafe { out_operator.write(Box::into_raw(operator)) };
+            Ok((operator, info)) => {
+                // SAFETY: both required output slots were validated and remain writable.
+                unsafe {
+                    out_operator.write(Box::into_raw(operator));
+                    out_info.write(Box::into_raw(info));
+                }
                 STATUS_OK
             }
             Err(failure) => unsafe { finish_failure(failure, out_error) },
@@ -3978,8 +3991,9 @@ mod tests {
         io_timeout_millis: u64,
     ) -> Result<*mut OperatorV1, u32> {
         let mut output = NonNull::<OperatorV1>::dangling().as_ptr();
+        let mut info = NonNull::<OperatorInfoV1>::dangling().as_ptr();
         let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
-        // SAFETY: the input handle and both output slots remain live for this call.
+        // SAFETY: the input handle and all output slots remain live for this call.
         let status = unsafe {
             api.operator_with_timeout
                 .expect("LAYERS timeout constructor is installed")(
@@ -3987,22 +4001,28 @@ mod tests {
                 operation_timeout_millis,
                 io_timeout_millis,
                 &mut output,
+                &mut info,
                 &mut error,
             )
         };
         match status {
             STATUS_OK => {
                 assert!(!output.is_null());
+                assert!(!info.is_null());
                 assert!(error.is_null());
+                // SAFETY: this helper owns the returned immutable info snapshot.
+                unsafe { api.operator_info_free.expect("BASE info free is installed")(info) };
                 Ok(output)
             }
             STATUS_ERROR => {
                 assert!(output.is_null());
+                assert!(info.is_null());
                 assert!(!error.is_null());
                 Err(take_error_kind(api, error))
             }
             other => {
                 assert!(output.is_null());
+                assert!(info.is_null());
                 assert!(error.is_null());
                 Err(other)
             }
@@ -4019,8 +4039,9 @@ mod tests {
         jitter: u32,
     ) -> Result<*mut OperatorV1, u32> {
         let mut output = NonNull::<OperatorV1>::dangling().as_ptr();
+        let mut info = NonNull::<OperatorInfoV1>::dangling().as_ptr();
         let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
-        // SAFETY: the input handle and both output slots remain live for this call.
+        // SAFETY: the input handle and all output slots remain live for this call.
         let status = unsafe {
             api.operator_with_retry
                 .expect("LAYERS retry constructor is installed")(
@@ -4030,22 +4051,28 @@ mod tests {
                 max_delay_millis,
                 jitter,
                 &mut output,
+                &mut info,
                 &mut error,
             )
         };
         match status {
             STATUS_OK => {
                 assert!(!output.is_null());
+                assert!(!info.is_null());
                 assert!(error.is_null());
+                // SAFETY: this helper owns the returned immutable info snapshot.
+                unsafe { api.operator_info_free.expect("BASE info free is installed")(info) };
                 Ok(output)
             }
             STATUS_ERROR => {
                 assert!(output.is_null());
+                assert!(info.is_null());
                 assert!(!error.is_null());
                 Err(take_error_kind(api, error))
             }
             other => {
                 assert!(output.is_null());
+                assert!(info.is_null());
                 assert!(error.is_null());
                 Err(other)
             }
