@@ -44,7 +44,7 @@ extern "C" {
 #endif
 
 #define OPENDAL_MBT_ABI_V1_MAJOR UINT32_C(1)
-#define OPENDAL_MBT_ABI_V1_MINOR UINT32_C(4)
+#define OPENDAL_MBT_ABI_V1_MINOR UINT32_C(5)
 #define OPENDAL_MBT_ABI_V1_PATCH UINT32_C(0)
 #define OPENDAL_MBT_STRUCT_VERSION_V1 UINT32_C(1)
 #define OPENDAL_MBT_EXTENSIBLE_CODE_MAX UINT32_C(0x7fffffff)
@@ -128,6 +128,7 @@ typedef uint32_t opendal_mbt_range_kind_t;
 #define OPENDAL_MBT_FEATURE_S3 (UINT64_C(1) << 7)
 #define OPENDAL_MBT_FEATURE_PRESIGN (UINT64_C(1) << 8)
 #define OPENDAL_MBT_FEATURE_LAYERS (UINT64_C(1) << 9)
+#define OPENDAL_MBT_FEATURE_CONCURRENCY_LIMIT (UINT64_C(1) << 10)
 
 /* Capability bit positions. */
 #define OPENDAL_MBT_CAP_STAT (UINT64_C(1) << 0)
@@ -732,6 +733,29 @@ typedef struct opendal_mbt_api_v1 {
       const opendal_mbt_operator_v1_t *operator_, uint32_t max_retries,
       uint64_t min_delay_millis, uint64_t max_delay_millis,
       opendal_mbt_bool_t jitter,
+      opendal_mbt_operator_v1_t **out_operator,
+      opendal_mbt_operator_info_v1_t **out_info,
+      opendal_mbt_error_v1_t **out_error);
+
+  /*
+   * OPENDAL_MBT_FEATURE_CONCURRENCY_LIMIT: appended in ABI v1.5 and dependent
+   * on BASE. The call borrows operator_ and returns a separately owned
+   * Operator plus its immutable OperatorInfo snapshot. operation_limit must
+   * be nonzero and representable as a native usize. When
+   * has_http_request_limit is TRUE, http_request_limit has the same rules;
+   * the flag must be exactly FALSE or TRUE. When the flag is FALSE,
+   * http_request_limit must be zero.
+   *
+   * This layer is always appended outside timeout and retry. It can be added
+   * only once; timeout and retry cannot subsequently be appended outside it.
+   * Operation permits for body-style Reader streams, Writers, Listers,
+   * Deleters, and Copiers remain held for the body's lifetime. An optional
+   * HTTP permit remains held until the response body is dropped.
+   */
+  opendal_mbt_status_t(OPENDAL_MBT_CALL *operator_with_concurrency_limit)(
+      const opendal_mbt_operator_v1_t *operator_, uint64_t operation_limit,
+      opendal_mbt_bool_t has_http_request_limit,
+      uint64_t http_request_limit,
       opendal_mbt_operator_v1_t **out_operator,
       opendal_mbt_operator_info_v1_t **out_info,
       opendal_mbt_error_v1_t **out_error);

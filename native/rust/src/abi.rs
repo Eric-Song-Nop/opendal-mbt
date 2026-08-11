@@ -5,7 +5,7 @@
 pub(crate) type Status = u32;
 
 pub(crate) const ABI_MAJOR: u32 = 1;
-pub(crate) const ABI_MINOR: u32 = 4;
+pub(crate) const ABI_MINOR: u32 = 5;
 pub(crate) const ABI_PATCH: u32 = 0;
 pub(crate) const STRUCT_VERSION: u32 = 1;
 
@@ -59,6 +59,7 @@ pub(crate) const FEATURE_WRITER_ABORT: u64 = 1 << 6;
 pub(crate) const FEATURE_S3: u64 = 1 << 7;
 pub(crate) const FEATURE_PRESIGN: u64 = 1 << 8;
 pub(crate) const FEATURE_LAYERS: u64 = 1 << 9;
+pub(crate) const FEATURE_CONCURRENCY_LIMIT: u64 = 1 << 10;
 
 pub(crate) const CAP_STAT: u64 = 1 << 0;
 pub(crate) const CAP_READ: u64 = 1 << 1;
@@ -648,6 +649,15 @@ pub(crate) type OperatorWithRetryFn = unsafe extern "C" fn(
     *mut *mut OperatorInfoV1,
     *mut *mut ErrorV1,
 ) -> Status;
+pub(crate) type OperatorWithConcurrencyLimitFn = unsafe extern "C" fn(
+    *const OperatorV1,
+    u64,
+    u32,
+    u64,
+    *mut *mut OperatorV1,
+    *mut *mut OperatorInfoV1,
+    *mut *mut ErrorV1,
+) -> Status;
 
 #[repr(C)]
 pub(crate) struct ApiV1 {
@@ -709,6 +719,7 @@ pub(crate) struct ApiV1 {
     pub(crate) presigned_request_free: Option<PresignedRequestFreeFn>,
     pub(crate) operator_with_timeout: Option<OperatorWithTimeoutFn>,
     pub(crate) operator_with_retry: Option<OperatorWithRetryFn>,
+    pub(crate) operator_with_concurrency_limit: Option<OperatorWithConcurrencyLimitFn>,
 }
 
 pub(crate) const API_INPUT_SIZE: usize =
@@ -744,7 +755,8 @@ const _: () = {
     assert!(core::mem::offset_of!(ApiV1, operator_presign_read) == 376);
     assert!(core::mem::offset_of!(ApiV1, operator_with_timeout) == 424);
     assert!(core::mem::offset_of!(ApiV1, operator_with_retry) == 432);
-    assert!(core::mem::size_of::<ApiV1>() == 440);
+    assert!(core::mem::offset_of!(ApiV1, operator_with_concurrency_limit) == 440);
+    assert!(core::mem::size_of::<ApiV1>() == 448);
     assert!(API_INPUT_SIZE == 8);
     assert!(API_PREFIX_SIZE == 40);
 };

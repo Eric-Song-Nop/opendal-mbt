@@ -15,6 +15,8 @@ use std::sync::{Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use abi::*;
+#[cfg(feature = "layers-concurrent-limit")]
+use opendal::layers::ConcurrentLimitLayer;
 #[cfg(feature = "layers-timeout-retry")]
 use opendal::layers::{RetryLayer, TimeoutLayer};
 use opendal::options::{
@@ -32,8 +34,13 @@ const OPENDAL_VERSION: &str = "0.58.1";
 const SERVICE_PROFILE: &str = "standard";
 #[cfg(not(feature = "profile-standard"))]
 const SERVICE_PROFILE: &str = "local";
-const LAYER_FEATURE_BITS: u64 = if cfg!(feature = "layers-timeout-retry") {
+const TIMEOUT_RETRY_FEATURE_BITS: u64 = if cfg!(feature = "layers-timeout-retry") {
     FEATURE_LAYERS
+} else {
+    0
+};
+const CONCURRENCY_LIMIT_FEATURE_BITS: u64 = if cfg!(feature = "layers-concurrent-limit") {
+    FEATURE_CONCURRENCY_LIMIT
 } else {
     0
 };
@@ -41,6 +48,8 @@ const LAYER_FEATURE_BITS: u64 = if cfg!(feature = "layers-timeout-retry") {
 const OPERATOR_LAYER_TIMEOUT: u32 = 1 << 0;
 #[cfg(feature = "layers-timeout-retry")]
 const OPERATOR_LAYER_RETRY: u32 = 1 << 1;
+#[cfg(any(feature = "layers-concurrent-limit", feature = "layers-timeout-retry"))]
+const OPERATOR_LAYER_CONCURRENCY_LIMIT: u32 = 1 << 2;
 
 #[cfg(feature = "profile-standard")]
 const PROFILE_FEATURE_BITS: u64 = FEATURE_S3;
@@ -2269,7 +2278,7 @@ fn retry_count(value: u32) -> CallResult<usize> {
         .map_err(|_| invalid_argument("max_retries is not representable on this platform"))
 }
 
-#[cfg(feature = "layers-timeout-retry")]
+#[cfg(any(feature = "layers-concurrent-limit", feature = "layers-timeout-retry"))]
 fn rebuild_layered_operator(
     async_inner: opendal::Operator,
     layer_bits: u32,
@@ -2308,6 +2317,11 @@ unsafe extern "C" fn operator_with_timeout(
             let io_timeout = positive_millis(io_timeout_millis, "io_timeout_millis")?;
             if operator.layer_bits & OPERATOR_LAYER_TIMEOUT != 0 {
                 return Err(invalid_argument("timeout layer is already installed"));
+            }
+            if operator.layer_bits & OPERATOR_LAYER_CONCURRENCY_LIMIT != 0 {
+                return Err(invalid_argument(
+                    "timeout layer must be installed before concurrency limit layer",
+                ));
             }
             if operator.layer_bits & OPERATOR_LAYER_RETRY != 0 {
                 return Err(invalid_argument(
@@ -2376,6 +2390,11 @@ unsafe extern "C" fn operator_with_retry(
             if operator.layer_bits & OPERATOR_LAYER_RETRY != 0 {
                 return Err(invalid_argument("retry layer is already installed"));
             }
+            if operator.layer_bits & OPERATOR_LAYER_CONCURRENCY_LIMIT != 0 {
+                return Err(invalid_argument(
+                    "retry layer must be installed before concurrency limit layer",
+                ));
+            }
             let mut layer = RetryLayer::new()
                 .with_max_times(max_retries)
                 .with_min_delay(min_delay)
@@ -2386,6 +2405,81 @@ unsafe extern "C" fn operator_with_retry(
             rebuild_layered_operator(
                 operator.async_inner.clone().layer(layer),
                 operator.layer_bits | OPERATOR_LAYER_RETRY,
+            )
+        })();
+        match result {
+            Ok((operator, info)) => {
+                // SAFETY: both required output slots were validated and remain writable.
+                unsafe {
+                    out_operator.write(Box::into_raw(operator));
+                    out_info.write(Box::into_raw(info));
+                }
+                STATUS_OK
+            }
+            Err(failure) => unsafe { finish_failure(failure, out_error) },
+        }
+    })
+}
+
+#[cfg(feature = "layers-concurrent-limit")]
+fn positive_concurrency_limit(value: u64, label: &str) -> CallResult<usize> {
+    if value == 0 {
+        return Err(invalid_argument(format!(
+            "{label} must be greater than zero"
+        )));
+    }
+    usize::try_from(value)
+        .map_err(|_| invalid_argument(format!("{label} is not representable on this platform")))
+}
+
+#[cfg(feature = "layers-concurrent-limit")]
+unsafe extern "C" fn operator_with_concurrency_limit(
+    operator: *const OperatorV1,
+    operation_limit: u64,
+    has_http_request_limit: u32,
+    http_request_limit: u64,
+    out_operator: *mut *mut OperatorV1,
+    out_info: *mut *mut OperatorInfoV1,
+    out_error: *mut *mut ErrorV1,
+) -> Status {
+    catch_status(|| {
+        let outputs = [
+            // SAFETY: output slots are validated and cleared before inputs are inspected.
+            unsafe { clear_required_output(out_operator, ptr::null_mut()) },
+            // SAFETY: output slots are validated and cleared before inputs are inspected.
+            unsafe { clear_required_output(out_info, ptr::null_mut()) },
+            // SAFETY: the optional error slot is cleared before work begins.
+            unsafe { clear_error_output(out_error) },
+        ];
+        if let Err(failure) = combine_output_validation(outputs) {
+            return unsafe { finish_failure(failure, out_error) };
+        }
+        let result = (|| -> CallResult<(Box<OperatorV1>, Box<OperatorInfoV1>)> {
+            // SAFETY: opaque handle validity is a caller lifetime obligation.
+            let operator = unsafe { borrow_required(operator)? };
+            if has_http_request_limit > 1 {
+                return abi_mismatch();
+            }
+            if has_http_request_limit == 0 && http_request_limit != 0 {
+                return Err(invalid_argument(
+                    "http_request_limit must be zero when it is absent",
+                ));
+            }
+            if operator.layer_bits & OPERATOR_LAYER_CONCURRENCY_LIMIT != 0 {
+                return Err(invalid_argument(
+                    "concurrency limit layer is already installed",
+                ));
+            }
+            let operation_limit = positive_concurrency_limit(operation_limit, "operation_limit")?;
+            let mut layer = ConcurrentLimitLayer::new(operation_limit);
+            if has_http_request_limit != 0 {
+                let http_request_limit =
+                    positive_concurrency_limit(http_request_limit, "http_request_limit")?;
+                layer = layer.with_http_concurrent_limit(http_request_limit);
+            }
+            rebuild_layered_operator(
+                operator.async_inner.clone().layer(layer),
+                operator.layer_bits | OPERATOR_LAYER_CONCURRENCY_LIMIT,
             )
         })();
         match result {
@@ -3669,6 +3763,12 @@ const OPERATOR_WITH_RETRY_ENTRY: Option<OperatorWithRetryFn> = Some(operator_wit
 #[cfg(not(feature = "layers-timeout-retry"))]
 const OPERATOR_WITH_RETRY_ENTRY: Option<OperatorWithRetryFn> = None;
 
+#[cfg(feature = "layers-concurrent-limit")]
+const OPERATOR_WITH_CONCURRENCY_LIMIT_ENTRY: Option<OperatorWithConcurrencyLimitFn> =
+    Some(operator_with_concurrency_limit);
+#[cfg(not(feature = "layers-concurrent-limit"))]
+const OPERATOR_WITH_CONCURRENCY_LIMIT_ENTRY: Option<OperatorWithConcurrencyLimitFn> = None;
+
 fn stage_api() -> Option<ApiV1> {
     Some(ApiV1 {
         struct_size: 0,
@@ -3686,7 +3786,8 @@ fn stage_api() -> Option<ApiV1> {
             | FEATURE_WRITER_ABORT
             | FEATURE_PRESIGN
             | PROFILE_FEATURE_BITS
-            | LAYER_FEATURE_BITS,
+            | TIMEOUT_RETRY_FEATURE_BITS
+            | CONCURRENCY_LIMIT_FEATURE_BITS,
         max_output_bytes: MAX_OUTPUT_BYTES,
         library_info: Some(library_info),
         error_view: Some(error_view),
@@ -3741,6 +3842,7 @@ fn stage_api() -> Option<ApiV1> {
         presigned_request_free: Some(presigned_request_free),
         operator_with_timeout: OPERATOR_WITH_TIMEOUT_ENTRY,
         operator_with_retry: OPERATOR_WITH_RETRY_ENTRY,
+        operator_with_concurrency_limit: OPERATOR_WITH_CONCURRENCY_LIMIT_ENTRY,
     })
 }
 
@@ -3824,6 +3926,7 @@ unsafe fn install_api(base: *mut u8, caller_size: usize, staged: &ApiV1) {
     install_field!(presigned_request_free);
     install_field!(operator_with_timeout);
     install_field!(operator_with_retry);
+    install_field!(operator_with_concurrency_limit);
 }
 
 /// Negotiate the stable v1 function table.
@@ -4050,6 +4153,54 @@ mod tests {
                 min_delay_millis,
                 max_delay_millis,
                 jitter,
+                &mut output,
+                &mut info,
+                &mut error,
+            )
+        };
+        match status {
+            STATUS_OK => {
+                assert!(!output.is_null());
+                assert!(!info.is_null());
+                assert!(error.is_null());
+                // SAFETY: this helper owns the returned immutable info snapshot.
+                unsafe { api.operator_info_free.expect("BASE info free is installed")(info) };
+                Ok(output)
+            }
+            STATUS_ERROR => {
+                assert!(output.is_null());
+                assert!(info.is_null());
+                assert!(!error.is_null());
+                Err(take_error_kind(api, error))
+            }
+            other => {
+                assert!(output.is_null());
+                assert!(info.is_null());
+                assert!(error.is_null());
+                Err(other)
+            }
+        }
+    }
+
+    #[cfg(feature = "layers-concurrent-limit")]
+    fn concurrency_limited_operator(
+        api: &ApiV1,
+        operator: *const OperatorV1,
+        operation_limit: u64,
+        has_http_request_limit: u32,
+        http_request_limit: u64,
+    ) -> Result<*mut OperatorV1, u32> {
+        let mut output = NonNull::<OperatorV1>::dangling().as_ptr();
+        let mut info = NonNull::<OperatorInfoV1>::dangling().as_ptr();
+        let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the input handle and all output slots remain live for this call.
+        let status = unsafe {
+            api.operator_with_concurrency_limit
+                .expect("CONCURRENCY_LIMIT constructor is installed")(
+                operator,
+                operation_limit,
+                has_http_request_limit,
+                http_request_limit,
                 &mut output,
                 &mut info,
                 &mut error,
@@ -4718,7 +4869,8 @@ mod tests {
                 | FEATURE_WRITER_ABORT
                 | FEATURE_PRESIGN
                 | PROFILE_FEATURE_BITS
-                | LAYER_FEATURE_BITS,
+                | TIMEOUT_RETRY_FEATURE_BITS
+                | CONCURRENCY_LIMIT_FEATURE_BITS,
         );
         assert!(api.library_info.is_some());
         assert!(api.operator_new.is_some());
@@ -4760,6 +4912,10 @@ mod tests {
             assert!(api.operator_with_timeout.is_none());
             assert!(api.operator_with_retry.is_none());
         }
+        #[cfg(feature = "layers-concurrent-limit")]
+        assert!(api.operator_with_concurrency_limit.is_some());
+        #[cfg(not(feature = "layers-concurrent-limit"))]
+        assert!(api.operator_with_concurrency_limit.is_none());
     }
 
     #[cfg(feature = "profile-standard")]
@@ -5061,6 +5217,84 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "layers-concurrent-limit")]
+    #[test]
+    fn concurrency_limit_is_an_immutable_outermost_layer() {
+        let api = api();
+        let (base, info) = memory_operator(&api);
+        write_memory_object(&api, base, b"before-concurrency", b"base");
+
+        for result in [
+            concurrency_limited_operator(&api, base, 0, 0, 0),
+            concurrency_limited_operator(&api, base, 1, 1, 0),
+            concurrency_limited_operator(&api, base, 1, 0, 1),
+        ] {
+            assert_eq!(result, Err(ERROR_INVALID_ARGUMENT));
+        }
+        assert_eq!(
+            concurrency_limited_operator(&api, base, 1, 2, 1),
+            Err(STATUS_ABI_MISMATCH),
+        );
+        #[cfg(target_pointer_width = "32")]
+        assert_eq!(
+            concurrency_limited_operator(&api, base, u64::from(u32::MAX) + 1, 0, 0),
+            Err(ERROR_INVALID_ARGUMENT),
+        );
+
+        let limited =
+            concurrency_limited_operator(&api, base, 2, 1, 1).expect("concurrency limit succeeds");
+        // SAFETY: both independently owned handles remain live.
+        unsafe {
+            assert_eq!((*base).layer_bits, 0);
+            assert_eq!((*limited).layer_bits, OPERATOR_LAYER_CONCURRENCY_LIMIT);
+        }
+        assert_eq!(
+            concurrency_limited_operator(&api, limited, 2, 0, 0),
+            Err(ERROR_INVALID_ARGUMENT),
+        );
+        assert_eq!(read_object(&api, limited, b"before-concurrency"), b"base");
+        write_memory_object(&api, limited, b"after-concurrency", b"limited");
+        assert_eq!(read_object(&api, base, b"after-concurrency"), b"limited");
+
+        #[cfg(feature = "layers-timeout-retry")]
+        let timeout = timeout_operator(&api, base, 5_000, 2_000)
+            .expect("timeout before concurrency succeeds");
+        #[cfg(feature = "layers-timeout-retry")]
+        let retry =
+            retry_operator(&api, timeout, 2, 1, 5, 0).expect("retry before concurrency succeeds");
+        #[cfg(feature = "layers-timeout-retry")]
+        let composed = concurrency_limited_operator(&api, retry, 2, 0, 0)
+            .expect("concurrency remains outermost");
+        #[cfg(feature = "layers-timeout-retry")]
+        unsafe {
+            assert_eq!(
+                (*composed).layer_bits,
+                OPERATOR_LAYER_TIMEOUT | OPERATOR_LAYER_RETRY | OPERATOR_LAYER_CONCURRENCY_LIMIT,
+            );
+        }
+        #[cfg(feature = "layers-timeout-retry")]
+        assert_eq!(
+            timeout_operator(&api, limited, 5_000, 2_000),
+            Err(ERROR_INVALID_ARGUMENT),
+        );
+        #[cfg(feature = "layers-timeout-retry")]
+        assert_eq!(
+            retry_operator(&api, limited, 2, 1, 5, 0),
+            Err(ERROR_INVALID_ARGUMENT),
+        );
+
+        // SAFETY: every handle is independently owned and freed exactly once.
+        unsafe {
+            api.operator_info_free.expect("BASE info free is installed")(info);
+            api.operator_free.expect("BASE operator free is installed")(base);
+            api.operator_free.expect("BASE operator free is installed")(limited);
+            #[cfg(feature = "layers-timeout-retry")]
+            for operator in [timeout, retry, composed] {
+                api.operator_free.expect("BASE operator free is installed")(operator);
+            }
+        }
+    }
+
     #[test]
     fn bootstrap_never_writes_a_cut_function_or_caller_tail() {
         #[repr(C, align(16))]
@@ -5153,6 +5387,7 @@ mod tests {
             presigned_request_free,
             operator_with_timeout,
             operator_with_retry,
+            operator_with_concurrency_limit,
         );
 
         for caller_size in API_PREFIX_SIZE..=size_of::<ApiV1>() + 16 {

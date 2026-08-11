@@ -14,12 +14,14 @@ default = ["profile-standard"]
 profile-local = ["opendal/blocking", "opendal/services-fs"]
 profile-standard = [
   "profile-local",
+  "layers-concurrent-limit",
   "layers-timeout-retry",
   "opendal/services-s3",
   "opendal/http-transport-reqwest",
   "opendal/http-transport-reqwest-rustls",
   "opendal/executors-tokio",
 ]
+layers-concurrent-limit = ["opendal/layers-concurrent-limit"]
 layers-timeout-retry = ["opendal/layers-retry", "opendal/layers-timeout"]
 
 [dependencies]
