@@ -75,6 +75,8 @@ jobs:
         run: |
           curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash -s "$MOONBIT_VERSION"
           echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
+      - name: Resolve MoonBit dependencies
+        run: make moon-deps
       - name: Test artifact profiles, packager, and version metadata
         run: |
           python3 scripts/test-distribution-profiles.py
@@ -176,6 +178,8 @@ jobs:
         run: |
           curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash -s "$MOONBIT_VERSION"
           echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
+      - name: Resolve MoonBit dependencies
+        run: make moon-deps
       - name: Configure Moon package credentials
         env:
           MOONCAKES_CREDENTIALS_JSON: ${{ secrets.MOONCAKES_CREDENTIALS_JSON }}

@@ -111,6 +111,9 @@ if output=$(
     exit 1
   fi
   {
+    # Materialize exact registry dependencies in this fresh consumer tree.
+    # The caller has already refreshed the shared registry through moon-deps.
+    moon check --target wasm
     moon test integration/consumer --target native --frozen \
       --warn-list '-68+73' --deny-warn
     moon test integration/consumer --target native --frozen --release \

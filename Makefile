@@ -29,7 +29,7 @@ MOON_NATIVE_LIB := $(NATIVE_LIB_DIR)/libopendal_mbt_native.a
 MOON_TEST_FLAGS := --target native --frozen --warn-list '$(MOON_WARN_LIST)' --deny-warn
 
 
-.PHONY: native rust-test moon-check moon-test coverage abi-smoke c-example \
+.PHONY: native rust-test moon-deps moon-check moon-test coverage abi-smoke c-example \
 	api-contract interface-contract package-contract packaged-consumer check \
 	test-profile native-artifact-test version-contract asan
 
@@ -39,6 +39,12 @@ native:
 rust-test:
 	cargo test --workspace --all-targets --locked $(CARGO_SERVICE_FLAGS) \
 		$(CARGO_PROFILE_FLAG)
+
+moon-deps:
+	moon update
+	# Dependency resolution is target-independent. Using wasm here avoids
+	# requiring an as-yet-unpublished native artifact during release PRs.
+	moon check --target wasm
 
 moon-check:
 	moon check --target native --frozen --warn-list '$(MOON_WARN_LIST)' --deny-warn
@@ -79,7 +85,7 @@ interface-contract:
 package-contract:
 	sh scripts/check-package.sh
 
-packaged-consumer:
+packaged-consumer: moon-deps
 	test -n "$(NATIVE_ARTIFACT)"
 	@if [ -n "$(NATIVE_ARTIFACT_TABLE)" ]; then \
 		sh scripts/check-packaged-consumer.sh --artifact-table \

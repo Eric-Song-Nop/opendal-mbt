@@ -24,6 +24,8 @@ jobs:
         run: |
           curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash -s "$MOONBIT_VERSION"
           echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
+      - name: Resolve MoonBit dependencies
+        run: make moon-deps
       - name: Tool versions
         run: |
           rustc --version
@@ -52,6 +54,8 @@ jobs:
         run: |
           curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash -s "$MOONBIT_VERSION"
           echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
+      - name: Resolve MoonBit dependencies
+        run: make moon-deps
       - name: Run Rust and MoonBit tests
         run: make test-profile RUST_PROFILE=${{ matrix.profile }}
       - name: Run the C consumer
@@ -69,6 +73,8 @@ jobs:
         run: |
           curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash -s "$MOONBIT_VERSION"
           echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
+      - name: Resolve MoonBit dependencies
+        run: make moon-deps
       - name: Run coverage
         run: make coverage
       - name: Run AddressSanitizer
