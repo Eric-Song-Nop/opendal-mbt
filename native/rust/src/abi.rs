@@ -3,7 +3,7 @@
 pub(crate) type Status = u32;
 
 pub(crate) const ABI_MAJOR: u32 = 1;
-pub(crate) const ABI_MINOR: u32 = 0;
+pub(crate) const ABI_MINOR: u32 = 1;
 pub(crate) const ABI_PATCH: u32 = 0;
 pub(crate) const STRUCT_VERSION: u32 = 1;
 
@@ -52,6 +52,7 @@ pub(crate) const FEATURE_WHOLE_OBJECT: u64 = 1 << 1;
 pub(crate) const FEATURE_LISTING: u64 = 1 << 2;
 pub(crate) const FEATURE_RANDOM_READER: u64 = 1 << 3;
 pub(crate) const FEATURE_CHUNKED_WRITER: u64 = 1 << 4;
+pub(crate) const FEATURE_READ_STREAM: u64 = 1 << 5;
 
 pub(crate) const CAP_STAT: u64 = 1 << 0;
 pub(crate) const CAP_READ: u64 = 1 << 1;
@@ -74,6 +75,10 @@ pub(crate) const READ_IF_NONE_MATCH_PRESENT: u64 = 1 << 2;
 pub(crate) const READER_VERSION_PRESENT: u64 = 1 << 0;
 pub(crate) const READER_IF_MATCH_PRESENT: u64 = 1 << 1;
 pub(crate) const READER_IF_NONE_MATCH_PRESENT: u64 = 1 << 2;
+
+pub(crate) const READ_STREAM_VERSION_PRESENT: u64 = 1 << 0;
+pub(crate) const READ_STREAM_IF_MATCH_PRESENT: u64 = 1 << 1;
+pub(crate) const READ_STREAM_IF_NONE_MATCH_PRESENT: u64 = 1 << 2;
 
 pub(crate) const WRITE_APPEND: u64 = 1 << 0;
 pub(crate) const WRITE_CONTENT_TYPE_PRESENT: u64 = 1 << 0;
@@ -147,6 +152,19 @@ pub(crate) struct ReaderOptionsV1 {
     pub(crate) struct_size: u32,
     pub(crate) struct_version: u32,
     pub(crate) present_bits: u64,
+    pub(crate) version: BytesViewV1,
+    pub(crate) if_match: BytesViewV1,
+    pub(crate) if_none_match: BytesViewV1,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(crate) struct ReadStreamOptionsV1 {
+    pub(crate) struct_size: u32,
+    pub(crate) struct_version: u32,
+    pub(crate) present_bits: u64,
+    pub(crate) range: ByteRangeV1,
+    pub(crate) chunk_size: u64,
     pub(crate) version: BytesViewV1,
     pub(crate) if_match: BytesViewV1,
     pub(crate) if_none_match: BytesViewV1,
@@ -338,6 +356,19 @@ pub(crate) enum ReaderStateV1 {
 }
 
 #[repr(C)]
+pub(crate) struct ReadStreamV1 {
+    pub(crate) state: std::sync::Mutex<ReadStreamStateV1>,
+    pub(crate) chunk_size: u64,
+}
+
+pub(crate) enum ReadStreamStateV1 {
+    Open(Box<opendal::blocking::BufferIterator>),
+    End,
+    Failed,
+    Closed,
+}
+
+#[repr(C)]
 pub(crate) struct WriterV1 {
     pub(crate) state: std::sync::Mutex<WriterStateV1>,
 }
@@ -465,6 +496,17 @@ pub(crate) type WriterWriteFn =
 pub(crate) type WriterCloseFn =
     unsafe extern "C" fn(*mut WriterV1, *mut *mut MetadataV1, *mut *mut ErrorV1) -> Status;
 pub(crate) type WriterFreeFn = unsafe extern "C" fn(*mut WriterV1);
+pub(crate) type OperatorReadStreamFn = unsafe extern "C" fn(
+    *mut OperatorV1,
+    *const BytesViewV1,
+    *const ReadStreamOptionsV1,
+    *mut *mut ReadStreamV1,
+    *mut *mut ErrorV1,
+) -> Status;
+pub(crate) type ReadStreamNextFn =
+    unsafe extern "C" fn(*mut ReadStreamV1, u64, *mut *mut BufferV1, *mut *mut ErrorV1) -> Status;
+pub(crate) type ReadStreamCloseFn = unsafe extern "C" fn(*mut ReadStreamV1);
+pub(crate) type ReadStreamFreeFn = unsafe extern "C" fn(*mut ReadStreamV1);
 
 #[repr(C)]
 pub(crate) struct ApiV1 {
@@ -512,6 +554,10 @@ pub(crate) struct ApiV1 {
     pub(crate) writer_write: Option<WriterWriteFn>,
     pub(crate) writer_close: Option<WriterCloseFn>,
     pub(crate) writer_free: Option<WriterFreeFn>,
+    pub(crate) operator_read_stream: Option<OperatorReadStreamFn>,
+    pub(crate) read_stream_next: Option<ReadStreamNextFn>,
+    pub(crate) read_stream_close: Option<ReadStreamCloseFn>,
+    pub(crate) read_stream_free: Option<ReadStreamFreeFn>,
 }
 
 pub(crate) const API_INPUT_SIZE: usize =
@@ -527,6 +573,7 @@ const _: () = {
     assert!(core::mem::size_of::<ByteRangeV1>() == 32);
     assert!(core::mem::size_of::<ReadOptionsV1>() == 96);
     assert!(core::mem::size_of::<ReaderOptionsV1>() == 64);
+    assert!(core::mem::size_of::<ReadStreamOptionsV1>() == 104);
     assert!(core::mem::size_of::<WriteOptionsV1>() == 120);
     assert!(core::mem::size_of::<StatOptionsV1>() == 64);
     assert!(core::mem::size_of::<ListOptionsV1>() == 48);

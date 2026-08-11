@@ -381,16 +381,21 @@ int main(void) {
       bytes_view(missing_path, (uint64_t)(sizeof(missing_path) - 1));
   const opendal_mbt_bytes_view_v1_t data =
       bytes_view(payload, (uint64_t)sizeof(payload));
-  const uint64_t required_features =
-      OPENDAL_MBT_FEATURE_BASE | OPENDAL_MBT_FEATURE_WHOLE_OBJECT;
+  const uint64_t required_features = OPENDAL_MBT_FEATURE_BASE |
+                                     OPENDAL_MBT_FEATURE_WHOLE_OBJECT |
+                                     OPENDAL_MBT_FEATURE_READ_STREAM;
   opendal_mbt_api_v1_t api;
   opendal_mbt_operator_v1_t *operator_ = NULL;
   opendal_mbt_operator_info_v1_t *operator_info = NULL;
   opendal_mbt_metadata_v1_t *metadata = NULL;
   opendal_mbt_buffer_v1_t *buffer = NULL;
+  opendal_mbt_read_stream_v1_t *read_stream = NULL;
   opendal_mbt_error_v1_t *error = NULL;
+  opendal_mbt_read_stream_options_v1_t stream_options;
   uint8_t *roundtrip = NULL;
   uint64_t roundtrip_len = 0;
+  uint8_t stream_roundtrip[sizeof(payload)];
+  size_t stream_roundtrip_len = 0;
   opendal_mbt_status_t status;
   int api_ready = 0;
   int result = EXIT_FAILURE;
@@ -411,7 +416,8 @@ int main(void) {
   }
   if ((api.feature_bits & required_features) != required_features) {
     (void)fprintf(stderr,
-                  "opendal_mbt_get_api: need BASE|WHOLE_OBJECT, got 0x%016"
+                  "opendal_mbt_get_api: need BASE|WHOLE_OBJECT|READ_STREAM, "
+                  "got 0x%016"
                   PRIx64 "\n",
                   api.feature_bits);
     goto cleanup;
@@ -443,6 +449,10 @@ int main(void) {
   REQUIRE_API_FIELD(operator_free);
   REQUIRE_API_FIELD(operator_read);
   REQUIRE_API_FIELD(operator_write);
+  REQUIRE_API_FIELD(operator_read_stream);
+  REQUIRE_API_FIELD(read_stream_next);
+  REQUIRE_API_FIELD(read_stream_close);
+  REQUIRE_API_FIELD(read_stream_free);
 #undef REQUIRE_API_FIELD
 
   api_ready = 1;
@@ -528,6 +538,73 @@ int main(void) {
     goto cleanup;
   }
 
+  memset(&stream_options, 0, sizeof(stream_options));
+  stream_options.struct_size = (uint32_t)sizeof(stream_options);
+  stream_options.struct_version = OPENDAL_MBT_STRUCT_VERSION_V1;
+  stream_options.range.struct_size =
+      (uint32_t)sizeof(stream_options.range);
+  stream_options.range.struct_version = OPENDAL_MBT_STRUCT_VERSION_V1;
+  stream_options.range.kind = OPENDAL_MBT_RANGE_FULL;
+  stream_options.chunk_size = UINT64_C(5);
+  status = api.operator_read_stream(operator_, &path, &stream_options,
+                                    &read_stream, &error);
+  if (!expect_ok(&api, "operator_read_stream", status, &error) ||
+      read_stream == NULL) {
+    goto cleanup;
+  }
+  for (;;) {
+    uint8_t *chunk = NULL;
+    uint64_t chunk_len = 0;
+
+    status = api.read_stream_next(read_stream, api.max_output_bytes, &buffer,
+                                  &error);
+    if (status == OPENDAL_MBT_STATUS_END) {
+      if (buffer != NULL || error != NULL) {
+        (void)fputs("read_stream_next: END returned outputs\n", stderr);
+        free(chunk);
+        goto cleanup;
+      }
+      break;
+    }
+    if (!expect_ok(&api, "read_stream_next", status, &error) ||
+        buffer == NULL) {
+      free(chunk);
+      goto cleanup;
+    }
+    if (!copy_buffer(&api, buffer, &chunk, &chunk_len)) {
+      free(chunk);
+      goto cleanup;
+    }
+    api.buffer_free(buffer);
+    buffer = NULL;
+    if (chunk_len == 0 || chunk_len > stream_options.chunk_size ||
+        chunk_len > (uint64_t)(sizeof(stream_roundtrip) -
+                               stream_roundtrip_len)) {
+      (void)fputs("read_stream_next: invalid bounded chunk length\n", stderr);
+      free(chunk);
+      goto cleanup;
+    }
+    memcpy(stream_roundtrip + stream_roundtrip_len, chunk, (size_t)chunk_len);
+    stream_roundtrip_len += (size_t)chunk_len;
+    free(chunk);
+  }
+  if (stream_roundtrip_len != sizeof(payload) ||
+      memcmp(stream_roundtrip, payload, sizeof(payload)) != 0) {
+    (void)fputs("bounded read stream roundtrip mismatch\n", stderr);
+    goto cleanup;
+  }
+  /* END is stable until close; close itself is idempotent. */
+  status = api.read_stream_next(read_stream, api.max_output_bytes, &buffer,
+                                &error);
+  if (status != OPENDAL_MBT_STATUS_END || buffer != NULL || error != NULL) {
+    (void)fputs("read_stream_next: repeated END was not stable\n", stderr);
+    goto cleanup;
+  }
+  api.read_stream_close(read_stream);
+  api.read_stream_close(read_stream);
+  api.read_stream_free(read_stream);
+  read_stream = NULL;
+
   (void)fprintf(stdout,
                 "binary roundtrip OK: %" PRIu64
                 " bytes, including embedded NUL and non-UTF-8 bytes\n",
@@ -545,6 +622,9 @@ cleanup:
     }
     if (metadata != NULL) {
       api.metadata_free(metadata);
+    }
+    if (read_stream != NULL) {
+      api.read_stream_free(read_stream);
     }
     if (operator_info != NULL) {
       api.operator_info_free(operator_info);
