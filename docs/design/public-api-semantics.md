@@ -7,7 +7,7 @@ OpenDAL binding. It deliberately avoids fixing the native ABI or implementation
 layout; those are Phase 1 concerns and must implement this contract.
 
 This document defines the implemented synchronous Reader, Writer, copy, and
-rename semantics. The generated `pkg.generated.mbti` is the authoritative
+rename semantics. The generated `src/pkg.generated.mbti` is the authoritative
 current public surface.
 
 ## Design stance

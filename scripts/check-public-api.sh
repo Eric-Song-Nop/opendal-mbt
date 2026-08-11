@@ -18,13 +18,13 @@ ffi_files=$(
     ! -path './integration/*' ! -path './_build/*' \
     -exec grep -l -F 'extern "C" fn' {} + | sort || true
 )
-if [ "$ffi_files" != "./native_ffi.mbt" ]; then
-  echo "native externs must live only in native_ffi.mbt" >&2
+if [ "$ffi_files" != "./src/native_ffi.mbt" ]; then
+  echo "native externs must live only in src/native_ffi.mbt" >&2
   printf '%s\n' "$ffi_files" >&2
   exit 1
 fi
 
-if grep -nE 'Native[A-Z]|native_' pkg.generated.mbti; then
-  echo "native implementation types leaked into pkg.generated.mbti" >&2
+if grep -nE 'Native[A-Z]|native_' src/pkg.generated.mbti; then
+  echo "native implementation types leaked into src/pkg.generated.mbti" >&2
   exit 1
 fi

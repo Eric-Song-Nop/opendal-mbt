@@ -56,8 +56,8 @@ api-contract:
 	sh scripts/check-public-api.sh
 
 interface-contract:
-	moon info --target native --frozen operator.mbt
-	git diff --exit-code -- pkg.generated.mbti
+	moon info --target native --frozen src/operator.mbt
+	git diff --exit-code -- src/pkg.generated.mbti
 
 package-contract:
 	sh scripts/check-package.sh
@@ -83,5 +83,5 @@ asan:
 	$(MAKE) native RUST_PROFILE=debug
 	OPENDAL_MBT_NATIVE_LIB="$(CURDIR)/target/debug/libopendal_mbt_native.a" \
 		python3 .agents/skills/moonbit-c-binding/scripts/run-asan.py \
-			--repo-root . --pkg moon.pkg \
+			--repo-root . --pkg src/moon.pkg \
 			--pkg integration/consumer/moon.pkg
