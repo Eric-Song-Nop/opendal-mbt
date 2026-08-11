@@ -21,13 +21,45 @@ the same model as `moonbitlang/llvm.mbt`. The script requires Node.js 18 or
 newer. That runtime requirement is temporary toolchain debt, not part of the
 OpenDAL API.
 
-## Supported release matrix
+## Service profiles and package selection
 
-The first prebuilt profile is `local`:
+The published `v0.1.x` profile is immutable:
 
 | Profile | OpenDAL services | Rust features |
 | --- | --- | --- |
 | `local` | `memory`, `fs` | `blocking`, `services-fs` |
+
+Phase 5 adds one successor profile instead of a matrix of user-selectable
+variants:
+
+| Profile | OpenDAL services | Additional OpenDAL features |
+| --- | --- | --- |
+| `standard` | `memory`, `fs`, `s3` | `services-s3`, `http-transport-reqwest`, `http-transport-reqwest-rustls`, `executors-tokio` |
+
+`standard` includes the local services, so the root Moon facade needs exactly
+one native archive on each host. There is no public profile selector and no
+environment variable that changes the archive. Published package metadata in
+`native/artifact-selection.json` names exactly one profile-specific pinned
+table. It remains `local` until the typed S3 constructor and its ABI land; that
+slice switches the metadata to `artifacts-standard.json` atomically with the
+new API.
+
+The local `v0.1.0-r1` records and their digests are never rewritten. Local and
+standard pins live in separate tables, and their cache paths include the
+profile name, so an existing local cache remains valid and can coexist with a
+standard archive.
+
+The Rust crate mirrors the distribution boundary with `profile-local` and
+`profile-standard` Cargo features. The latter is the source-build default and
+extends the former. OpenDAL facade defaults remain disabled: retry, timeout,
+logging, and unrelated layers are not pulled in implicitly. Both
+`http-transport-reqwest` and its rustls backend are explicit because OpenDAL
+0.58.1 gates the HTTP installation performed by `install_default()` on the
+umbrella feature. The later standard-profile runtime slice must call
+`opendal::install_default()`; calling only `init_default_registry()` does not
+install the S3 HTTP transport.
+
+## Supported host matrix
 
 The first host matrix is intentionally small:
 
@@ -62,6 +94,8 @@ lib/libopendal_mbt_native.a
 
 - the binding, ABI, OpenDAL, and artifact revision versions;
 - the service profile and enabled services;
+- the profile-level Cargo feature and required runtime initializer when the
+  profile declares them;
 - the exact Rust target and its compatibility floor;
 - the static-library relative path, byte size, and SHA-256;
 - the exact system libraries reported by
@@ -73,10 +107,10 @@ assuming that one host's native-link report applies to another host.
 
 ## Trust and cache model
 
-The module source pins each archive URL, archive size and SHA-256, extracted
-library size and SHA-256, manifest identity, compatibility floor, and system
-link flags. A checksum downloaded beside a mutable archive is useful for
-humans but is not the installer's trust root.
+The selected profile table pins each archive URL, archive size and SHA-256,
+extracted library size and SHA-256, manifest identity, compatibility floor,
+and system link flags. A checksum downloaded beside a mutable archive is
+useful for humans but is not the installer's trust root.
 
 The configuration script selects the current host and installs the matching
 archive below:
@@ -102,8 +136,10 @@ system libraries to the link configuration for `Eric-Song-Nop/opendal`.
 
 ## Maintainer path
 
-Repository development still builds the Rust archive from source. The
-Makefile passes the exact locally built archive to the configuration script
+Repository development still builds the Rust archive from source. Ordinary
+source builds use `profile-standard`; an explicit local artifact rebuild uses
+`--no-default-features --features profile-local`. The Makefile passes the
+exact locally built archive to the configuration script
 through a maintainer-only override, so Moon tests exercise uncommitted Rust
 changes instead of silently using a released binary. This override is not
 needed or documented in the consumer quickstart.
@@ -115,6 +151,15 @@ depend on an unpinned host toolchain.
 
 ## Release and acceptance gates
 
+Native artifact CI has two modes. Pull requests and manual dispatches use
+**candidate mode**: the packager derives a temporary profile-specific table
+from the archive it just built, the clean-consumer harness overlays that table
+and its internal selection into a staged `moon package`, and the resolver fills
+the cache from the local candidate bytes. Candidate records use the
+non-resolving `candidate.invalid` origin and are never release trust roots.
+Version tags use **release mode** and require every built field and digest to
+match the committed profile table; candidate URLs are rejected.
+
 A release is eligible only when all of the following pass:
 
 1. Rust, C ABI, MoonBit, debug/release, sanitizer, and public-interface tests.
@@ -123,11 +168,12 @@ A release is eligible only when all of the following pass:
    concurrency, and offline hot-cache use.
 4. A consumer assembled from the `moon package` archive that has no repository
    checkout, Cargo/Rust on `PATH`, `LIBRARY_PATH`, or consumer linker flags.
-5. That consumer runs the memory and filesystem workflows with ordinary
-   `moon test --target native` commands on every advertised host.
+5. That consumer runs every service workflow promised by the selected profile
+   with ordinary `moon test --target native` commands on every advertised host.
 
-The release workflow publishes the two archives under the package version
-tag, then publishes that exact source tree to mooncakes.io and executes a
-fresh registry consumer. Adding a target means building it in CI, recording
+The release workflow publishes one selected-profile archive per supported host
+under the package version tag, then publishes that exact source tree to
+mooncakes.io and executes a fresh registry consumer. Adding a target means
+building it in CI, recording
 its own compatibility floor and native link flags, extending the pinned
 artifact table, and adding the same clean-consumer gate for that host.
