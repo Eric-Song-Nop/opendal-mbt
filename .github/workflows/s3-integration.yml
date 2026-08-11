@@ -1,0 +1,150 @@
+name: Phase 5 S3 integration
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/ci.yml
+      - .github/workflows/s3-integration.yml
+      - build.js
+      - Cargo.lock
+      - Cargo.toml
+      - integration/s3/**
+      - moon.mod
+      - moon.work
+      - native/rust/**
+      - scripts/test-native-resolver.js
+      - src/**
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/ci.yml
+      - .github/workflows/s3-integration.yml
+      - build.js
+      - Cargo.lock
+      - Cargo.toml
+      - integration/s3/**
+      - moon.mod
+      - moon.work
+      - native/rust/**
+      - scripts/test-native-resolver.js
+      - src/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  MOONBIT_VERSION: 0.10.6+80dc50f24
+  MINIO_IMAGE: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e
+  MC_IMAGE: quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z@sha256:aead63c77f9db9107f1696fb08ecb0faeda23729cde94b0f663edf4fe09728e3
+  S3_BUCKET: opendal-mbt-phase5
+
+jobs:
+  s3:
+    name: ${{ matrix.rust_target }} / MinIO
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            rust_target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            rust_target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust toolchain
+        run: rustup show active-toolchain
+      - name: Install MoonBit
+        run: |
+          curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash -s "$MOONBIT_VERSION"
+          echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
+      - name: Create ephemeral S3 test identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          access_key="mbt$(openssl rand -hex 8)"
+          secret_key="$(openssl rand -hex 24)"
+          root_suffix="$(openssl rand -hex 8)"
+          root="ci/${GITHUB_RUN_ID}/${GITHUB_RUN_ATTEMPT}/${RUNNER_ARCH,,}-${root_suffix}/"
+          mc_host="http://${access_key}:${secret_key}@127.0.0.1:9000"
+          echo "::add-mask::$access_key"
+          echo "::add-mask::$secret_key"
+          echo "::add-mask::$mc_host"
+          {
+            echo "MINIO_ROOT_USER=$access_key"
+            echo "MINIO_ROOT_PASSWORD=$secret_key"
+            echo "MC_HOST_local=$mc_host"
+            echo "OPENDAL_MBT_S3_INTEGRATION=1"
+            echo "OPENDAL_MBT_S3_ENDPOINT=http://127.0.0.1:9000"
+            echo "OPENDAL_MBT_S3_BUCKET=$S3_BUCKET"
+            echo "OPENDAL_MBT_S3_REGION=us-east-1"
+            echo "OPENDAL_MBT_S3_ROOT=$root"
+            echo "OPENDAL_MBT_S3_ACCESS_KEY_ID=$access_key"
+            echo "OPENDAL_MBT_S3_SECRET_ACCESS_KEY=$secret_key"
+          } >> "$GITHUB_ENV"
+      - name: Start pinned MinIO and create the test bucket
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker pull "$MINIO_IMAGE"
+          docker run --detach --rm \
+            --name opendal-mbt-minio \
+            --publish 127.0.0.1:9000:9000 \
+            --env MINIO_ROOT_USER \
+            --env MINIO_ROOT_PASSWORD \
+            "$MINIO_IMAGE" server /data --address :9000 >/dev/null
+          ready=0
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:9000/minio/health/ready >/dev/null; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          test "$ready" = 1
+          docker pull "$MC_IMAGE"
+          docker run --rm --network host \
+            --env MC_HOST_local \
+            "$MC_IMAGE" mb --ignore-existing "local/$S3_BUCKET" >/dev/null
+      - name: Build the target-native standard profile
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_target=$(rustc -vV | sed -n 's/^host: //p')
+          test "$actual_target" = '${{ matrix.rust_target }}'
+          mkdir -p target/s3-integration
+          CARGO_TERM_COLOR=never cargo rustc \
+            -p opendal-mbt-native \
+            --locked \
+            --no-default-features \
+            --features profile-standard \
+            -- --print native-static-libs 2>&1 | \
+            tee target/s3-integration/native-static-libs.log
+          native_link_flags=$(sed -n \
+            's/^note: native-static-libs: //p' \
+            target/s3-integration/native-static-libs.log | tail -n 1)
+          test -n "$native_link_flags"
+          {
+            echo "OPENDAL_MBT_NATIVE_LIB=$GITHUB_WORKSPACE/target/debug/libopendal_mbt_native.a"
+            echo "OPENDAL_MBT_NATIVE_LIBS=$native_link_flags"
+          } >> "$GITHUB_ENV"
+      - name: Run the S3 integration suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          make moon-deps
+          moon check integration/s3 \
+            --target native --frozen --warn-list '-68+73' --deny-warn
+          moon test integration/s3 \
+            --target native --frozen --warn-list '-68+73' --deny-warn
+      - name: Remove the test bucket and MinIO
+        if: always()
+        shell: bash
+        run: |
+          docker run --rm --network host \
+            --env MC_HOST_local \
+            "$MC_IMAGE" rb --force "local/$S3_BUCKET" >/dev/null 2>&1 || true
+          docker rm --force opendal-mbt-minio >/dev/null 2>&1 || true
