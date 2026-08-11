@@ -211,6 +211,19 @@ static opendal_mbt_status_t load_presign_api(opendal_mbt_api_v1_t *api) {
   return OPENDAL_MBT_STATUS_OK;
 }
 
+static opendal_mbt_status_t load_layers_api(opendal_mbt_api_v1_t *api) {
+  opendal_mbt_status_t status = load_api(api, false);
+  if (status != OPENDAL_MBT_STATUS_OK) {
+    return status;
+  }
+  if ((api->feature_bits & OPENDAL_MBT_FEATURE_LAYERS) == 0 ||
+      !API_HAS(api, operator_with_timeout) ||
+      !API_HAS(api, operator_with_retry)) {
+    return OPENDAL_MBT_STATUS_ABI_MISMATCH;
+  }
+  return OPENDAL_MBT_STATUS_OK;
+}
+
 static void result_set_local_error(moonbit_opendal_result_t *result,
                                    opendal_mbt_error_kind_t kind,
                                    const char *kind_name,
@@ -1406,6 +1419,63 @@ cleanup:
   if (result->status == OPENDAL_MBT_STATUS_OK &&
       (result->error != NULL || result->operator_ == NULL ||
        !validate_operator_info(result->info))) {
+    result->status = OPENDAL_MBT_STATUS_ABI_MISMATCH;
+  }
+  return result;
+}
+
+MOONBIT_FFI_EXPORT moonbit_opendal_result_t *
+moonbit_opendal_operator_with_timeout(
+    moonbit_opendal_operator_t *operator_, uint64_t operation_timeout_millis,
+    uint64_t io_timeout_millis) {
+  moonbit_opendal_result_t *result = result_new();
+  opendal_mbt_api_v1_t api;
+  result->status = load_layers_api(&api);
+  if (result->status != OPENDAL_MBT_STATUS_OK) {
+    return result;
+  }
+  if (operator_ == NULL || operator_->operator_ == NULL) {
+    result_set_local_error(result, OPENDAL_MBT_ERROR_RESOURCE_CLOSED,
+                           "ResourceClosed", "operator is closed");
+    return result;
+  }
+  result->status = api.operator_with_timeout(
+      operator_->operator_, operation_timeout_millis, io_timeout_millis,
+      &result->operator_, &result->info, &result->error);
+  if (result->status == OPENDAL_MBT_STATUS_OK &&
+      (result->operator_ == NULL || result->info == NULL ||
+       result->error != NULL || !validate_operator_info(result->info))) {
+    result->status = OPENDAL_MBT_STATUS_ABI_MISMATCH;
+  }
+  return result;
+}
+
+MOONBIT_FFI_EXPORT moonbit_opendal_result_t *
+moonbit_opendal_operator_with_retry(
+    moonbit_opendal_operator_t *operator_, uint32_t max_retries,
+    uint64_t min_delay_millis, uint64_t max_delay_millis, int32_t jitter) {
+  moonbit_opendal_result_t *result = result_new();
+  opendal_mbt_api_v1_t api;
+  if (jitter != 0 && jitter != 1) {
+    result->status = OPENDAL_MBT_STATUS_ABI_MISMATCH;
+    return result;
+  }
+  result->status = load_layers_api(&api);
+  if (result->status != OPENDAL_MBT_STATUS_OK) {
+    return result;
+  }
+  if (operator_ == NULL || operator_->operator_ == NULL) {
+    result_set_local_error(result, OPENDAL_MBT_ERROR_RESOURCE_CLOSED,
+                           "ResourceClosed", "operator is closed");
+    return result;
+  }
+  result->status = api.operator_with_retry(
+      operator_->operator_, max_retries, min_delay_millis, max_delay_millis,
+      jitter == 0 ? OPENDAL_MBT_FALSE : OPENDAL_MBT_TRUE,
+      &result->operator_, &result->info, &result->error);
+  if (result->status == OPENDAL_MBT_STATUS_OK &&
+      (result->operator_ == NULL || result->info == NULL ||
+       result->error != NULL || !validate_operator_info(result->info))) {
     result->status = OPENDAL_MBT_STATUS_ABI_MISMATCH;
   }
   return result;
