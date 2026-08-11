@@ -8,20 +8,20 @@ stay private.
 
 ## Release and source status
 
-The published package and this Phase 5 source tree are intentionally different
-until the next release is cut:
+The published `0.1.0` package and this pinned but unpublished `0.2.0` release
+candidate are intentionally different until the release tag is cut:
 
 | Track | Services and API | Native hosts |
 | --- | --- | --- |
 | Published `Eric-Song-Nop/opendal@0.1.0` | `local` profile: `memory`, `fs`, synchronous Phase 1-4 API | Apple silicon macOS 11+, x86-64 glibc Linux 2.35+ |
-| Current source candidate | `standard` profile: `memory`, `fs`, typed `s3`, complete Phase 5A-E source API | Apple silicon macOS 11+, x86-64 and arm64 glibc Linux 2.35+ |
+| Pinned `0.2.0` release candidate (not published) | `standard` profile: `memory`, `fs`, typed `s3`, complete Phase 5A-E API | Apple silicon macOS 11+, x86-64 and arm64 glibc Linux 2.35+ |
 
-The repository still selects the immutable `local` `0.1.0` artifact table for
-ordinary package installation. The `standard` artifact table has no release
-pins yet. Consequently, installing `0.1.0` does not make the Phase 5 methods or
-S3 backend available; contributors exercise them by building the current
-source with the standard profile. A later release-preparation change will bump
-the version and select verified standard artifacts atomically.
+This source tree selects the fully pinned `native/artifacts-standard.json`
+table for `0.2.0-r1`. The immutable `v0.1.0-r1` local records remain unchanged
+in `native/artifacts.json`. The standard URLs name future `v0.2.0` release
+assets and are not a publication claim: `moon add
+Eric-Song-Nop/opendal@0.1.0` still provides only the released local API until
+the tag workflow publishes `0.2.0`.
 
 The current source facade implements:
 
@@ -39,9 +39,16 @@ The current source facade implements:
 The generated public interface is
 [`src/pkg.generated.mbti`](pkg.generated.mbti).
 
-## Install the published local release
+## Install a release
 
-Add the released package like any other Moon package:
+After the `v0.2.0` tag workflow publishes the standard release, add it like any
+other Moon package:
+
+```sh
+moon add Eric-Song-Nop/opendal@0.2.0
+```
+
+Until that tag is published, the available registry baseline remains:
 
 ```sh
 moon add Eric-Song-Nop/opendal@0.1.0
@@ -66,12 +73,13 @@ or this repository.
 Contributors testing the Phase 5 source stack use the checked-out repository:
 
 ```sh
-moon install
+make moon-deps
 make test-profile NATIVE_SERVICE_PROFILE=standard
 ```
 
-That maintainer path builds the standard archive from source and does not alter
-the published `local` selection or artifact pins.
+That maintainer path builds and overlays a standard archive from source for
+validation; it neither rewrites the committed `v0.2.0` standard pins nor
+changes the immutable `v0.1.0` local table.
 
 ## First operation
 
@@ -122,8 +130,8 @@ async test "README: async memory round trip" {
 
 ## Guides
 
-- [Getting started](getting-started.mbt.md) — install the published package or
-  exercise the Phase 5 source candidate, then choose synchronous or async I/O.
+- [Getting started](getting-started.mbt.md) — install a published release or
+  exercise the pinned `v0.2.0` candidate, then choose synchronous or async I/O.
 - [Connecting](connecting.mbt.md) — understand profiles and construct memory,
   filesystem, and typed S3 operators.
 - [Common tasks](tasks.mbt.md) — recipes for streams, abort, presign, layers,
@@ -144,9 +152,9 @@ async test "README: async memory round trip" {
   work.
 - Retry, timeout, and concurrency limits are never implicit. Logging, tracing,
   metrics exporters, and custom callback layers are not exposed.
-- Standard artifacts are not yet published. Intel macOS, Windows, and musl
-  Linux are not advertised; a Rust-only build is not treated as MoonBit host
-  support.
+- Standard artifacts are pinned for the `v0.2.0` release candidate but are not
+  yet published. Intel macOS, Windows, and musl Linux are not advertised; a
+  Rust-only build is not treated as MoonBit host support.
 
 Passing an arbitrary scheme does not install a backend. ABI feature presence,
 selected-profile services, and a backend's operation capabilities are separate

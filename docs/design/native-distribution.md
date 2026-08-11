@@ -38,11 +38,10 @@ variants:
 
 `standard` includes the local services, so the root Moon facade needs exactly
 one native archive on each host. There is no public profile selector and no
-environment variable that changes the archive. Published package metadata in
-`native/artifact-selection.json` names exactly one profile-specific pinned
-table. It remains `local` until the typed S3 constructor and its ABI land; that
-slice switches the metadata to `artifacts-standard.json` atomically with the
-new API.
+environment variable that changes the archive. The published `v0.1.0` package
+selected `artifacts.json`. The `v0.2.0` release-candidate source atomically
+selects `artifacts-standard.json`, with one pinned target-native archive for
+each of the three advertised hosts.
 
 The local `v0.1.0-r1` records and their digests are never rewritten. Local and
 standard pins live in separate tables, and their cache paths include the
@@ -62,8 +61,8 @@ install the S3 HTTP transport.
 ## Supported host matrix
 
 The immutable `local` v0.1 release remains available on its original two
-hosts. The `standard` profile expands the next release to three target-native
-builders:
+hosts. The pinned but unpublished `v0.2.0` candidate expands `standard` to
+three target-native builders:
 
 | Host | Release target | Compatibility floor | Profile |
 | --- | --- | --- | --- |
@@ -157,8 +156,9 @@ suite runs against `profile-standard` because it intentionally exercises
 standard-only S3 and operational-layer symbols. The Makefile selects the
 requested Cargo feature explicitly and passes both the exact locally built
 archive and its source profile to the configuration script. The script keeps
-the published artifact selection untouched while adding any host frameworks
-declared by that source profile, so Moon tests exercise uncommitted Rust
+the committed artifact selection and pins untouched while overlaying the
+maintainer-built archive for that invocation and adding any host frameworks
+declared by the source profile. Moon tests therefore exercise uncommitted Rust
 changes with matching link requirements instead of silently using a released
 binary. These overrides are not needed or documented in the consumer
 quickstart.

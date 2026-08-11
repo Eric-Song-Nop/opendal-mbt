@@ -54,20 +54,20 @@ test oracle, but is not the public or long-term ABI of this project.
 | --- | --- | --- |
 | Published compatibility baseline | Released | Moon package `0.1.0`, ABI `1.0`, `local` profile |
 | Blocking local operations | Released | `memory` and `fs` in `0.1.0` |
-| Bounded reads and explicit Writer abort | Implemented; release pending | Phase 5A source, ABI `1.1` |
-| Typed S3 and the `standard` profile | Implemented; release pending | Phase 5B source, ABI `1.2` |
-| Presign and explicit operational layers | Implemented; release pending | Phase 5C source, ABI `1.3`-`1.5` |
-| Batch delete and managed Copier | Implemented; release pending | Phase 5D source, ABI `1.6` |
-| Initial MoonBit async facade | Implemented; release pending | Phase 5E source, ABI `1.7` |
-| Standard native host expansion | Candidate-tested; release pending | macOS arm64, Linux x86-64, Linux arm64 |
+| Bounded reads and explicit Writer abort | Pinned in `v0.2.0` candidate; publication pending | Phase 5A, ABI `1.1` |
+| Typed S3 and the `standard` profile | Pinned in `v0.2.0` candidate; publication pending | Phase 5B, ABI `1.2` |
+| Presign and explicit operational layers | Pinned in `v0.2.0` candidate; publication pending | Phase 5C, ABI `1.3`-`1.5` |
+| Batch delete and managed Copier | Pinned in `v0.2.0` candidate; publication pending | Phase 5D, ABI `1.6` |
+| Initial MoonBit async facade | Pinned in `v0.2.0` candidate; publication pending | Phase 5E, ABI `1.7` |
+| Standard native host expansion | Pinned in `v0.2.0` candidate; publication pending | macOS arm64, Linux x86-64, Linux arm64 |
 
-`v0.1.0` remains the published compatibility baseline. The current source
-tree contains the complete Phase 5 implementation, but it deliberately still
-selects the immutable `local` `v0.1.0` artifact table. Phase 5 is not released
-until a release-preparation change selects a fully pinned `standard` artifact
-table, updates the package version, and passes every clean-consumer gate. In
-particular, `moon add Eric-Song-Nop/opendal@0.1.0` still provides only the
-released local surface and native archive.
+`v0.1.0` remains the published compatibility baseline. This tree is the fully
+pinned `v0.2.0` standard release candidate across three target-native hosts.
+Phase 5 is not released until the tag workflow reproduces the committed
+digests, uploads those assets, publishes the same source to mooncakes.io, and
+passes fresh registry consumers. Until then, `moon add
+Eric-Song-Nop/opendal@0.1.0` still provides only the released local surface and
+native archive.
 
 The source implementation preserves the old local behavior while adding
 public methods, optional ABI groups, the `standard` service profile, and one
@@ -80,6 +80,9 @@ Roadmap status words have the following meaning:
 - **designed**: public semantics, ABI ownership, state machines, and acceptance
   examples have been reviewed;
 - **implemented**: all vertical-slice code and local validation are complete;
+- **pinned candidate**: exact target-native artifact identities and digests are
+  committed and clean packaged consumers have passed, but tag publication and
+  fresh registry acceptance have not occurred;
 - **released**: target artifacts, the Moon package, documentation, and a clean
   registry consumer have been verified from the same tag.
 
@@ -244,7 +247,8 @@ separate linker and artifact-distribution decision.
 
 ### Phase 5: Standard profile and complete first-generation facade
 
-Status: implemented in source through Phase 5E; release preparation remains.
+Status: pinned `v0.2.0` release candidate through Phase 5E; tag publication and
+fresh registry acceptance remain.
 
 The user guides were checked against OpenDAL's binding overview, connecting,
 getting-started, and common-task documentation. Phase 5 was delivered as
@@ -274,7 +278,7 @@ This order remains useful for history, review, and bisecting:
 
 #### Phase 5A: Complete the local blocking lifecycle
 
-Status: implemented in source; included in the pending standard release.
+Status: included in the pinned but unpublished `v0.2.0` standard candidate.
 
 Delivered in the current tree:
 
@@ -434,12 +438,15 @@ Land Phase 5A as reviewable vertical slices:
   negotiate the prefix they understand.
 - [x] Rust, C, MoonBit, debug/release, lifecycle, and sanitizer gates cover the
   source slice.
-- [ ] The final standard artifacts and registry consumer must repeat these
-  checks from the release candidate and tag.
+- [x] The pinned candidate artifacts and clean packaged consumers repeat the
+  Phase 5A gates on all three advertised hosts.
+- [ ] The `v0.2.0` tag workflow and fresh registry consumers must repeat the
+  release gates after publication.
 
 #### Phase 5B: Ship the first cloud service profile
 
-Status: implemented in source; standard artifact publication remains.
+Status: pinned in the unpublished `v0.2.0` standard candidate; tag publication
+and fresh registry acceptance remain.
 
 S3 is the first and only Phase 5 cloud service. The public path is
 `Operator::s3`, backed by opaque `S3Auth` and `S3CredentialSource` values for
@@ -452,9 +459,9 @@ successor profile, not a runtime-selectable plugin beside `local`.
 The implemented choice keeps `local` small and unchanged in meaning. A package
 release names exactly one pinned table in `native/artifact-selection.json`;
 there is no runtime profile selector and therefore no duplicate native archive
-inside one Moon process. The next release selects `standard`, which is a
-superset of `local`. Maintainer source builds choose `profile-local` or
-`profile-standard` explicitly without changing published metadata.
+inside one Moon process. The `v0.2.0` release candidate selects `standard`, a
+superset of `local`. Maintainer source builds choose a profile explicitly
+without changing the committed package selection.
 
 The distribution contract records:
 
@@ -500,10 +507,11 @@ The S3 contract provides:
   copy, managed Copier, and presigned write/read/stat execution.
 - Public and native tests cover typed credential modes, validation, capability
   mapping, and secret-free public representations.
-- Candidate standard artifacts are built and consumed on each advertised host;
-  immutable release pins and registry execution remain release-preparation
-  gates. Multipart thresholds, versioned buckets, and injected network faults
-  remain continuous-hardening coverage rather than extra public API.
+- Candidate standard artifacts are built and consumed on every advertised
+  host, and their exact identities and digests are committed as the `v0.2.0`
+  pins. Tag-mode reproduction and registry execution remain release gates.
+  Multipart thresholds, versioned buckets, and injected network faults remain
+  continuous-hardening coverage rather than extra public API.
 
 ##### 5B exit criteria
 
@@ -515,13 +523,15 @@ The S3 contract provides:
   Linux x86-64 and arm64 with ephemeral, masked credentials.
 - [x] Local and standard profile metadata and caches have independent
   identities; the immutable local pins are unchanged.
-- [ ] Publish pinned standard artifacts and prove a clean registry consumer on
-  every advertised standard host.
+- [x] Pin the exact standard candidate artifacts and pass clean packaged
+  consumers on every advertised host.
+- [ ] Publish those exact assets and prove fresh registry consumers from the
+  `v0.2.0` tag.
 
 #### Phase 5C: Presigned operations and explicit layers
 
-Status: implemented in source as separate presign and layer ABI groups;
-release validation remains.
+Status: included in the pinned but unpublished `v0.2.0` candidate as separate
+presign and layer ABI groups; tag publication remains.
 
 Delivered in the current tree:
 
@@ -596,14 +606,16 @@ first retry/timeout slice.
 - [x] Stateful resources become terminal after unsafe failures or
   cancellation; retry makes no exactly-once write promise.
 - [x] Default operators retain `v0.1.0` no-implicit-retry behavior.
-- [ ] Repeat the end-to-end and clean-consumer gates with pinned release
-  artifacts; broader deterministic network fault injection remains a
-  hardening item rather than a release-surface expansion.
+- [x] Repeat the end-to-end and clean-consumer gates with the candidate bytes
+  recorded by the `v0.2.0` pins.
+- [ ] Reproduce those pins and run fresh registry consumers from the `v0.2.0`
+  tag; broader deterministic network fault injection remains a hardening item
+  rather than a release-surface expansion.
 
 #### Phase 5D: Batch deletion and copier tasks
 
-Status: implemented in source with deliberately smaller, honest contracts;
-release validation remains.
+Status: included in the pinned but unpublished `v0.2.0` candidate with
+deliberately smaller, honest contracts; tag publication remains.
 
 ##### Phase 5D.1: Batch deletion
 
@@ -644,13 +656,15 @@ reports finish or abort success.
   deterministic; the resource can outlive its originating Operator.
 - [x] Memory reports unsupported Copier capability honestly, while S3 runs
   batch delete and Copier against MinIO.
-- [ ] Repeat the lifecycle and clean-consumer gates with the pinned release
-  artifacts. Recursive and cross-backend copying remain out of scope.
+- [x] Repeat the lifecycle and clean-consumer gates with the candidate bytes
+  recorded by the `v0.2.0` pins.
+- [ ] Reproduce those pins and run fresh registry consumers from the `v0.2.0`
+  tag. Recursive and cross-backend copying remain out of scope.
 
 #### Phase 5E: Public MoonBit async API
 
-Status: the first public async slice is implemented in source; full blocking
-API parity is intentionally deferred.
+Status: the first public async slice is included in the pinned but unpublished
+`v0.2.0` candidate; full blocking API parity is intentionally deferred.
 
 `Operator::as_async()` creates a lightweight view. The current async surface
 contains whole/ranged `read`, bounded `open_read_stream`/`next`/`close`, and
@@ -684,14 +698,15 @@ Operator first and then obtain its async view.
 - [x] Memory integration covers async range reads, stable stream EOF, writer
   finish, and idempotent successful abort.
 - [x] The synchronous facade and ABI prefix remain backward compatible.
-- [ ] Repeat async runtime, cancellation, and packaged-consumer tests on every
-  pinned standard release artifact; expand the async surface only in later
-  independent slices.
+- [x] Repeat async runtime, cancellation, and packaged-consumer tests with the
+  candidate bytes recorded for every advertised host.
+- [ ] Reproduce those pins and run fresh registry consumers from the `v0.2.0`
+  tag; expand the async surface only in later independent slices.
 
 ### Parallel track A: Platform and artifact expansion
 
-Status: Linux arm64 candidate lane implemented and clean-consumer tested;
-standard release pins remain.
+Status: Linux arm64 is pinned and clean-consumer tested in the unpublished
+`v0.2.0` standard candidate; tag publication remains.
 
 Additional targets are independent release lanes, not checkboxes added to a
 generic support claim. The Phase 5 `standard` profile adds a target-native
@@ -755,7 +770,7 @@ if a milestone cannot satisfy its exit criteria independently.
 | Release line | Intended content |
 | --- | --- |
 | Published `0.1.x` | Immutable `local` profile: memory/fs, original blocking facade, macOS arm64 and Linux x86-64 |
-| Next standard release (version chosen during release preparation) | Phase 5A-E source stack, `standard` memory/fs/S3 profile, and Linux arm64 |
+| Pinned, unpublished `0.2.0` release candidate | Phase 5A-E, `standard` memory/fs/S3 profile, and Linux arm64 |
 | Later releases | Additional async operations, services, targets, recursive/cross-service transfer only after separate contracts |
 
 Each release tag must build its native artifacts and Moon package from the same
@@ -824,14 +839,14 @@ A feature is not complete when the Rust method exists. Every slice includes:
 | Sequential read API and bounds | Resolved | `ReadStream`, fixed positive `chunk_size`, one owned bounded chunk, stable EOF |
 | Writer cleanup | Resolved | Explicit terminal `finish`/`abort`; successful repeated abort is idempotent; finalizers never commit |
 | ABI extension strategy | Resolved | Append-only v1 optional groups through ABI `1.7`, with older-prefix negotiation tests |
-| Standard profile selection | Resolved for next release | One pinned successor profile containing memory/fs/S3; no public runtime selector |
+| Standard profile selection | Resolved for `v0.2.0` | One pinned successor profile containing memory/fs/S3; no public runtime selector |
 | S3 configuration ownership | Resolved | Typed `Operator::s3`, opaque auth/source values, copied input, generic constructor retained as escape hatch |
 | Presigned result | Resolved | Owned method/URI/binary-header snapshot with explicit expiry and no automatic HTTP execution |
 | Layer order and replay policy | Resolved | Immutable timeout -> retry -> concurrency; opt-in retry makes no exactly-once stateful-write promise |
 | Batch result shape | Resolved | All-or-error `Unit`, possible partial remote effects, no fabricated ordered per-path result |
 | Copier scope | Resolved | Managed same-Operator one-object copy; not recursive or cross-service |
 | Initial async shape | Resolved | MoonBit `async fn` facade using owned native tasks and a pipe wakeup; no public callbacks/task handles |
-| Standard release trust roots | Open release work | Produce reproducible artifacts, fill `artifacts-standard.json`, select it atomically, and verify the registry consumer |
+| Standard release trust roots | Pinned candidate; tag verification pending | `artifacts-standard.json` is populated and selected atomically; publish the exact bytes and verify fresh registry consumers from `v0.2.0` |
 | Additional services and async parity | Deferred | Add only as independent, capability-honest vertical slices |
 | Intel macOS, musl, and Windows | Deferred | Require installable MoonBit toolchains plus target-native build/link/consumer evidence |
 | Replacement for experimental prebuild tooling | Open toolchain follow-up | Adopt stable native-artifact support when it can preserve pinned, ordinary-package installation |

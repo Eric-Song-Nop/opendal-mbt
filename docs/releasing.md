@@ -34,11 +34,13 @@ a GitHub release.
 6. Run `make check`, debug/release `make test-profile`, `make asan`, and each
    generated artifact's clean packaged-consumer test.
 7. Merge the complete stack, then create and push the exact `v<moon.mod
-   version>` tag. For `0.1.0`, the tag is `v0.1.0`.
+   version>` tag. For the current standard candidate, version `0.2.0` requires
+   tag `v0.2.0`; `v0.1.0` remains the historical local release.
 
-The tag workflow runs in release mode, rebuilds the selected profile on both
-target hosts, rejects candidate URLs, and rejects any digest difference from
-that profile's committed table. It then:
+The tag workflow runs in release mode and rebuilds the selected profile on
+every advertised target host—three for the `v0.2.0` standard profile: macOS
+arm64, Linux x86-64, and Linux arm64. It rejects candidate URLs and any digest
+difference from the committed table, then:
 
 1. uploads the archives, checksums, and manifests to the GitHub release;
 2. publishes the source package to mooncakes.io;
@@ -51,7 +53,8 @@ that profile's committed table. It then:
 Before upload, each artifact job links a strict C consumer with the manifest's
 recorded system flags and asks the resulting library for `library_info`. The
 reported binding version must match the package version; the artifact manifest
-must independently identify the standard service profile.
+must independently identify the selected service profile (`standard` for
+`v0.2.0`).
 
 If a step fails after the GitHub release is created, rerunning the workflow
 replaces its assets with the same verified bytes. Never change an existing

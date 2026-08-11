@@ -1,9 +1,10 @@
 # Common storage tasks
 
 The blocking core recipes also apply to the published `0.1.0` local profile.
-Recipes for S3, presign, layers, batch/Copier, and async target the current
-Phase 5 source candidate and require a standard native build until that profile
-is released. Examples use `memory` or `fs` when behavior can be hermetic.
+Recipes for S3, presign, layers, batch/Copier, and async target the pinned but
+unpublished `0.2.0` standard candidate and require a source standard build until
+the tag publishes its assets and package. Examples use `memory` or `fs` when
+behavior can be hermetic.
 
 ## Write and read a complete object
 
@@ -482,5 +483,5 @@ The following upstream recipes cannot yet be translated faithfully:
 - recipes requiring Intel macOS, Windows, or musl release artifacts.
 
 They are deliberate scope boundaries, not hidden APIs. The published `0.1.0`
-local profile also lacks all source-only Phase 5 methods until a standard
-release is pinned and published.
+local profile lacks all Phase 5 methods until `0.2.0` is published; this source
+tree already pins the exact standard candidate artifacts.

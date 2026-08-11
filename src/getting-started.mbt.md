@@ -1,14 +1,19 @@
 # Getting started
 
 Start with an in-memory operator, then switch the constructor while keeping the
-same storage methods. The published `0.1.0` package is the local
-`memory`/`fs` release. The checked-out Phase 5 source additionally contains
-typed S3 and the first async facade, but its standard artifacts are not yet
-published.
+same storage methods. The published `0.1.0` package is the local `memory`/`fs`
+release. This checkout is the pinned but unpublished `0.2.0` release candidate,
+containing typed S3 and the first async facade.
 
-## 1. Add the published package
+## 1. Add a published package
 
-From a MoonBit module:
+After the `v0.2.0` tag workflow publishes the standard release:
+
+```sh
+moon add Eric-Song-Nop/opendal@0.2.0
+```
+
+Until then, the registry baseline is the local release:
 
 ```sh
 moon add Eric-Song-Nop/opendal@0.1.0
@@ -30,11 +35,11 @@ After verification, the artifact remains in Moon's shared cache and can be
 reused offline. The published `0.1.0` matrix is Apple silicon macOS and x86-64
 glibc Linux; it does not contain S3 or the Phase 5 symbols.
 
-To exercise the current source candidate instead, clone this repository and
-run:
+To exercise the pinned `0.2.0` release candidate before publication, clone this
+repository and run:
 
 ```sh
-moon install
+make moon-deps
 make test-profile NATIVE_SERVICE_PROFILE=standard
 ```
 
@@ -118,9 +123,9 @@ input.
 
 ## 5. Choose blocking or async I/O
 
-The existing `Operator` methods remain synchronous. In the Phase 5 source
-facade, `as_async()` creates a lightweight view over the same configured
-operator. Async methods are called normally from an `async fn` or
+The existing `Operator` methods remain synchronous. In the `v0.2.0`
+release-candidate facade, `as_async()` creates a lightweight view over the same
+configured operator. Async methods are called normally from an `async fn` or
 `async test`—MoonBit does not use an `await` keyword.
 
 ```mbt check
