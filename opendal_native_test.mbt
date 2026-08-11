@@ -18,6 +18,80 @@ test "native memory: binary whole-object roundtrip" {
 }
 
 ///|
+test "native memory: whole-object and reusable readers support byte ranges" {
+  let operator = @opendal.Operator::new("memory")
+  operator.write("reader/value.bin", b"0123456789") |> ignore
+  assert_eq(
+    operator.read("reader/value.bin", range=Range(offset=2UL, length=4UL)),
+    b"2345",
+  )
+  assert_eq(operator.read("reader/value.bin", range=From(offset=6UL)), b"6789")
+  assert_eq(operator.read("reader/value.bin", range=Suffix(length=3UL)), b"789")
+  let reader = operator.open_reader("reader/value.bin")
+  assert_eq(reader.read(Range(offset=1UL, length=3UL)), b"123")
+  assert_eq(reader.read(Full), b"0123456789")
+  assert_eq(reader.read(From(offset=8UL)), b"89")
+  assert_eq(reader.read(Suffix(length=2UL)), b"89")
+  assert_true(operator.info().capability.can_read_suffix())
+}
+
+///|
+test "native memory: reader range validation and close preserve context" {
+  let operator = @opendal.Operator::new("memory")
+  let path = "reader/closed.bin"
+  operator.write(path, b"content") |> ignore
+  let reader = operator.open_reader(path)
+  try reader.read(Range(offset=18446744073709551615UL, length=1UL)) catch {
+    OpenDalError(info) => {
+      assert_true(info.kind is InvalidArgument)
+      assert_true(info.operation is Read)
+      assert_eq(info.path, Some(path))
+    }
+  } noraise {
+    _ => fail("expected overflowing range to raise")
+  }
+  assert_eq(reader.read(Full), b"content")
+  reader.close()
+  reader.close()
+  try reader.read(Full) catch {
+    OpenDalError(info) => {
+      assert_true(info.kind is ResourceClosed)
+      assert_true(info.operation is Read)
+      assert_eq(info.path, Some(path))
+      assert_eq(info.destination_path, None)
+    }
+  } noraise {
+    _ => fail("expected read after close to raise")
+  }
+}
+
+///|
+test "native memory: read conditions cross the ABI" {
+  let operator = @opendal.Operator::new("memory")
+  operator.write("reader/conditional.bin", b"value") |> ignore
+  try operator.read("reader/conditional.bin", if_match="not-an-etag") catch {
+    OpenDalError(info) => {
+      assert_true(info.kind is Unsupported)
+      assert_true(info.operation is Read)
+      assert_eq(info.path, Some("reader/conditional.bin"))
+    }
+  } noraise {
+    _ => fail("expected unsupported read condition to raise")
+  }
+  try
+    operator.open_reader("reader/conditional.bin", version="not-a-version")
+  catch {
+    OpenDalError(info) => {
+      assert_true(info.kind is Unsupported)
+      assert_true(info.operation is Read)
+      assert_eq(info.path, Some("reader/conditional.bin"))
+    }
+  } noraise {
+    _ => fail("expected unsupported reader option to raise")
+  }
+}
+
+///|
 test "native memory: StringView and BytesView use only the selected slice" {
   let operator = @opendal.Operator::new("memory")
   let path_storage = "__slice.bin__"
@@ -162,6 +236,21 @@ test "native fs: blocking core works against an isolated filesystem root" {
   operator.delete("目录/", recursive=true)
   assert_false(operator.exists("目录/nested/value.bin"))
   operator.check()
+}
+
+///|
+test "native fs: a random reader survives its creating operator scope" {
+  guard @env.current_dir() is Some(cwd) else {
+    fail("current working directory is unavailable")
+  }
+  let root = "\{cwd}/target/opendal-mbt-fs-reader-\{@env.now()}"
+  let reader = {
+    let operator = @opendal.Operator::new("fs", config={ "root": root })
+    operator.write("reader.bin", b"filesystem-reader") |> ignore
+    operator.open_reader("reader.bin")
+  }
+  assert_eq(reader.read(Range(offset=11UL, length=6UL)), b"reader")
+  reader.close()
 }
 
 ///|

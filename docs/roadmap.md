@@ -142,6 +142,9 @@ builds its native archive in isolation, and runs the downstream consumer.
 
 ### Phase 3: Streaming and operation options
 
+Status: in progress. Random-access Reader and read options are implemented;
+Writer, write options, copy, and rename remain.
+
 Add:
 
 - random-access `Reader` range reads without a hidden cursor;
