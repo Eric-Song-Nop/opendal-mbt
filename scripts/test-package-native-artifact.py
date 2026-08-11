@@ -21,7 +21,7 @@ class NativeArtifactTest(unittest.TestCase):
         self.root = Path(self.temporary.name)
         (self.root / "native/rust").mkdir(parents=True)
         (self.root / "native/include").mkdir(parents=True)
-        (self.root / "native").mkdir(exist_ok=True)
+        (self.root / "native/distribution-profiles").mkdir(parents=True)
         (self.root / "moon.mod").write_text(
             'name = "Eric-Song-Nop/opendal"\nversion = "0.1.0"\n',
             encoding="utf-8",
@@ -32,8 +32,19 @@ name = "opendal-mbt-native"
 version = "0.1.0"
 rust-version = "1.91"
 
+[features]
+default = ["profile-standard"]
+profile-local = ["opendal/blocking", "opendal/services-fs"]
+profile-standard = [
+  "profile-local",
+  "opendal/services-s3",
+  "opendal/http-transport-reqwest",
+  "opendal/http-transport-reqwest-rustls",
+  "opendal/executors-tokio",
+]
+
 [dependencies]
-opendal = { version = "=0.58.1", default-features = false, features = ["blocking", "services-fs"] }
+opendal = { version = "=0.58.1", default-features = false }
 """,
             encoding="utf-8",
         )
@@ -44,6 +55,12 @@ opendal = { version = "=0.58.1", default-features = false, features = ["blocking
 """,
             encoding="utf-8",
         )
+        targets = {
+            "aarch64-apple-darwin": {
+                "host_key": "darwin-arm64",
+                "minimum_macos_version": "11.0",
+            }
+        }
         (self.root / "native/distribution-profile.json").write_text(
             json.dumps(
                 {
@@ -52,16 +69,53 @@ opendal = { version = "=0.58.1", default-features = false, features = ["blocking
                     "service_profile": "local",
                     "services": ["memory", "fs"],
                     "rust_features": ["blocking", "services-fs"],
-                    "targets": {
-                        "aarch64-apple-darwin": {
-                            "host_key": "darwin-arm64",
-                            "minimum_macos_version": "11.0",
-                        }
-                    },
+                    "targets": targets,
                 }
             ),
             encoding="utf-8",
         )
+        (self.root / "native/distribution-profiles/standard.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "artifact_revision": "r1",
+                    "service_profile": "standard",
+                    "services": ["memory", "fs", "s3"],
+                    "rust_features": [
+                        "blocking",
+                        "services-fs",
+                        "services-s3",
+                        "http-transport-reqwest",
+                        "http-transport-reqwest-rustls",
+                        "executors-tokio",
+                    ],
+                    "cargo_features": ["profile-standard"],
+                    "runtime_initialization": "install_default",
+                    "targets": targets,
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.artifact_tables = {
+            "local": self.root / "native/artifacts.json",
+            "standard": self.root / "native/artifacts-standard.json",
+        }
+        for profile, table in self.artifact_tables.items():
+            table.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "service_profile": profile,
+                        "artifacts": {
+                            "linux-x64": {
+                                "artifact": f"published-{profile}-linux",
+                                "service_profile": profile,
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
         (self.root / "LICENSE").write_text("test license\n", encoding="utf-8")
         self.library = self.root / "libopendal_mbt_native.a"
         self.library.write_bytes(b"!<arch>\nfixture static library")
@@ -78,9 +132,12 @@ opendal = { version = "=0.58.1", default-features = false, features = ["blocking
         self,
         output: Path,
         target: str = "aarch64-apple-darwin",
-        pinned: Path | None = None,
+        service_profile: str = "standard",
+        mode: str = "candidate",
+        artifact_table: Path | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        command = [
+        return subprocess.run(
+            [
                 sys.executable,
                 str(SCRIPT),
                 "--repo-root",
@@ -89,31 +146,38 @@ opendal = { version = "=0.58.1", default-features = false, features = ["blocking
                 str(self.library),
                 "--native-static-libs-log",
                 str(self.native_libs),
+                "--service-profile",
+                service_profile,
                 "--rust-target",
                 target,
                 "--output-dir",
                 str(output),
-            ]
-        if pinned is not None:
-            command.extend(["--verify-pinned", str(pinned)])
-        return subprocess.run(
-            command,
+                "--mode",
+                mode,
+                "--artifact-table",
+                str(artifact_table or self.artifact_tables[service_profile]),
+            ],
             check=False,
             text=True,
             capture_output=True,
         )
 
-    def test_archive_is_deterministic_and_self_describing(self) -> None:
+    def test_standard_archive_is_deterministic_and_self_describing(self) -> None:
         first = self.invoke(self.root / "first")
         second = self.invoke(self.root / "second")
         self.assertEqual(first.returncode, 0, first.stderr)
         self.assertEqual(second.returncode, 0, second.stderr)
         first_result = json.loads(first.stdout)
         second_result = json.loads(second.stdout)
-        self.assertEqual(first_result["archive_sha256"], second_result["archive_sha256"])
+        self.assertEqual(
+            first_result["archive_sha256"], second_result["archive_sha256"]
+        )
 
         archive = Path(first_result["archive"])
-        self.assertEqual(hashlib.sha256(archive.read_bytes()).hexdigest(), first_result["archive_sha256"])
+        self.assertEqual(
+            hashlib.sha256(archive.read_bytes()).hexdigest(),
+            first_result["archive_sha256"],
+        )
         with tarfile.open(archive, "r:gz") as contents:
             self.assertEqual(
                 contents.getnames(),
@@ -124,14 +188,43 @@ opendal = { version = "=0.58.1", default-features = false, features = ["blocking
         self.assertEqual(manifest["binding_version"], "0.1.0")
         self.assertEqual(manifest["abi_version"], {"major": 1, "minor": 2, "patch": 3})
         self.assertEqual(manifest["opendal_version"], "0.58.1")
-        self.assertEqual(manifest["services"], ["memory", "fs"])
+        self.assertEqual(manifest["service_profile"], "standard")
+        self.assertEqual(manifest["services"], ["memory", "fs", "s3"])
+        self.assertEqual(manifest["cargo_features"], ["profile-standard"])
+        self.assertEqual(manifest["runtime_initialization"], "install_default")
         self.assertEqual(manifest["minimum_macos_version"], "11.0")
         self.assertEqual(
             manifest["system_link_flags"], ["-liconv", "-lSystem", "-lc", "-lm"]
         )
+
+    def test_immutable_local_profile_remains_packageable(self) -> None:
+        packaged = self.invoke(self.root / "local", service_profile="local")
+        self.assertEqual(packaged.returncode, 0, packaged.stderr)
+        result = json.loads(packaged.stdout)
+        manifest = json.loads(Path(result["manifest"]).read_text(encoding="utf-8"))
+        self.assertIn("-local-aarch64-apple-darwin", result["archive_name"])
+        self.assertEqual(manifest["services"], ["memory", "fs"])
+        self.assertEqual(manifest["rust_features"], ["blocking", "services-fs"])
+        self.assertNotIn("cargo_features", manifest)
+
+    def test_candidate_mode_updates_only_the_built_standard_host(self) -> None:
+        packaged = self.invoke(self.root / "candidate")
+        self.assertEqual(packaged.returncode, 0, packaged.stderr)
+        result = json.loads(packaged.stdout)
+        table = json.loads(
+            Path(result["candidate_artifact_table"]).read_text(encoding="utf-8")
+        )
+        candidate = table["artifacts"]["darwin-arm64"]
+        self.assertEqual(table["service_profile"], "standard")
+        self.assertEqual(candidate["archive_name"], result["archive_name"])
+        self.assertEqual(candidate["service_profile"], "standard")
         self.assertEqual(
-            manifest["static_library_sha256"],
-            hashlib.sha256(self.library.read_bytes()).hexdigest(),
+            candidate["url"],
+            f"https://candidate.invalid/{result['archive_name']}",
+        )
+        self.assertEqual(
+            table["artifacts"]["linux-x64"]["artifact"],
+            "published-standard-linux",
         )
 
     def test_unknown_target_is_rejected(self) -> None:
@@ -141,7 +234,10 @@ opendal = { version = "=0.58.1", default-features = false, features = ["blocking
 
     def test_version_mismatch_is_rejected(self) -> None:
         cargo = self.root / "native/rust/Cargo.toml"
-        cargo.write_text(cargo.read_text().replace('version = "0.1.0"', 'version = "0.2.0"'), encoding="utf-8")
+        cargo.write_text(
+            cargo.read_text().replace('version = "0.1.0"', 'version = "0.2.0"'),
+            encoding="utf-8",
+        )
         result = self.invoke(self.root / "output")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Moon and Rust binding versions differ", result.stderr)
@@ -152,44 +248,49 @@ opendal = { version = "=0.58.1", default-features = false, features = ["blocking
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("did not report native-static-libs", result.stderr)
 
-    def test_published_digest_must_match_reproducible_build(self) -> None:
-        first = self.invoke(self.root / "candidate")
+    def test_release_pin_must_match_and_cannot_use_candidate_url(self) -> None:
+        first = self.invoke(self.root / "candidate-release")
         self.assertEqual(first.returncode, 0, first.stderr)
         result = json.loads(first.stdout)
-        manifest = json.loads(Path(result["manifest"]).read_text(encoding="utf-8"))
-        pinned_record = {
-            **{key: value for key, value in manifest.items() if key != "schema_version"},
-            "archive_name": result["archive_name"],
-            "archive_size": result["archive_size"],
-            "archive_sha256": result["archive_sha256"],
-            "url": f"https://example.invalid/{result['archive_name']}",
-        }
-        table = self.root / "artifacts.json"
-        table.write_text(
-            json.dumps(
-                {
-                    "schema_version": 1,
-                    "artifacts": {"darwin-arm64": pinned_record},
-                }
-            ),
-            encoding="utf-8",
+        table = Path(result["candidate_artifact_table"])
+
+        rejected = self.invoke(
+            self.root / "candidate-url-release",
+            mode="release",
+            artifact_table=table,
         )
-        verified = self.invoke(self.root / "verified", pinned=table)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("candidate artifact URL cannot be used", rejected.stderr)
+
+        document = json.loads(table.read_text(encoding="utf-8"))
+        document["artifacts"]["darwin-arm64"]["url"] = (
+            f"https://example.invalid/{result['archive_name']}"
+        )
+        table.write_text(json.dumps(document), encoding="utf-8")
+        verified = self.invoke(
+            self.root / "verified",
+            mode="release",
+            artifact_table=table,
+        )
         self.assertEqual(verified.returncode, 0, verified.stderr)
 
-        pinned_record["archive_sha256"] = "0" * 64
-        table.write_text(
-            json.dumps(
-                {
-                    "schema_version": 1,
-                    "artifacts": {"darwin-arm64": pinned_record},
-                }
-            ),
-            encoding="utf-8",
+        document["artifacts"]["darwin-arm64"]["archive_sha256"] = "0" * 64
+        table.write_text(json.dumps(document), encoding="utf-8")
+        mismatched = self.invoke(
+            self.root / "mismatched",
+            mode="release",
+            artifact_table=table,
         )
-        rejected = self.invoke(self.root / "rejected", pinned=table)
-        self.assertNotEqual(rejected.returncode, 0)
-        self.assertIn("archive_sha256 does not match", rejected.stderr)
+        self.assertNotEqual(mismatched.returncode, 0)
+        self.assertIn("archive_sha256 does not match", mismatched.stderr)
+
+    def test_profile_table_mismatch_is_rejected(self) -> None:
+        result = self.invoke(
+            self.root / "wrong-table",
+            artifact_table=self.artifact_tables["local"],
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("service profile does not match", result.stderr)
 
 
 if __name__ == "__main__":

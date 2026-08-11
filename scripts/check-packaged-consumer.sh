@@ -3,8 +3,25 @@
 set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+artifact_table=
+artifact_profile=
+if [ "$#" -eq 3 ] && [ "$1" = "--artifact-table" ]; then
+  if [ ! -f "$2" ]; then
+    echo "candidate artifact table does not exist: $2" >&2
+    exit 2
+  fi
+  artifact_table=$(CDPATH= cd -- "$(dirname -- "$2")" && pwd)/$(basename -- "$2")
+  artifact_profile=$(node -e '
+    const fs = require("node:fs");
+    const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+    if (typeof value.service_profile !== "string" ||
+        !/^[a-z][a-z0-9-]*$/.test(value.service_profile)) process.exit(2);
+    process.stdout.write(value.service_profile);
+  ' "$artifact_table")
+  shift 2
+fi
 if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
-  echo "usage: check-packaged-consumer.sh <native-artifact.tar.gz>" >&2
+  echo "usage: check-packaged-consumer.sh [--artifact-table <json>] <native-artifact.tar.gz>" >&2
   exit 2
 fi
 artifact=$(CDPATH= cd -- "$(dirname -- "$1")" && pwd)/$(basename -- "$1")
@@ -28,6 +45,17 @@ package_archive=$1
 stage_dir="$work_dir/stage"
 mkdir "$stage_dir" "$stage_dir/integration" "$stage_dir/integration/consumer"
 unzip -q "$package_archive" -d "$stage_dir"
+if [ -n "$artifact_table" ]; then
+  if [ "$artifact_profile" = "local" ]; then
+    staged_table="$stage_dir/native/artifacts.json"
+  else
+    staged_table="$stage_dir/native/artifacts-$artifact_profile.json"
+  fi
+  cp "$artifact_table" "$staged_table"
+  printf '{\n  "schema_version": 1,\n  "service_profile": "%s",\n  "artifact_table": "%s"\n}\n' \
+    "$artifact_profile" "$(basename -- "$staged_table")" > \
+    "$stage_dir/native/artifact-selection.json"
+fi
 cp "$repo_root/integration/consumer/moon.mod" \
   "$stage_dir/integration/consumer/moon.mod"
 cp "$repo_root/integration/consumer/moon.pkg" \

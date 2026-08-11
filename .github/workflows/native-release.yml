@@ -9,13 +9,17 @@ on:
       - Cargo.toml
       - integration/consumer/**
       - moon.mod
+      - native/artifact-selection.json
       - native/distribution-profile.json
+      - native/distribution-profiles/**
       - native/artifacts.json
+      - native/artifacts-standard.json
       - native/include/opendal_mbt.h
       - native/rust/**
       - rust-toolchain.toml
       - src/**
       - scripts/check-packaged-consumer.sh
+      - scripts/test-distribution-profiles.py
       - scripts/package-native-artifact.py
       - scripts/prepare-test-native-cache.js
       - scripts/test-package-native-artifact.py
@@ -46,14 +50,26 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
+      - name: Select candidate or release validation
+        id: artifact-mode
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == "push" && "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "mode=release" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=candidate" >> "$GITHUB_OUTPUT"
+          fi
       - name: Install Rust toolchain
         run: rustup show active-toolchain
       - name: Install MoonBit
         run: |
           curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash -s "$MOONBIT_VERSION"
           echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
-      - name: Test artifact packager
-        run: python3 scripts/test-package-native-artifact.py
+      - name: Test artifact profiles and packager
+        run: |
+          python3 scripts/test-distribution-profiles.py
+          python3 scripts/test-package-native-artifact.py
       - name: Build release static library
         env:
           MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos_deployment_target }}
@@ -63,13 +79,14 @@ jobs:
           mkdir -p target/native-release
           CARGO_TERM_COLOR=never cargo rustc \
             -p opendal-mbt-native --locked --release \
+            --no-default-features --features profile-standard \
             -- --print native-static-libs 2>&1 | \
             tee target/native-release/native-static-libs.log
           grep -q 'native-static-libs:' \
             target/native-release/native-static-libs.log
           actual_target=$(rustc -vV | sed -n 's/^host: //p')
           test "$actual_target" = '${{ matrix.rust_target }}'
-      - name: Package release artifact
+      - name: Package standard native artifact
         shell: bash
         run: |
           set -euo pipefail
@@ -78,9 +95,11 @@ jobs:
             --library target/release/libopendal_mbt_native.a \
             --native-static-libs-log \
               target/native-release/native-static-libs.log \
+            --service-profile standard \
             --rust-target '${{ matrix.rust_target }}' \
             --output-dir target/native-dist \
-            --verify-pinned native/artifacts.json | \
+            --mode '${{ steps.artifact-mode.outputs.mode }}' \
+            --artifact-table native/artifacts-standard.json | \
             tee target/native-release/package-result.json
       - name: Test clean packaged Moon consumer
         shell: bash
@@ -88,7 +107,15 @@ jobs:
           set -euo pipefail
           archive=$(find target/native-dist -name '*.tar.gz' -type f)
           test -n "$archive"
-          make packaged-consumer NATIVE_ARTIFACT="$archive"
+          candidate_table=""
+          if [[ '${{ steps.artifact-mode.outputs.mode }}' == 'candidate' ]]; then
+            candidate_table=$(find target/native-dist \
+              -name '*.candidate-artifacts.json' -type f)
+            test -n "$candidate_table"
+          fi
+          make packaged-consumer \
+            NATIVE_ARTIFACT="$archive" \
+            NATIVE_ARTIFACT_TABLE="$candidate_table"
       - uses: actions/upload-artifact@v4
         with:
           name: native-${{ matrix.rust_target }}

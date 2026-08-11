@@ -107,17 +107,89 @@ function loadArtifacts(filename = path.join(__dirname, 'native', 'artifacts.json
   ) {
     throw new Error('Unsupported pinned native artifact table');
   }
+  const declaredProfile = document.service_profile;
+  if (
+    declaredProfile !== undefined &&
+    (typeof declaredProfile !== 'string' || declaredProfile.length === 0)
+  ) {
+    throw new Error('Pinned native artifact table has an invalid service profile');
+  }
+  for (const [hostKey, artifact] of Object.entries(document.artifacts)) {
+    if (!artifact || typeof artifact !== 'object' || Array.isArray(artifact)) {
+      throw new Error(`Pinned native artifact ${hostKey} is invalid`);
+    }
+    if (declaredProfile && artifact.service_profile !== declaredProfile) {
+      throw new Error(
+        `Pinned native artifact ${hostKey} belongs to ${artifact.service_profile}, ` +
+          `not ${declaredProfile}`,
+      );
+    }
+  }
   return document.artifacts;
 }
 
-function selectArtifact(artifacts, platform = process.platform, arch = process.arch) {
+function loadArtifactSelection(
+  filename = path.join(__dirname, 'native', 'artifact-selection.json'),
+) {
+  let document;
+  try {
+    document = JSON.parse(fs.readFileSync(filename, 'utf8'));
+  } catch (error) {
+    throw new Error(`Cannot read native artifact selection: ${error.message}`);
+  }
+  if (
+    !document ||
+    document.schema_version !== 1 ||
+    typeof document.service_profile !== 'string' ||
+    !/^[a-z][a-z0-9-]*$/.test(document.service_profile) ||
+    typeof document.artifact_table !== 'string' ||
+    document.artifact_table.length === 0 ||
+    path.basename(document.artifact_table) !== document.artifact_table
+  ) {
+    throw new Error('Unsupported native artifact selection');
+  }
+  const expectedTable =
+    document.service_profile === 'local'
+      ? 'artifacts.json'
+      : `artifacts-${document.service_profile}.json`;
+  if (document.artifact_table !== expectedTable) {
+    throw new Error(
+      `Native artifact selection for ${document.service_profile} must use ${expectedTable}`,
+    );
+  }
+  return document;
+}
+
+function loadSelectedArtifacts(
+  selectionFilename = path.join(__dirname, 'native', 'artifact-selection.json'),
+) {
+  const selection = loadArtifactSelection(selectionFilename);
+  const tableFilename = path.join(path.dirname(selectionFilename), selection.artifact_table);
+  const artifacts = loadArtifacts(tableFilename);
+  for (const [hostKey, artifact] of Object.entries(artifacts)) {
+    if (artifact.service_profile !== selection.service_profile) {
+      throw new Error(
+        `Selected native artifact ${hostKey} belongs to ${artifact.service_profile}, ` +
+          `not ${selection.service_profile}`,
+      );
+    }
+  }
+  return { serviceProfile: selection.service_profile, artifacts };
+}
+
+function selectArtifact(
+  artifacts,
+  platform = process.platform,
+  arch = process.arch,
+  serviceProfile = 'local',
+) {
   const hostKey = `${platform}-${arch}`;
   const artifact = artifacts[hostKey];
   if (artifact) {
     return artifact;
   }
   throw new Error(
-    `No opendal-mbt local artifact is available for ${hostKey}; ` +
+    `No opendal-mbt ${serviceProfile} artifact is available for ${hostKey}; ` +
       `supported hosts: ${Object.keys(artifacts).sort().join(', ')}`,
   );
 }
@@ -257,6 +329,9 @@ async function validateInstalledArtifact(installRoot, artifact, requireMarker) {
     'minimum_macos_version',
     'minimum_glibc_version',
   ];
+  if (Object.hasOwn(artifact, 'runtime_initialization')) {
+    exactFields.push('runtime_initialization');
+  }
   requireValid(manifest.schema_version === 1, 'Unsupported artifact manifest schema');
   for (const field of exactFields) {
     requireValid(
@@ -264,7 +339,11 @@ async function validateInstalledArtifact(installRoot, artifact, requireMarker) {
       `Artifact manifest field ${field} does not match the pinned table`,
     );
   }
-  for (const field of ['abi_version', 'services', 'rust_features', 'system_link_flags']) {
+  const jsonFields = ['abi_version', 'services', 'rust_features', 'system_link_flags'];
+  if (Object.hasOwn(artifact, 'cargo_features')) {
+    jsonFields.push('cargo_features');
+  }
+  for (const field of jsonFields) {
     requireValid(
       sameJson(manifest[field], artifact[field]),
       `Artifact manifest field ${field} does not match the pinned table`,
@@ -620,7 +699,13 @@ async function main() {
     throw new Error(`Node.js 18 or newer is required; found ${process.versions.node}`);
   }
   const input = await readBuildInput();
-  const artifact = selectArtifact(loadArtifacts());
+  const selected = loadSelectedArtifacts();
+  const artifact = selectArtifact(
+    selected.artifacts,
+    process.platform,
+    process.arch,
+    selected.serviceProfile,
+  );
   validateHostCompatibility(artifact);
   const localOutput = await resolveLocalOverride(input, artifact);
   if (localOutput) {
@@ -637,7 +722,9 @@ module.exports = {
   compareVersions,
   ensureArtifact,
   extractArchive,
+  loadArtifactSelection,
   loadArtifacts,
+  loadSelectedArtifacts,
   makeBuildOutput,
   selectArtifact,
   sha256File,

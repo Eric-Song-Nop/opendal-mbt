@@ -12,13 +12,15 @@ const test = require('node:test');
 const {
   cachePaths,
   ensureArtifact,
+  loadArtifactSelection,
   loadArtifacts,
+  loadSelectedArtifacts,
   makeBuildOutput,
   selectArtifact,
   sha256File,
 } = require('../build.js');
 
-async function fixture() {
+async function fixture(serviceProfile = 'local') {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'opendal-resolver-test-'));
   const source = path.join(root, 'source');
   await fsp.mkdir(path.join(source, 'lib'), { recursive: true });
@@ -27,16 +29,26 @@ async function fixture() {
   await fsp.writeFile(path.join(source, 'LICENSE'), 'fixture license\n');
   const libraryStat = await fsp.stat(library);
   const librarySha256 = await sha256File(library);
+  const standard = serviceProfile === 'standard';
   const artifact = {
-    artifact: 'opendal-mbt-0.1.0-r1-local-aarch64-apple-darwin',
+    artifact: `opendal-mbt-0.1.0-r1-${serviceProfile}-aarch64-apple-darwin`,
     artifact_revision: 'r1',
     binding_version: '0.1.0',
     abi_version: { major: 1, minor: 0, patch: 0 },
     opendal_version: '0.58.1',
     rust_version: '1.91',
-    service_profile: 'local',
-    services: ['memory', 'fs'],
-    rust_features: ['blocking', 'services-fs'],
+    service_profile: serviceProfile,
+    services: standard ? ['memory', 'fs', 's3'] : ['memory', 'fs'],
+    rust_features: standard
+      ? [
+          'blocking',
+          'services-fs',
+          'services-s3',
+          'http-transport-reqwest',
+          'http-transport-reqwest-rustls',
+          'executors-tokio',
+        ]
+      : ['blocking', 'services-fs'],
     rust_target: 'aarch64-apple-darwin',
     host_key: 'darwin-arm64',
     minimum_macos_version: '11.0',
@@ -46,6 +58,10 @@ async function fixture() {
     system_link_flags: ['-liconv', '-lSystem', '-lc', '-lm'],
     url: 'https://example.invalid/opendal.tar.gz',
   };
+  if (standard) {
+    artifact.cargo_features = ['profile-standard'];
+    artifact.runtime_initialization = 'install_default';
+  }
   await fsp.writeFile(
     path.join(source, 'manifest.json'),
     `${JSON.stringify({ schema_version: 1, ...artifact }, (key, value) => {
@@ -92,6 +108,66 @@ test('published artifact table covers the initial host matrix', () => {
     assert.match(artifact.archive_sha256, /^[0-9a-f]{64}$/);
     assert.match(artifact.static_library_sha256, /^[0-9a-f]{64}$/);
     assert.equal(artifact.url.startsWith('https://github.com/'), true);
+  }
+});
+
+test('standard artifact table is separate and ready for candidate records', () => {
+  const artifacts = loadArtifacts(
+    path.join(__dirname, '..', 'native', 'artifacts-standard.json'),
+  );
+  assert.deepEqual(artifacts, {});
+});
+
+test('published package selects one profile without consulting the environment', async () => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'opendal-selection-test-'));
+  try {
+    const selection = path.join(root, 'artifact-selection.json');
+    await fsp.writeFile(
+      selection,
+      JSON.stringify({
+        schema_version: 1,
+        service_profile: 'standard',
+        artifact_table: 'artifacts-standard.json',
+      }),
+    );
+    await fsp.writeFile(
+      path.join(root, 'artifacts-standard.json'),
+      JSON.stringify({
+        schema_version: 1,
+        service_profile: 'standard',
+        artifacts: {
+          'darwin-arm64': {
+            artifact: 'standard-darwin',
+            service_profile: 'standard',
+          },
+        },
+      }),
+    );
+    process.env.OPENDAL_MBT_PROFILE = 'local';
+    const selected = loadSelectedArtifacts(selection);
+    assert.equal(selected.serviceProfile, 'standard');
+    assert.equal(selected.artifacts['darwin-arm64'].artifact, 'standard-darwin');
+  } finally {
+    delete process.env.OPENDAL_MBT_PROFILE;
+    await cleanup(root);
+  }
+});
+
+test('artifact selection rejects path traversal', async () => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'opendal-selection-test-'));
+  try {
+    const selection = path.join(root, 'artifact-selection.json');
+    await fsp.writeFile(
+      selection,
+      JSON.stringify({
+        schema_version: 1,
+        service_profile: 'standard',
+        artifact_table: '../artifacts.json',
+      }),
+    );
+    assert.throws(() => loadArtifactSelection(selection), /Unsupported native artifact selection/);
+  } finally {
+    await cleanup(root);
   }
 });
 
@@ -165,6 +241,22 @@ test('concurrent installers share one atomic cache fill', async () => {
     assert.equal(first.staticLibrary, second.staticLibrary);
   } finally {
     await cleanup(value.root);
+  }
+});
+
+test('local and standard artifacts use distinct cache roots', async () => {
+  const local = await fixture('local');
+  const standard = await fixture('standard');
+  try {
+    const moonHome = path.join(local.root, 'moon-home');
+    const localPaths = cachePaths(moonHome, local.artifact);
+    const standardPaths = cachePaths(moonHome, standard.artifact);
+    assert.notEqual(localPaths.versionRoot, standardPaths.versionRoot);
+    assert.match(localPaths.versionRoot, /\/local\//);
+    assert.match(standardPaths.versionRoot, /\/standard\//);
+  } finally {
+    await cleanup(local.root);
+    await cleanup(standard.root);
   }
 });
 
