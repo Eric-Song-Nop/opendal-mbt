@@ -5,14 +5,20 @@ on:
     paths:
       - .github/workflows/native-release.yml
       - build.js
+      - "*.mbt"
       - Cargo.lock
       - Cargo.toml
+      - integration/consumer/**
+      - moon.mod
+      - moon.pkg
       - native/distribution-profile.json
       - native/artifacts.json
       - native/include/opendal_mbt.h
       - native/rust/**
       - rust-toolchain.toml
+      - scripts/check-packaged-consumer.sh
       - scripts/package-native-artifact.py
+      - scripts/prepare-test-native-cache.js
       - scripts/test-package-native-artifact.py
   push:
     tags:
@@ -21,6 +27,9 @@ on:
 
 permissions:
   contents: read
+
+env:
+  MOONBIT_VERSION: 0.10.6+80dc50f24
 
 jobs:
   artifact:
@@ -40,6 +49,10 @@ jobs:
       - uses: actions/checkout@v6
       - name: Install Rust toolchain
         run: rustup show active-toolchain
+      - name: Install MoonBit
+        run: |
+          curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash -s "$MOONBIT_VERSION"
+          echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
       - name: Test artifact packager
         run: python3 scripts/test-package-native-artifact.py
       - name: Build release static library
@@ -70,6 +83,13 @@ jobs:
             --output-dir target/native-dist \
             --verify-pinned native/artifacts.json | \
             tee target/native-release/package-result.json
+      - name: Test clean packaged Moon consumer
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive=$(find target/native-dist -name '*.tar.gz' -type f)
+          test -n "$archive"
+          make packaged-consumer NATIVE_ARTIFACT="$archive"
       - uses: actions/upload-artifact@v4
         with:
           name: native-${{ matrix.rust_target }}
