@@ -5832,6 +5832,13 @@ mod tests {
     use std::mem::MaybeUninit;
     use std::ptr::NonNull;
 
+    #[cfg(unix)]
+    use std::io::Read;
+    #[cfg(unix)]
+    use std::os::fd::AsRawFd;
+    #[cfg(unix)]
+    use std::os::unix::net::UnixStream;
+
     fn bytes(value: &[u8]) -> BytesViewV1 {
         BytesViewV1 {
             data: if value.is_empty() {
@@ -9422,6 +9429,125 @@ mod tests {
             free(empty);
             free(buffer);
         }
+    }
+
+    #[cfg(unix)]
+    fn async_launch_pair() -> (UnixStream, AsyncLaunch) {
+        let (reader, writer) = UnixStream::pair().expect("test completion pair is available");
+        let launch = AsyncLaunch::prepare(writer.as_raw_fd())
+            .unwrap_or_else(|_| panic!("test completion fd can be duplicated"));
+        drop(writer);
+        (reader, launch)
+    }
+
+    #[cfg(unix)]
+    fn read_one_completion(reader: &mut UnixStream) {
+        let mut byte = [0; 1];
+        reader
+            .read_exact(&mut byte)
+            .expect("one completion byte is readable");
+        assert_eq!(byte, [1]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn async_task_take_is_typed_exactly_once_and_signals_once() {
+        let (mut reader, launch) = async_launch_pair();
+        let (task, _) = launch.spawn(AsyncResultKind::Buffer, None, async {
+            AsyncOutcome::success(
+                AsyncResultKind::Buffer,
+                AsyncPayload::Buffer(Box::new(BufferV1 {
+                    bytes: b"owned".to_vec(),
+                })),
+            )
+        });
+        read_one_completion(&mut reader);
+
+        assert!(task.shared.take(AsyncResultKind::Metadata).is_err());
+        let outcome = task
+            .shared
+            .take(AsyncResultKind::Buffer)
+            .unwrap_or_else(|_| panic!("matching task result is available"));
+        match outcome.payload {
+            AsyncPayload::Buffer(buffer) => assert_eq!(buffer.bytes, b"owned"),
+            _ => panic!("buffer task returned the wrong payload"),
+        }
+        assert!(task.shared.take(AsyncResultKind::Buffer).is_err());
+        task.shared.cancel();
+
+        let mut extra = [0; 1];
+        assert_eq!(
+            reader
+                .read(&mut extra)
+                .expect("completion writer closes after its one byte"),
+            0,
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn async_cancel_wakes_synchronously_once_and_worker_does_not_write_again() {
+        let (mut reader, launch) = async_launch_pair();
+        let (task, _) = launch.spawn(AsyncResultKind::Unit, None, async {
+            std::future::pending::<AsyncOutcome>().await
+        });
+
+        task.shared.cancel();
+        read_one_completion(&mut reader);
+        assert!(task.shared.take(AsyncResultKind::Unit).is_err());
+        task.shared.cancel();
+
+        let mut extra = [0; 1];
+        assert_eq!(
+            reader
+                .read(&mut extra)
+                .expect("cancel owns and closes the only completion writer"),
+            0,
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn async_cancel_after_closed_reader_ignores_epipe() {
+        let (reader, launch) = async_launch_pair();
+        let (task, _) = launch.spawn(AsyncResultKind::Unit, None, async {
+            std::future::pending::<AsyncOutcome>().await
+        });
+        drop(reader);
+
+        task.shared.cancel();
+        task.shared.cancel();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn async_completed_unclaimed_cancel_poisons_stream_and_writer() {
+        let stream = Arc::new(AsyncReadStreamCore {
+            state: Mutex::new(AsyncReadStreamState::End),
+            chunk_size: 1,
+        });
+        let (mut stream_reader, launch) = async_launch_pair();
+        let (stream_task, _) = launch.spawn(
+            AsyncResultKind::Buffer,
+            Some(AsyncResourcePoison::ReadStream(stream.clone())),
+            async { AsyncOutcome::end(AsyncResultKind::Buffer) },
+        );
+        read_one_completion(&mut stream_reader);
+        stream_task.shared.cancel();
+        assert!(matches!(*stream.lock_state(), AsyncReadStreamState::Failed));
+
+        let writer = Arc::new(AsyncWriterCore {
+            state: Mutex::new(AsyncWriterState::Finished),
+        });
+        let (mut writer_reader, launch) = async_launch_pair();
+        let (writer_task, _) = launch.spawn(
+            AsyncResultKind::Unit,
+            Some(AsyncResourcePoison::Writer(writer.clone())),
+            async { AsyncOutcome::success(AsyncResultKind::Unit, AsyncPayload::Unit) },
+        );
+        read_one_completion(&mut writer_reader);
+        writer_task.shared.cancel();
+        assert!(matches!(*writer.lock_state(), AsyncWriterState::Failed));
     }
 
     #[test]

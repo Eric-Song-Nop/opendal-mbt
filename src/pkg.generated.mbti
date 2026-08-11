@@ -29,7 +29,7 @@ pub async fn AsyncOperator::read(Self, StringView, range? : ByteRange, version? 
 pub struct AsyncReadStream {
   // private fields
 }
-pub async fn AsyncReadStream::close(Self) -> Unit
+pub fn AsyncReadStream::close(Self) -> Unit
 pub async fn AsyncReadStream::next(Self) -> Bytes?
 
 pub struct AsyncWriter {

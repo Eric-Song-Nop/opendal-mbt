@@ -235,8 +235,7 @@ pub async fn AsyncReadStream::next(self : AsyncReadStream) -> Bytes? {
 
 ///|
 /// Release the cursor early. Closing more than once is harmless.
-#warnings("-unused_async")
-pub async fn AsyncReadStream::close(self : AsyncReadStream) -> Unit {
+pub fn AsyncReadStream::close(self : AsyncReadStream) -> Unit {
   native_async_read_stream_close(self.native)
 }
 

@@ -60,8 +60,8 @@ extern "C" fn native_async_read_stream_next_start(
 ) -> NativeResult = "moonbit_opendal_async_read_stream_next_start"
 
 ///|
-/// Close a stream immediately. Closing more than once is harmless and also
-/// cancels any in-flight operation.
+/// Close a stream synchronously. Closing more than once is harmless and also
+/// cancels any in-flight operation without starting background work.
 #borrow(stream)
 extern "C" fn native_async_read_stream_close(
   stream : NativeAsyncReadStream,

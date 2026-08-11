@@ -1,7 +1,7 @@
 ///|
 /// This branch intentionally defines only the MoonBit facade and private FFI
 /// contract. The unreachable body keeps every public async call shape under
-/// compiler control without requiring the later native implementation.
+/// compiler control independently of runtime behavior tests.
 async test "Phase 5E async facade contract compiles" {
   if false {
     let operator = Operator::new("memory")
