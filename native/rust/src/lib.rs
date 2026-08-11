@@ -107,13 +107,6 @@ static TEST_WRITER_CALL_TARGET: std::sync::atomic::AtomicUsize =
 #[cfg(test)]
 static TEST_WRITER_CALL_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 #[cfg(test)]
-static TEST_WRITER_NATIVE_CLOSES: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-#[cfg(test)]
-static TEST_WRITER_NATIVE_ABORTS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-
-#[cfg(test)]
 const TEST_COPIER_NEXT_ERROR: u8 = 1;
 #[cfg(test)]
 const TEST_COPIER_NEXT_PANIC: u8 = 2;
@@ -130,13 +123,6 @@ static TEST_COPIER_CALL_TARGET: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 #[cfg(test)]
 static TEST_COPIER_CALL_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
-#[cfg(test)]
-static TEST_COPIER_NATIVE_FINISHES: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-#[cfg(test)]
-static TEST_COPIER_NATIVE_ABORTS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-
 #[cfg(test)]
 fn install_lister_next_test_mode(lister: *mut ListerV1, mode: u8) {
     use std::sync::atomic::Ordering;
@@ -4277,8 +4263,6 @@ unsafe extern "C" fn writer_close(
                 TEST_WRITER_CLOSE_PANIC => panic!("injected writer close panic"),
                 _ => {}
             }
-            #[cfg(test)]
-            TEST_WRITER_NATIVE_CLOSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let metadata = runtime.block_on(inner.close()).map_err(opendal_error)?;
             Ok(Box::new(checked_metadata(metadata)?))
         }));
@@ -4354,8 +4338,6 @@ unsafe extern "C" fn writer_abort(writer: *mut WriterV1, out_error: *mut *mut Er
                 TEST_WRITER_ABORT_PANIC => panic!("injected writer abort panic"),
                 _ => {}
             }
-            #[cfg(test)]
-            TEST_WRITER_NATIVE_ABORTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             runtime.block_on(inner.abort()).map_err(opendal_error)
         }));
         match step {
@@ -4584,14 +4566,17 @@ unsafe extern "C" fn copier_finish(
                 TEST_COPIER_FINISH_PANIC => panic!("injected Copier finish panic"),
                 _ => {}
             }
-            #[cfg(test)]
-            TEST_COPIER_NATIVE_FINISHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let metadata = match &mut inner {
                 CopierInnerV1::OpenDal(copier) => {
                     runtime.block_on(copier.close()).map_err(opendal_error)?
                 }
                 #[cfg(test)]
-                CopierInnerV1::Test(copier) => copier.metadata.clone(),
+                CopierInnerV1::Test(copier) => {
+                    copier
+                        .finishes
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    copier.metadata.clone()
+                }
             };
             Ok(Box::new(checked_metadata(metadata)?))
         }));
@@ -4667,14 +4652,17 @@ unsafe extern "C" fn copier_abort(copier: *mut CopierV1, out_error: *mut *mut Er
                 TEST_COPIER_ABORT_PANIC => panic!("injected Copier abort panic"),
                 _ => {}
             }
-            #[cfg(test)]
-            TEST_COPIER_NATIVE_ABORTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             match &mut inner {
                 CopierInnerV1::OpenDal(copier) => {
                     runtime.block_on(copier.abort()).map_err(opendal_error)
                 }
                 #[cfg(test)]
-                CopierInnerV1::Test(_) => Ok(()),
+                CopierInnerV1::Test(copier) => {
+                    copier
+                        .aborts
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    Ok(())
+                }
             }
         }));
         match step {
@@ -6516,13 +6504,28 @@ mod tests {
     }
 
     fn test_copier(progress: &[usize]) -> *mut CopierV1 {
-        Box::into_raw(Box::new(CopierV1 {
+        observed_test_copier(progress).0
+    }
+
+    fn observed_test_copier(
+        progress: &[usize],
+    ) -> (
+        *mut CopierV1,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let finishes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let aborts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let copier = Box::into_raw(Box::new(CopierV1 {
             state: Mutex::new(CopierStateV1::Open(CopierInnerV1::Test(TestCopierV1 {
                 progress: progress.iter().copied().collect(),
                 metadata: Metadata::default(),
+                finishes: finishes.clone(),
+                aborts: aborts.clone(),
             }))),
             changed: Condvar::new(),
-        }))
+        }));
+        (copier, finishes, aborts)
     }
 
     fn next_copier(api: &ApiV1, copier: *mut CopierV1) -> Option<u64> {
@@ -8986,19 +8989,12 @@ mod tests {
 
     #[test]
     fn writer_abort_is_explicit_idempotent_and_terminal() {
-        use std::sync::atomic::Ordering;
-
         let api = api();
         let (operator, info) = memory_operator(&api);
         let writer = memory_writer(&api, operator, b"writer/aborted.bin", ptr::null());
         write_writer_chunk(&api, writer, b"discard-me");
-        let aborts_before = TEST_WRITER_NATIVE_ABORTS.load(Ordering::Relaxed);
         abort_writer(&api, writer);
         abort_writer(&api, writer);
-        assert_eq!(
-            TEST_WRITER_NATIVE_ABORTS.load(Ordering::Relaxed),
-            aborts_before + 1,
-        );
         assert!(!memory_object_exists(&api, operator, b"writer/aborted.bin"));
 
         let write = api.writer_write.expect("CHUNKED_WRITER write is installed");
@@ -9086,8 +9082,6 @@ mod tests {
 
     #[test]
     fn chunked_writer_serializes_same_handle_calls_and_free_never_closes() {
-        use std::sync::atomic::Ordering;
-
         let api = api();
         let (operator, info) = memory_operator(&api);
         let writer = memory_writer(&api, operator, b"writer/concurrent.bin", ptr::null());
@@ -9109,13 +9103,13 @@ mod tests {
 
         let unfinished = memory_writer(&api, operator, b"writer/unfinished.bin", ptr::null());
         write_writer_chunk(&api, unfinished, b"not-finished");
-        let closes_before = TEST_WRITER_NATIVE_CLOSES.load(Ordering::Relaxed);
         // SAFETY: freeing this uniquely owned open writer must only drop it.
         unsafe { api.writer_free.expect("CHUNKED_WRITER free is installed")(unfinished) };
-        assert_eq!(
-            TEST_WRITER_NATIVE_CLOSES.load(Ordering::Relaxed),
-            closes_before,
-        );
+        assert!(!memory_object_exists(
+            &api,
+            operator,
+            b"writer/unfinished.bin",
+        ));
 
         // SAFETY: all remaining resources are uniquely owned.
         unsafe {
@@ -9828,7 +9822,7 @@ mod tests {
         use std::sync::atomic::Ordering;
 
         let api = api();
-        let copier = test_copier(&[7, 11, 5]);
+        let (copier, finishes, _) = observed_test_copier(&[7, 11, 5]);
         let mut observed = 0u64;
         while let Some(delta) = next_copier(&api, copier) {
             observed = observed.checked_add(delta).expect("progress sum fits u64");
@@ -9843,12 +9837,8 @@ mod tests {
         assert_eq!(unsafe { abort(copier, &mut error) }, STATUS_ERROR);
         assert_eq!(take_error_kind(&api, error), ERROR_RESOURCE_CLOSED);
 
-        let finishes_before = TEST_COPIER_NATIVE_FINISHES.load(Ordering::Relaxed);
         let metadata = finish_copier(&api, copier);
-        assert_eq!(
-            TEST_COPIER_NATIVE_FINISHES.load(Ordering::Relaxed),
-            finishes_before + 1,
-        );
+        assert_eq!(finishes.load(Ordering::Relaxed), 1);
         // The test Copier returns one owned metadata snapshot.
         unsafe { api.metadata_free.expect("BASE metadata free is installed")(metadata) };
 
@@ -9879,14 +9869,10 @@ mod tests {
         assert_eq!(progress, 0);
         assert_eq!(take_error_kind(&api, error), ERROR_RESOURCE_CLOSED);
 
-        let aborted = test_copier(&[3]);
-        let aborts_before = TEST_COPIER_NATIVE_ABORTS.load(Ordering::Relaxed);
+        let (aborted, _, aborts) = observed_test_copier(&[3]);
         abort_copier(&api, aborted);
         abort_copier(&api, aborted);
-        assert_eq!(
-            TEST_COPIER_NATIVE_ABORTS.load(Ordering::Relaxed),
-            aborts_before + 1,
-        );
+        assert_eq!(aborts.load(Ordering::Relaxed), 1);
         error = NonNull::<ErrorV1>::dangling().as_ptr();
         progress = u64::MAX;
         // SAFETY: an aborted Copier rejects later progress calls.
@@ -9902,22 +9888,14 @@ mod tests {
         );
         assert_eq!(take_error_kind(&api, error), ERROR_RESOURCE_CLOSED);
 
-        let unfinished = test_copier(&[9]);
-        let finishes_before = TEST_COPIER_NATIVE_FINISHES.load(Ordering::Relaxed);
-        let aborts_before = TEST_COPIER_NATIVE_ABORTS.load(Ordering::Relaxed);
+        let (unfinished, unfinished_finishes, unfinished_aborts) = observed_test_copier(&[9]);
         // SAFETY: free only drops uniquely owned state; NULL is a no-op.
         unsafe {
             api.copier_free.expect("COPIER free is installed")(ptr::null_mut());
             api.copier_free.expect("COPIER free is installed")(unfinished);
         }
-        assert_eq!(
-            TEST_COPIER_NATIVE_FINISHES.load(Ordering::Relaxed),
-            finishes_before,
-        );
-        assert_eq!(
-            TEST_COPIER_NATIVE_ABORTS.load(Ordering::Relaxed),
-            aborts_before,
-        );
+        assert_eq!(unfinished_finishes.load(Ordering::Relaxed), 0);
+        assert_eq!(unfinished_aborts.load(Ordering::Relaxed), 0);
 
         // SAFETY: all remaining resources are uniquely owned.
         unsafe {

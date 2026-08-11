@@ -501,6 +501,8 @@ pub(crate) enum CopierInnerV1 {
 pub(crate) struct TestCopierV1 {
     pub(crate) progress: std::collections::VecDeque<usize>,
     pub(crate) metadata: opendal::Metadata,
+    pub(crate) finishes: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    pub(crate) aborts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 pub(crate) enum CopierStateV1 {
