@@ -31,7 +31,7 @@ MOON_TEST_FLAGS := --target native --frozen --warn-list '$(MOON_WARN_LIST)' --de
 
 .PHONY: native rust-test moon-check moon-test coverage abi-smoke c-example \
 	api-contract interface-contract package-contract packaged-consumer check \
-	test-profile native-artifact-test asan
+	test-profile native-artifact-test version-contract asan
 
 native:
 	cargo build --workspace --locked $(CARGO_SERVICE_FLAGS) $(CARGO_PROFILE_FLAG)
@@ -86,13 +86,18 @@ packaged-consumer:
 		sh scripts/check-packaged-consumer.sh "$(NATIVE_ARTIFACT)"; \
 	fi
 
+version-contract:
+	python3 scripts/test-version-metadata.py
+	python3 scripts/check-version-metadata.py
+
 native-artifact-test:
 	python3 scripts/test-distribution-profiles.py
 	python3 scripts/test-package-native-artifact.py
 	node --check scripts/prepare-test-native-cache.js
 	node --test scripts/test-native-resolver.js
 
-check: api-contract interface-contract package-contract native-artifact-test
+check: api-contract interface-contract package-contract native-artifact-test \
+	version-contract
 	cargo fmt --all -- --check
 	cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 	$(MAKE) moon-check

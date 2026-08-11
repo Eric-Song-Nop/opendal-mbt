@@ -50,3 +50,8 @@ that profile's committed table. It then:
 If a step fails after the GitHub release is created, rerunning the workflow
 replaces its assets with the same verified bytes. Never change an existing
 release asset without also changing its pinned digest and artifact revision.
+
+`make version-contract` keeps `moon.mod`, the native Rust crate and lockfile,
+and the versioned dependency in `integration/consumer/moon.mod` aligned. This
+prevents a new tag from publishing one package version while the final registry
+acceptance job silently resolves an older release.
