@@ -175,6 +175,19 @@ static opendal_mbt_status_t load_writer_abort_api(opendal_mbt_api_v1_t *api) {
   return OPENDAL_MBT_STATUS_OK;
 }
 
+static opendal_mbt_status_t load_s3_api(opendal_mbt_api_v1_t *api) {
+  opendal_mbt_status_t status = load_api(api, false);
+  if (status != OPENDAL_MBT_STATUS_OK) {
+    return status;
+  }
+  if (api->max_output_bytes == 0 ||
+      (api->feature_bits & OPENDAL_MBT_FEATURE_S3) == 0 ||
+      !API_HAS(api, operator_s3)) {
+    return OPENDAL_MBT_STATUS_ABI_MISMATCH;
+  }
+  return OPENDAL_MBT_STATUS_OK;
+}
+
 static void result_set_local_error(moonbit_opendal_result_t *result,
                                    opendal_mbt_error_kind_t kind,
                                    const char *kind_name,
@@ -951,6 +964,238 @@ MOONBIT_FFI_EXPORT moonbit_opendal_result_t *moonbit_opendal_operator_new(
   owned_utf8_free(&scheme_utf8);
   if (result->status == OPENDAL_MBT_STATUS_OK &&
       !validate_operator_info(result->info)) {
+    result->status = OPENDAL_MBT_STATUS_ABI_MISMATCH;
+  }
+  return result;
+}
+
+MOONBIT_FFI_EXPORT moonbit_opendal_result_t *moonbit_opendal_operator_s3(
+    moonbit_string_t bucket, moonbit_string_t region, int32_t has_root,
+    moonbit_string_t root, int32_t has_endpoint, moonbit_string_t endpoint,
+    uint32_t auth_kind, uint32_t source_kind,
+    int32_t disable_ec2_metadata, moonbit_string_t access_key_id,
+    moonbit_string_t secret_access_key, int32_t has_session_token,
+    moonbit_string_t session_token, moonbit_string_t role_arn,
+    int32_t has_external_id, moonbit_string_t external_id,
+    int32_t has_role_session_name, moonbit_string_t role_session_name,
+    int32_t has_duration_seconds, uint32_t duration_seconds,
+    int32_t virtual_host_style) {
+  enum {
+    S3_TEXT_BUCKET = 0,
+    S3_TEXT_REGION,
+    S3_TEXT_ROOT,
+    S3_TEXT_ENDPOINT,
+    S3_TEXT_ACCESS_KEY_ID,
+    S3_TEXT_SECRET_ACCESS_KEY,
+    S3_TEXT_SESSION_TOKEN,
+    S3_TEXT_ROLE_ARN,
+    S3_TEXT_EXTERNAL_ID,
+    S3_TEXT_ROLE_SESSION_NAME,
+    S3_TEXT_COUNT,
+  };
+  moonbit_opendal_result_t *result = result_new();
+  opendal_mbt_api_v1_t api;
+  opendal_mbt_s3_options_v1_t options;
+  owned_utf8_t text[S3_TEXT_COUNT] = {{0}};
+  bool uses_static_credentials = false;
+  bool uses_assume_role = false;
+
+  if ((has_root != 0 && has_root != 1) ||
+      (has_endpoint != 0 && has_endpoint != 1) ||
+      (disable_ec2_metadata != 0 && disable_ec2_metadata != 1) ||
+      (has_session_token != 0 && has_session_token != 1) ||
+      (has_external_id != 0 && has_external_id != 1) ||
+      (has_role_session_name != 0 && has_role_session_name != 1) ||
+      (has_duration_seconds != 0 && has_duration_seconds != 1) ||
+      (virtual_host_style != 0 && virtual_host_style != 1)) {
+    result->status = OPENDAL_MBT_STATUS_ABI_MISMATCH;
+    return result;
+  }
+
+  result->status = load_s3_api(&api);
+  if (result->status != OPENDAL_MBT_STATUS_OK) {
+    return result;
+  }
+
+  switch (auth_kind) {
+  case OPENDAL_MBT_S3_AUTH_DEFAULT_CHAIN:
+    if (source_kind != OPENDAL_MBT_S3_SOURCE_DEFAULT_CHAIN ||
+        has_session_token != 0 || has_external_id != 0 ||
+        has_role_session_name != 0 || has_duration_seconds != 0 ||
+        duration_seconds != 0) {
+      result_set_local_error(
+          result, OPENDAL_MBT_ERROR_INVALID_ARGUMENT, "InvalidArgument",
+          "invalid fields for default-chain S3 authentication");
+      return result;
+    }
+    break;
+  case OPENDAL_MBT_S3_AUTH_STATIC:
+    if (source_kind != OPENDAL_MBT_S3_SOURCE_STATIC ||
+        disable_ec2_metadata != 0 || has_external_id != 0 ||
+        has_role_session_name != 0 || has_duration_seconds != 0 ||
+        duration_seconds != 0) {
+      result_set_local_error(result, OPENDAL_MBT_ERROR_INVALID_ARGUMENT,
+                             "InvalidArgument",
+                             "invalid fields for static S3 authentication");
+      return result;
+    }
+    uses_static_credentials = true;
+    break;
+  case OPENDAL_MBT_S3_AUTH_UNSIGNED:
+    if (source_kind != OPENDAL_MBT_S3_SOURCE_DEFAULT_CHAIN ||
+        disable_ec2_metadata != 0 || has_session_token != 0 ||
+        has_external_id != 0 || has_role_session_name != 0 ||
+        has_duration_seconds != 0 || duration_seconds != 0) {
+      result_set_local_error(result, OPENDAL_MBT_ERROR_INVALID_ARGUMENT,
+                             "InvalidArgument",
+                             "invalid fields for unsigned S3 authentication");
+      return result;
+    }
+    break;
+  case OPENDAL_MBT_S3_AUTH_ASSUME_ROLE:
+    uses_assume_role = true;
+    if (source_kind == OPENDAL_MBT_S3_SOURCE_STATIC) {
+      if (disable_ec2_metadata != 0) {
+        result_set_local_error(
+            result, OPENDAL_MBT_ERROR_INVALID_ARGUMENT, "InvalidArgument",
+            "invalid fields for static-source S3 assume-role authentication");
+        return result;
+      }
+      uses_static_credentials = true;
+    } else if (source_kind == OPENDAL_MBT_S3_SOURCE_DEFAULT_CHAIN) {
+      if (has_session_token != 0) {
+        result_set_local_error(
+            result, OPENDAL_MBT_ERROR_INVALID_ARGUMENT, "InvalidArgument",
+            "invalid fields for default-source S3 assume-role authentication");
+        return result;
+      }
+    } else {
+      result_set_local_error(result, OPENDAL_MBT_ERROR_INVALID_ARGUMENT,
+                             "InvalidArgument",
+                             "unsupported S3 credential source kind");
+      return result;
+    }
+    if (has_duration_seconds == 0 && duration_seconds != 0) {
+      result_set_local_error(
+          result, OPENDAL_MBT_ERROR_INVALID_ARGUMENT, "InvalidArgument",
+          "S3 assume-role duration requires an explicit presence tag");
+      return result;
+    }
+    break;
+  default:
+    result_set_local_error(result, OPENDAL_MBT_ERROR_INVALID_ARGUMENT,
+                           "InvalidArgument",
+                           "unsupported S3 authentication kind");
+    return result;
+  }
+
+  if (!convert_optional_utf8(result, true, bucket,
+                             "S3 bucket contains invalid UTF-16",
+                             "unable to allocate UTF-8 S3 bucket",
+                             &text[S3_TEXT_BUCKET]) ||
+      !convert_optional_utf8(result, true, region,
+                             "S3 region contains invalid UTF-16",
+                             "unable to allocate UTF-8 S3 region",
+                             &text[S3_TEXT_REGION]) ||
+      !convert_optional_utf8(result, has_root != 0, root,
+                             "S3 root contains invalid UTF-16",
+                             "unable to allocate UTF-8 S3 root",
+                             &text[S3_TEXT_ROOT]) ||
+      !convert_optional_utf8(result, has_endpoint != 0, endpoint,
+                             "S3 endpoint contains invalid UTF-16",
+                             "unable to allocate UTF-8 S3 endpoint",
+                             &text[S3_TEXT_ENDPOINT]) ||
+      !convert_optional_utf8(result, uses_static_credentials, access_key_id,
+                             "S3 access_key_id contains invalid UTF-16",
+                             "unable to allocate UTF-8 S3 access_key_id",
+                             &text[S3_TEXT_ACCESS_KEY_ID]) ||
+      !convert_optional_utf8(result, uses_static_credentials,
+                             secret_access_key,
+                             "S3 secret_access_key contains invalid UTF-16",
+                             "unable to allocate UTF-8 S3 secret_access_key",
+                             &text[S3_TEXT_SECRET_ACCESS_KEY]) ||
+      !convert_optional_utf8(result,
+                             uses_static_credentials && has_session_token != 0,
+                             session_token,
+                             "S3 session_token contains invalid UTF-16",
+                             "unable to allocate UTF-8 S3 session_token",
+                             &text[S3_TEXT_SESSION_TOKEN]) ||
+      !convert_optional_utf8(result, uses_assume_role, role_arn,
+                             "S3 role_arn contains invalid UTF-16",
+                             "unable to allocate UTF-8 S3 role_arn",
+                             &text[S3_TEXT_ROLE_ARN]) ||
+      !convert_optional_utf8(result,
+                             uses_assume_role && has_external_id != 0,
+                             external_id,
+                             "S3 external_id contains invalid UTF-16",
+                             "unable to allocate UTF-8 S3 external_id",
+                             &text[S3_TEXT_EXTERNAL_ID]) ||
+      !convert_optional_utf8(result,
+                             uses_assume_role && has_role_session_name != 0,
+                             role_session_name,
+                             "S3 role_session_name contains invalid UTF-16",
+                             "unable to allocate UTF-8 S3 role_session_name",
+                             &text[S3_TEXT_ROLE_SESSION_NAME])) {
+    goto cleanup;
+  }
+
+  memset(&options, 0, sizeof(options));
+  options.struct_size = (uint32_t)sizeof(options);
+  options.struct_version = OPENDAL_MBT_STRUCT_VERSION_V1;
+  options.auth_kind = auth_kind;
+  options.source_kind = source_kind;
+  options.bucket = owned_utf8_view(&text[S3_TEXT_BUCKET]);
+  options.region = owned_utf8_view(&text[S3_TEXT_REGION]);
+  if (has_root != 0) {
+    options.present_bits |= OPENDAL_MBT_S3_ROOT_PRESENT;
+    options.root = owned_utf8_view(&text[S3_TEXT_ROOT]);
+  }
+  if (has_endpoint != 0) {
+    options.present_bits |= OPENDAL_MBT_S3_ENDPOINT_PRESENT;
+    options.endpoint = owned_utf8_view(&text[S3_TEXT_ENDPOINT]);
+  }
+  if (uses_static_credentials) {
+    options.access_key_id = owned_utf8_view(&text[S3_TEXT_ACCESS_KEY_ID]);
+    options.secret_access_key =
+        owned_utf8_view(&text[S3_TEXT_SECRET_ACCESS_KEY]);
+    if (has_session_token != 0) {
+      options.present_bits |= OPENDAL_MBT_S3_SESSION_TOKEN_PRESENT;
+      options.session_token = owned_utf8_view(&text[S3_TEXT_SESSION_TOKEN]);
+    }
+  }
+  if (uses_assume_role) {
+    options.role_arn = owned_utf8_view(&text[S3_TEXT_ROLE_ARN]);
+    if (has_external_id != 0) {
+      options.present_bits |= OPENDAL_MBT_S3_EXTERNAL_ID_PRESENT;
+      options.external_id = owned_utf8_view(&text[S3_TEXT_EXTERNAL_ID]);
+    }
+    if (has_role_session_name != 0) {
+      options.present_bits |= OPENDAL_MBT_S3_ROLE_SESSION_NAME_PRESENT;
+      options.role_session_name =
+          owned_utf8_view(&text[S3_TEXT_ROLE_SESSION_NAME]);
+    }
+    if (has_duration_seconds != 0) {
+      options.present_bits |= OPENDAL_MBT_S3_ASSUME_ROLE_DURATION_PRESENT;
+      options.assume_role_duration_seconds = duration_seconds;
+    }
+  }
+  if (virtual_host_style != 0) {
+    options.flags |= OPENDAL_MBT_S3_VIRTUAL_HOST_STYLE;
+  }
+  if (disable_ec2_metadata != 0) {
+    options.flags |= OPENDAL_MBT_S3_DISABLE_EC2_METADATA;
+  }
+
+  result->status = api.operator_s3(&options, &result->operator_, &result->info,
+                                   &result->error);
+
+cleanup:
+  for (int32_t i = 0; i < S3_TEXT_COUNT; ++i) {
+    owned_utf8_free(&text[i]);
+  }
+  if (result->status == OPENDAL_MBT_STATUS_OK &&
+      (result->error != NULL || result->operator_ == NULL ||
+       !validate_operator_info(result->info))) {
     result->status = OPENDAL_MBT_STATUS_ABI_MISMATCH;
   }
   return result;

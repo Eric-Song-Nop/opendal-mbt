@@ -600,3 +600,71 @@ test "native fs: recursive listing works against an isolated filesystem root" {
   assert_true(has_entry(entries, "列表/nested/value.bin"))
   operator.delete("列表/", recursive=true)
 }
+
+///|
+test "native S3: typed authentication modes construct without object-store I/O" {
+  let static_source = @opendal.S3CredentialSource::static_credentials(
+    access_key_id="source-access-key",
+    secret_access_key="source-secret-key",
+    session_token="source-session-token",
+  )
+  let auth_modes = [
+    @opendal.S3Auth::default_chain(disable_ec2_metadata=true),
+    @opendal.S3Auth::static_credentials(
+      access_key_id="test-access-key",
+      secret_access_key="test-secret-key",
+      session_token="test-session-token",
+    ),
+    @opendal.S3Auth::unsigned(),
+    @opendal.S3Auth::assume_role(
+      role_arn="arn:aws:iam::123456789012:role/moonbit-default-source",
+      source=@opendal.S3CredentialSource::default_chain(
+        disable_ec2_metadata=true,
+      ),
+    ),
+    @opendal.S3Auth::assume_role(
+      role_arn="arn:aws:iam::123456789012:role/moonbit-test",
+      source=static_source,
+      external_id="moonbit-external",
+      role_session_name="moonbit-session",
+      duration_seconds=900UL,
+    ),
+  ]
+  for auth in auth_modes {
+    let operator = @opendal.Operator::s3(
+      "moonbit-binding-test",
+      region="us-east-1",
+      root="moonbit/",
+      endpoint="http://127.0.0.1:9",
+      auth~,
+    )
+    let info = operator.info()
+    assert_eq(info.scheme, "s3")
+    assert_eq(info.root, "/moonbit/")
+  }
+}
+
+///|
+test "native S3: construction errors do not disclose static secrets" {
+  let secret = "never-include-this-secret"
+  let auth = @opendal.S3Auth::static_credentials(
+    access_key_id="test-access-key",
+    secret_access_key=secret,
+  )
+  try
+    @opendal.Operator::s3(
+      "dotted.bucket",
+      region="us-east-1",
+      endpoint="http://127.0.0.1:9",
+      auth~,
+      virtual_host_style=true,
+    )
+  catch {
+    OpenDalError(info) => {
+      assert_true(info.operation is NewOperator)
+      assert_false(info.message.contains(secret))
+    }
+  } noraise {
+    _ => fail("expected dotted virtual-host bucket construction to fail")
+  }
+}
