@@ -316,6 +316,36 @@ test('link configuration uses the exact archive path and target flags', () => {
   });
 });
 
+test('unpinned Linux arm64 override resolves the versioned GCC runtime', async () => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'opendal-override-test-'));
+  try {
+    const library = path.join(root, 'libopendal_mbt_native.a');
+    const runtime = path.join(root, 'libgcc_s.so.1');
+    await fsp.writeFile(library, '!<arch>\nmaintainer fixture');
+    await fsp.writeFile(runtime, 'runtime fixture');
+    const resolvedRuntime = fs.realpathSync(runtime);
+    const output = await resolveLocalOverride(
+      {
+        env: {
+          OPENDAL_MBT_NATIVE_LIB: library,
+          OPENDAL_MBT_NATIVE_LIBS: '-lgcc_s -lpthread -lc',
+        },
+      },
+      undefined,
+      {
+        hostKey: 'linux-arm64',
+        gccRuntimeCandidates: [runtime],
+      },
+    );
+    assert.equal(
+      output.link_configs[0].link_flags,
+      `'${library}' '${resolvedRuntime}' -lpthread -lc`,
+    );
+  } finally {
+    await cleanup(root);
+  }
+});
+
 test('standard source builds add only profile-required frameworks', () => {
   const profile = loadDistributionProfile('standard');
   const artifact = {
