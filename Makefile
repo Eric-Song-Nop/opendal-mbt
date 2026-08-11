@@ -2,6 +2,7 @@ SHELL := /bin/sh
 
 RUST_PROFILE ?= debug
 MOON_WARN_LIST ?= -68+73
+NATIVE_ARTIFACT ?=
 
 ifeq ($(RUST_PROFILE),debug)
 CARGO_PROFILE_FLAG :=
@@ -62,10 +63,12 @@ package-contract:
 	sh scripts/check-package.sh
 
 packaged-consumer:
-	sh scripts/check-packaged-consumer.sh $(RUST_PROFILE)
+	test -n "$(NATIVE_ARTIFACT)"
+	sh scripts/check-packaged-consumer.sh "$(NATIVE_ARTIFACT)"
 
 native-artifact-test:
 	python3 scripts/test-package-native-artifact.py
+	node --check scripts/prepare-test-native-cache.js
 	node --test scripts/test-native-resolver.js
 
 check: api-contract interface-contract package-contract native-artifact-test
