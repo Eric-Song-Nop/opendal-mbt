@@ -16,6 +16,10 @@ priv type NativeLister
 priv type NativeReader
 
 ///|
+/// Native chunked writer storage finalized by the C stub without finishing.
+priv type NativeWriter
+
+///|
 /// Temporary owned native entry snapshot.
 priv type NativeEntry
 
@@ -30,6 +34,13 @@ pub struct Lister {
 /// Safe random-access reader retaining the path used for error context.
 pub struct Reader {
   priv native : NativeReader
+  priv path : String
+}
+
+///|
+/// Safe chunked writer retaining the path used for error context.
+pub struct Writer {
+  priv native : NativeWriter
   priv path : String
 }
 
@@ -117,12 +128,56 @@ extern "C" fn native_reader_read(
 extern "C" fn native_reader_close(reader : NativeReader) -> Unit = "moonbit_opendal_reader_close"
 
 ///|
-#borrow(operator, path, data)
+#borrow(operator, path, data, content_type, content_disposition, content_encoding, cache_control, if_match, if_none_match)
 extern "C" fn native_operator_write(
   operator : Operator,
   path : String,
   data : Bytes,
+  append : Bool,
+  has_content_type : Bool,
+  content_type : String,
+  has_content_disposition : Bool,
+  content_disposition : String,
+  has_content_encoding : Bool,
+  content_encoding : String,
+  has_cache_control : Bool,
+  cache_control : String,
+  has_if_match : Bool,
+  if_match : String,
+  has_if_none_match : Bool,
+  if_none_match : String,
 ) -> NativeResult = "moonbit_opendal_operator_write"
+
+///|
+#borrow(operator, path, content_type, content_disposition, content_encoding, cache_control, if_match, if_none_match)
+extern "C" fn native_operator_writer(
+  operator : Operator,
+  path : String,
+  append : Bool,
+  has_content_type : Bool,
+  content_type : String,
+  has_content_disposition : Bool,
+  content_disposition : String,
+  has_content_encoding : Bool,
+  content_encoding : String,
+  has_cache_control : Bool,
+  cache_control : String,
+  has_if_match : Bool,
+  if_match : String,
+  has_if_none_match : Bool,
+  if_none_match : String,
+) -> NativeResult = "moonbit_opendal_operator_writer"
+
+///|
+#borrow(writer, data)
+extern "C" fn native_writer_write(
+  writer : NativeWriter,
+  data : Bytes,
+) -> NativeResult = "moonbit_opendal_writer_write"
+
+///|
+#borrow(writer)
+extern "C" fn native_writer_close(writer : NativeWriter) -> NativeResult = "moonbit_opendal_writer_close"
 
 ///|
 #borrow(operator, path)
@@ -192,6 +247,10 @@ extern "C" fn native_result_take_lister(result : NativeResult) -> NativeLister =
 ///|
 #borrow(result)
 extern "C" fn native_result_take_reader(result : NativeResult) -> NativeReader = "moonbit_opendal_result_take_reader"
+
+///|
+#borrow(result)
+extern "C" fn native_result_take_writer(result : NativeResult) -> NativeWriter = "moonbit_opendal_result_take_writer"
 
 ///|
 #borrow(result)
