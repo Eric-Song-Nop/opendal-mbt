@@ -138,11 +138,14 @@ system libraries to the link configuration for `Eric-Song-Nop/opendal`.
 
 Repository development still builds the Rust archive from source. Ordinary
 source builds use `profile-standard`; an explicit local artifact rebuild uses
-`--no-default-features --features profile-local`. The Makefile passes the
-exact locally built archive to the configuration script
-through a maintainer-only override, so Moon tests exercise uncommitted Rust
-changes instead of silently using a released binary. This override is not
-needed or documented in the consumer quickstart.
+`make moon-test NATIVE_SERVICE_PROFILE=local`. The Makefile selects the
+corresponding Cargo feature explicitly and passes both the exact locally built
+archive and its source profile to the configuration script. The script keeps
+the published artifact selection untouched while adding any host frameworks
+declared by that source profile, so Moon tests exercise uncommitted Rust
+changes with matching link requirements instead of silently using a released
+binary. These overrides are not needed or documented in the consumer
+quickstart.
 
 Source builds are also the fallback for maintainers adding a target or
 service profile. They are not an automatic fallback for consumers: silently

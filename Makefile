@@ -1,6 +1,7 @@
 SHELL := /bin/sh
 
 RUST_PROFILE ?= debug
+NATIVE_SERVICE_PROFILE ?= standard
 MOON_WARN_LIST ?= -68+73
 NATIVE_ARTIFACT ?=
 NATIVE_ARTIFACT_TABLE ?=
@@ -15,6 +16,14 @@ else
 $(error RUST_PROFILE must be debug or release)
 endif
 
+ifeq ($(NATIVE_SERVICE_PROFILE),local)
+CARGO_SERVICE_FLAGS := --no-default-features --features profile-local
+else ifeq ($(NATIVE_SERVICE_PROFILE),standard)
+CARGO_SERVICE_FLAGS := --no-default-features --features profile-standard
+else
+$(error NATIVE_SERVICE_PROFILE must be local or standard)
+endif
+
 NATIVE_LIB_DIR := $(CURDIR)/target/$(RUST_PROFILE)
 MOON_NATIVE_LIB := $(NATIVE_LIB_DIR)/libopendal_mbt_native.a
 MOON_TEST_FLAGS := --target native --frozen --warn-list '$(MOON_WARN_LIST)' --deny-warn
@@ -25,23 +34,28 @@ MOON_TEST_FLAGS := --target native --frozen --warn-list '$(MOON_WARN_LIST)' --de
 	test-profile native-artifact-test asan
 
 native:
-	cargo build --workspace --locked $(CARGO_PROFILE_FLAG)
+	cargo build --workspace --locked $(CARGO_SERVICE_FLAGS) $(CARGO_PROFILE_FLAG)
 
 rust-test:
-	cargo test --workspace --all-targets --all-features --locked $(CARGO_PROFILE_FLAG)
+	cargo test --workspace --all-targets --locked $(CARGO_SERVICE_FLAGS) \
+		$(CARGO_PROFILE_FLAG)
 
 moon-check:
 	moon check --target native --frozen --warn-list '$(MOON_WARN_LIST)' --deny-warn
 
 moon-test: native
 	OPENDAL_MBT_NATIVE_LIB="$(MOON_NATIVE_LIB)" \
+		OPENDAL_MBT_SOURCE_PROFILE="$(NATIVE_SERVICE_PROFILE)" \
 		moon test $(MOON_TEST_FLAGS) $(MOON_PROFILE_FLAG)
 
 coverage: native
 	moon clean
 	OPENDAL_MBT_NATIVE_LIB="$(MOON_NATIVE_LIB)" \
+		OPENDAL_MBT_SOURCE_PROFILE="$(NATIVE_SERVICE_PROFILE)" \
 		moon test $(MOON_TEST_FLAGS) --enable-coverage
-	OPENDAL_MBT_NATIVE_LIB="$(MOON_NATIVE_LIB)" moon coverage analyze
+	OPENDAL_MBT_NATIVE_LIB="$(MOON_NATIVE_LIB)" \
+		OPENDAL_MBT_SOURCE_PROFILE="$(NATIVE_SERVICE_PROFILE)" \
+		moon coverage analyze
 
 abi-smoke:
 	$${CC:-cc} -std=c11 -Wall -Wextra -Werror -Wpedantic \
@@ -89,6 +103,7 @@ test-profile: rust-test moon-test
 asan:
 	$(MAKE) native RUST_PROFILE=debug
 	OPENDAL_MBT_NATIVE_LIB="$(CURDIR)/target/debug/libopendal_mbt_native.a" \
+		OPENDAL_MBT_SOURCE_PROFILE="$(NATIVE_SERVICE_PROFILE)" \
 		python3 .agents/skills/moonbit-c-binding/scripts/run-asan.py \
 			--repo-root . --pkg src/moon.pkg \
 			--pkg integration/consumer/moon.pkg
