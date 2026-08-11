@@ -42,6 +42,26 @@ test "README quickstart" {
 }
 ```
 
+Range reads use an explicit algebraic value. An opened Reader is random access:
+each call supplies its own range and does not advance a hidden cursor.
+
+```mbt check
+///|
+test "README random reader" {
+  let operator = @opendal.Operator::new("memory")
+  operator.write("archive.bin", b"0123456789") |> ignore
+  assert_eq(
+    operator.read("archive.bin", range=Range(offset=2UL, length=4UL)),
+    b"2345",
+  )
+
+  let reader = operator.open_reader("archive.bin")
+  assert_eq(reader.read(From(offset=6UL)), b"6789")
+  assert_eq(reader.read(Suffix(length=3UL)), b"789")
+  reader.close()
+}
+```
+
 Pass backend configuration with the optional labelled config argument:
 
 ```mbt check
@@ -101,5 +121,5 @@ test "README checked errors" {
 ```
 
 The generated pkg.generated.mbti file is the authoritative public surface.
-Reader, Writer, copy, rename, and additional read/write options will be added
-only when their complete MoonBit, C, and Rust vertical slices are implemented.
+Writer, copy, rename, and write options will be added only when their complete
+MoonBit, C, and Rust vertical slices are implemented.

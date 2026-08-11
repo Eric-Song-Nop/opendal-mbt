@@ -110,13 +110,26 @@ pub fn Operator::stat(
 }
 
 ///|
-/// Read an entire path into one owned Bytes value.
+/// Read a path or byte range into one owned Bytes value.
 pub fn Operator::read(
   self : Operator,
   path : StringView,
+  range? : ByteRange = Full,
+  version? : StringView,
+  if_match? : StringView,
+  if_none_match? : StringView,
 ) -> Bytes raise OpenDalError {
   let path = path.to_owned()
-  let result = native_operator_read(self, path)
+  let (range_kind, range_offset, range_length) = range.native_parts(path)
+  let (has_version, version) = normalize_optional_text(version)
+  let (has_if_match, if_match) = normalize_optional_text(if_match)
+  let (has_if_none_match, if_none_match) = normalize_optional_text(
+    if_none_match,
+  )
+  let result = native_operator_read(
+    self, path, range_kind, range_offset, range_length, has_version, version, has_if_match,
+    if_match, has_if_none_match, if_none_match,
+  )
   if native_result_status(result) != 0U {
     raise error_from_native_result(result, Read, Some(path), None)
   }

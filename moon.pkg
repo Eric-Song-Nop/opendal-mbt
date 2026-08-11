@@ -17,6 +17,7 @@ options(
     "opendal_types.mbt": [ "native" ],
     "native_ffi.mbt": [ "native" ],
     "operator.mbt": [ "native" ],
+    "reader.mbt": [ "native" ],
     "listing.mbt": [ "native" ],
     "metadata.mbt": [ "native" ],
     "capability.mbt": [ "native" ],

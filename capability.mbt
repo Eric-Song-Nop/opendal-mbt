@@ -18,6 +18,12 @@ pub fn Capability::can_read(self : Capability) -> Bool {
 }
 
 ///|
+/// Return whether suffix ranges are supported for reads through this binding.
+pub fn Capability::can_read_suffix(self : Capability) -> Bool {
+  self.has(8)
+}
+
+///|
 /// Return whether whole-object writes are available through this binding.
 pub fn Capability::can_write(self : Capability) -> Bool {
   self.has(2)

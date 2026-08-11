@@ -7,6 +7,16 @@ pub enum EntryMode {
 } derive(Eq, @debug.Debug)
 
 ///|
+/// An independent byte range for whole-object or random-access reads.
+/// The `length` field is a byte count, not an end offset.
+pub(all) enum ByteRange {
+  Full
+  From(offset~ : UInt64)
+  Range(offset~ : UInt64, length~ : UInt64)
+  Suffix(length~ : UInt64)
+} derive(Eq, @debug.Debug)
+
+///|
 /// OpenDAL's retry classification for an operation failure.
 pub enum ErrorStatus {
   Permanent
