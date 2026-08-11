@@ -27,7 +27,8 @@ a GitHub release.
    emits one `*.candidate-artifacts.json` table per host and proves the staged
    Moon package against the newly built bytes. Merge each host record into the
    selected committed table and replace its `candidate.invalid` URL with the
-   final release URL.
+   final release URL. The macOS standard record must retain the `Security` and
+   `CoreFoundation` framework flags captured from `rustc`.
 5. Rerun the workflow and require byte-identical archives before approving the
    pinned digests.
 6. Run `make check`, debug/release `make test-profile`, `make asan`, and each

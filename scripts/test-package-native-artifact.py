@@ -59,6 +59,7 @@ opendal = { version = "=0.58.1", default-features = false }
             "aarch64-apple-darwin": {
                 "host_key": "darwin-arm64",
                 "minimum_macos_version": "11.0",
+                "required_frameworks": ["Security", "CoreFoundation"],
             }
         }
         (self.root / "native/distribution-profile.json").write_text(
@@ -121,7 +122,8 @@ opendal = { version = "=0.58.1", default-features = false }
         self.library.write_bytes(b"!<arch>\nfixture static library")
         self.native_libs = self.root / "native-static-libs.log"
         self.native_libs.write_text(
-            "note: native-static-libs: -liconv -lSystem -lc -lm\n",
+            "note: native-static-libs: -liconv -framework Security "
+            "-framework CoreFoundation -lSystem -lc -lm\n",
             encoding="utf-8",
         )
 
@@ -194,7 +196,17 @@ opendal = { version = "=0.58.1", default-features = false }
         self.assertEqual(manifest["runtime_initialization"], "install_default")
         self.assertEqual(manifest["minimum_macos_version"], "11.0")
         self.assertEqual(
-            manifest["system_link_flags"], ["-liconv", "-lSystem", "-lc", "-lm"]
+            manifest["system_link_flags"],
+            [
+                "-liconv",
+                "-framework",
+                "Security",
+                "-framework",
+                "CoreFoundation",
+                "-lSystem",
+                "-lc",
+                "-lm",
+            ],
         )
 
     def test_immutable_local_profile_remains_packageable(self) -> None:
@@ -247,6 +259,18 @@ opendal = { version = "=0.58.1", default-features = false }
         result = self.invoke(self.root / "output")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("did not report native-static-libs", result.stderr)
+
+    def test_standard_macos_artifact_requires_declared_frameworks(self) -> None:
+        self.native_libs.write_text(
+            "note: native-static-libs: -liconv -framework Security -lSystem\n",
+            encoding="utf-8",
+        )
+        result = self.invoke(self.root / "missing-framework")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "missing required frameworks: CoreFoundation",
+            result.stderr,
+        )
 
     def test_release_pin_must_match_and_cannot_use_candidate_url(self) -> None:
         first = self.invoke(self.root / "candidate-release")
