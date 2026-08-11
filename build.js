@@ -20,6 +20,12 @@ const EXPECTED_ARCHIVE_ENTRIES = Object.freeze([
   'lib/libopendal_mbt_native.a',
   'manifest.json',
 ]);
+const LINUX_ARM64_GCC_RUNTIME_CANDIDATES = Object.freeze([
+  '/lib/aarch64-linux-gnu/libgcc_s.so.1',
+  '/usr/lib/aarch64-linux-gnu/libgcc_s.so.1',
+  '/lib64/libgcc_s.so.1',
+  '/usr/lib64/libgcc_s.so.1',
+]);
 
 class CacheValidationError extends Error {
   constructor(message) {
@@ -697,13 +703,44 @@ function shellQuote(value) {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
-function makeBuildOutput(staticLibrary, artifact) {
+function resolveSystemLinkFlags(artifact, dependencies = {}) {
+  const flags = [...artifact.system_link_flags];
+  if (artifact.host_key !== 'linux-arm64' || !flags.includes('-lgcc_s')) {
+    return flags;
+  }
+
+  const candidates =
+    dependencies.gccRuntimeCandidates || LINUX_ARM64_GCC_RUNTIME_CANDIDATES;
+  for (const candidate of candidates) {
+    try {
+      const runtime = fs.realpathSync(candidate);
+      if (!fs.statSync(runtime).isFile()) {
+        continue;
+      }
+      return flags.map((flag) => (flag === '-lgcc_s' ? shellQuote(runtime) : flag));
+    } catch (error) {
+      if (error && error.code === 'ENOENT') {
+        continue;
+      }
+      throw error;
+    }
+  }
+  throw new Error(
+    'No versioned libgcc_s runtime is available for the Linux arm64 ' +
+      'MoonBit native linker',
+  );
+}
+
+function makeBuildOutput(staticLibrary, artifact, dependencies = {}) {
   return {
     vars: {},
     link_configs: [
       {
         package: 'Eric-Song-Nop/opendal',
-        link_flags: [shellQuote(staticLibrary), ...artifact.system_link_flags].join(' '),
+        link_flags: [
+          shellQuote(staticLibrary),
+          ...resolveSystemLinkFlags(artifact, dependencies),
+        ].join(' '),
       },
     ],
   };
@@ -843,6 +880,7 @@ module.exports = {
   makeBuildOutput,
   makeSourceBuildOutput,
   parseMaintainerLinkFlags,
+  resolveSystemLinkFlags,
   resolveLocalOverride,
   selectArtifact,
   sha256File,

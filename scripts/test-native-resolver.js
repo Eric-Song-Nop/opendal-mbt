@@ -19,6 +19,7 @@ const {
   makeBuildOutput,
   makeSourceBuildOutput,
   parseMaintainerLinkFlags,
+  resolveSystemLinkFlags,
   resolveLocalOverride,
   selectArtifact,
   sha256File,
@@ -98,6 +99,42 @@ test('selectArtifact requires an exact host match', () => {
   assert.throws(
     () => selectArtifact(artifacts, 'linux', 'x64'),
     /supported hosts: darwin-arm64/,
+  );
+});
+
+test('Linux arm64 uses the installed versioned GCC unwind runtime', async () => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'opendal-gcc-runtime-test-'));
+  try {
+    const runtime = path.join(root, 'libgcc_s.so.1');
+    await fsp.writeFile(runtime, 'runtime fixture');
+    const resolvedRuntime = fs.realpathSync(runtime);
+    const artifact = {
+      host_key: 'linux-arm64',
+      system_link_flags: ['-lgcc_s', '-lpthread', '-lc'],
+    };
+    const flags = resolveSystemLinkFlags(artifact, {
+      gccRuntimeCandidates: [runtime],
+    });
+    assert.deepEqual(flags, [`'${resolvedRuntime}'`, '-lpthread', '-lc']);
+    assert.equal(
+      makeBuildOutput('/cache/libopendal.a', artifact, {
+        gccRuntimeCandidates: [runtime],
+      }).link_configs[0].link_flags,
+      `'/cache/libopendal.a' '${resolvedRuntime}' -lpthread -lc`,
+    );
+  } finally {
+    await cleanup(root);
+  }
+});
+
+test('Linux arm64 fails early when the GCC unwind runtime is absent', () => {
+  assert.throws(
+    () =>
+      resolveSystemLinkFlags(
+        { host_key: 'linux-arm64', system_link_flags: ['-lgcc_s', '-lc'] },
+        { gccRuntimeCandidates: ['/definitely/missing/libgcc_s.so.1'] },
+      ),
+    /No versioned libgcc_s runtime/,
   );
 });
 
