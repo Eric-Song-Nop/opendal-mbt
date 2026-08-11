@@ -30,6 +30,12 @@ pub fn Capability::can_write(self : Capability) -> Bool {
 }
 
 ///|
+/// Return whether append mode is supported for writes through this binding.
+pub fn Capability::can_write_append(self : Capability) -> Bool {
+  self.has(9)
+}
+
+///|
 /// Return whether directory creation is available through this binding.
 pub fn Capability::can_create_dir(self : Capability) -> Bool {
   self.has(3)

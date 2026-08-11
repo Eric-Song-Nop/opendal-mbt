@@ -142,9 +142,8 @@ builds its native archive in isolation, and runs the downstream consumer.
 
 ### Phase 3: Streaming and operation options
 
-Status: in progress. Random-access Reader and read options are implemented.
-The chunked Writer ABI and terminal state machine are implemented; its MoonBit
-facade, write options, copy, and rename remain.
+Status: in progress. Random-access Reader, chunked Writer, and their operation
+options are implemented. Copy and rename remain.
 
 Add:
 

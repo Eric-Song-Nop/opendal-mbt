@@ -50,9 +50,29 @@ fn random_reader_contract(
 }
 
 ///|
+fn chunked_writer_contract(
+  op : @opendal.Operator,
+  chunk : BytesView,
+) -> @opendal.Metadata raise @opendal.OpenDalError {
+  let writer = op.open_writer(
+    "value.bin",
+    append=true,
+    content_type="application/octet-stream",
+    content_disposition="inline",
+    content_encoding="identity",
+    cache_control="no-cache",
+    if_match="etag",
+    if_none_match="other-etag",
+  )
+  writer.write(chunk)
+  writer.finish()
+}
+
+///|
 test "contract: snapshots and materialized errors type-check" {
   ignore(materialized_error_contract)
   ignore(readonly_value_contract)
   ignore(structured_error_contract)
   ignore(random_reader_contract)
+  ignore(chunked_writer_contract)
 }
