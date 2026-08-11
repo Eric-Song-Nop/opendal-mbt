@@ -208,17 +208,45 @@ separate linker and artifact-distribution decision.
 
 ### Phase 5: Deferred capabilities
 
-Consider cloud service profiles, presigning, layers, batch operations, and
-async only after the blocking API and native lifecycle model are stable.
+The user guides were checked against OpenDAL's Node.js overview, connecting,
+getting-started, and common-task documentation. The following capabilities are
+not implemented in the MoonBit binding and must remain explicit gaps:
+
+- cloud and network service profiles, including S3, GCS, Azure Blob, WebDAV,
+  their credential chains, and service-specific configuration;
+- async operations, callbacks, cancellation, and concurrent task handles;
+- sequential streaming reads for objects that cannot fit in one MoonBit
+  `Bytes` value;
+- presigned read, write, and stat requests;
+- layers for retry, timeout, logging, tracing, metrics, and concurrency limits;
+- batch deletion and long-running recursive copier/task APIs;
+- a reliable public Writer abort operation;
+- connection-URI parsing and typed per-service configuration builders;
+- Windows and additional CPU/libc release artifacts.
+
+The next design work should be split rather than exposed as one broad
+compatibility promise:
+
+1. bounded sequential reads and Writer abort, completing the local blocking
+   lifecycle;
+2. one separately distributed cloud profile and its configuration/credential
+   contract;
+3. presigning and layers as independent vertical slices;
+4. batch/copier APIs;
+5. async only after the runtime ownership model is specified.
+
 Async requires a separate design for runtime ownership, cancellation,
-cross-thread callbacks, and exactly-once completion.
+cross-thread callbacks, and exactly-once completion. Cloud profiles also need
+an artifact-size and feature-selection policy; passing a new scheme string
+cannot dynamically add a service to an already-built native archive.
 
 ## Cross-cutting acceptance requirements
 
 - Every non-primitive FFI parameter has an explicit ownership annotation.
 - Rust, C, and MoonBit allocations are freed only by their owning runtime.
-- Whole-object reads reject values that cannot fit in a MoonBit `Bytes`;
-  streaming remains available for larger objects.
+- Whole-object and ranged reads reject values that cannot fit in one MoonBit
+  `Bytes`. Until bounded sequential reads land, callers must choose independent
+  ranges that each fit this limit.
 - Tests cover empty and binary content, embedded NUL bytes, Unicode paths,
   invalid UTF-8 at native boundaries, missing objects, unsupported operations,
   overflow, early garbage collection, repeated close/free, and failure paths.

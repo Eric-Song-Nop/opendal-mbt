@@ -15,7 +15,9 @@ if printf '%s\n' "$package_files" | \
 fi
 
 for required_file in \
-  LICENSE README.mbt.md build.js src/moon.pkg src/README.mbt.md \
+  LICENSE README.mbt.md getting-started.mbt.md connecting.mbt.md \
+  tasks.mbt.md build.js src/moon.pkg src/README.mbt.md \
+  src/getting-started.mbt.md src/connecting.mbt.md src/tasks.mbt.md \
   native/artifacts.json \
   native/include/opendal_mbt.h; do
   if ! printf '%s\n' "$package_files" | grep -Fxq "$required_file"; then
