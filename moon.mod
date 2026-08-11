@@ -14,6 +14,10 @@ preferred_target = "native"
 
 description = "MoonBit bindings for Apache OpenDAL"
 
+import {
+  "moonbitlang/async@0.20.5",
+}
+
 // Keep the downstream contract fixture in the development workspace without
 // publishing it as part of the library module.
 

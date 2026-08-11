@@ -1,6 +1,8 @@
 supported_targets = "native"
 
 import {
+  "moonbitlang/async",
+  "moonbitlang/async/pipe",
   "moonbitlang/core/debug",
   "moonbitlang/core/encoding/utf8",
 }
