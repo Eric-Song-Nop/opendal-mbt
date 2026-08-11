@@ -12,8 +12,8 @@
 ABI_STATIC_ASSERT(sizeof(opendal_mbt_status_t) == 4,
                   "transport status must be 32-bit");
 ABI_STATIC_ASSERT(OPENDAL_MBT_ABI_V1_MAJOR == 1 &&
-                      OPENDAL_MBT_ABI_V1_MINOR == 2,
-                  "Phase 5D requires ABI v1.2");
+                      OPENDAL_MBT_ABI_V1_MINOR == 6,
+                  "Phase 5D requires ABI v1.6");
 ABI_STATIC_ASSERT(sizeof(opendal_mbt_bool_t) == 4,
                   "ABI boolean must be 32-bit");
 ABI_STATIC_ASSERT(sizeof(opendal_mbt_bytes_view_v1_t) == 16,
