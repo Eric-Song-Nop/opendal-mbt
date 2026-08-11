@@ -7,6 +7,8 @@
 - constructs an in-memory operator and inspects its owned `OperatorInfo`;
 - deliberately reads a missing object to inspect and free an owned error;
 - writes and reads binary data containing embedded NUL and non-UTF-8 bytes;
+- reads the same object through bounded `READ_STREAM` chunks and checks stable
+  end-of-stream behavior;
 - inspects and frees write metadata;
 - uses `buffer_len` plus both phases of `buffer_copy`, including an untouched
   destination-tail canary; and

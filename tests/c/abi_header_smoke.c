@@ -23,6 +23,8 @@ ABI_STATIC_ASSERT(sizeof(opendal_mbt_read_options_v1_t) == 96,
                   "read options layout drifted");
 ABI_STATIC_ASSERT(sizeof(opendal_mbt_reader_options_v1_t) == 64,
                   "reader options layout drifted");
+ABI_STATIC_ASSERT(sizeof(opendal_mbt_read_stream_options_v1_t) == 104,
+                  "read stream options layout drifted");
 ABI_STATIC_ASSERT(sizeof(opendal_mbt_write_options_v1_t) == 120,
                   "write options layout drifted");
 ABI_STATIC_ASSERT(sizeof(opendal_mbt_stat_options_v1_t) == 64,
@@ -66,6 +68,9 @@ ABI_STATIC_ASSERT(OPENDAL_MBT_READ_OPTIONS_V1_MIN_SIZE <=
 ABI_STATIC_ASSERT(OPENDAL_MBT_READER_OPTIONS_V1_MIN_SIZE <=
                       sizeof(opendal_mbt_reader_options_v1_t),
                   "reader options v1.0 prefix drifted");
+ABI_STATIC_ASSERT(OPENDAL_MBT_READ_STREAM_OPTIONS_V1_MIN_SIZE <=
+                      sizeof(opendal_mbt_read_stream_options_v1_t),
+                  "read stream options v1.1 prefix drifted");
 ABI_STATIC_ASSERT(OPENDAL_MBT_WRITE_OPTIONS_V1_MIN_SIZE <=
                       sizeof(opendal_mbt_write_options_v1_t),
                   "write options v1.0 prefix drifted");

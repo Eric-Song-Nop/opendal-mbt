@@ -44,7 +44,7 @@ extern "C" {
 #endif
 
 #define OPENDAL_MBT_ABI_V1_MAJOR UINT32_C(1)
-#define OPENDAL_MBT_ABI_V1_MINOR UINT32_C(0)
+#define OPENDAL_MBT_ABI_V1_MINOR UINT32_C(1)
 #define OPENDAL_MBT_ABI_V1_PATCH UINT32_C(0)
 #define OPENDAL_MBT_STRUCT_VERSION_V1 UINT32_C(1)
 #define OPENDAL_MBT_EXTENSIBLE_CODE_MAX UINT32_C(0x7fffffff)
@@ -56,12 +56,13 @@ extern "C" {
  * Pointer contract: every pointer is required and non-NULL unless explicitly
  * optional here. Exceptions are options, out_error, config when config_len is
  * zero, bytes_view.data when len is zero, and buffer_copy.destination for a
- * zero-capacity sizing query. Every *_free, lister_close, and reader_close is
- * a no-op on NULL. Non-NULL pointers must be correctly aligned, live for the
- * call, and cover the claimed readable/writable region within one allocated
- * object; every region's byte extent must fit in Rust isize. Detectable NULL,
- * size, overflow, and alignment errors return ABI_MISMATCH. Dangling, forged,
- * out-of-bounds, or stale non-NULL pointers and handles remain caller UB.
+ * zero-capacity sizing query. Every *_free, lister_close, reader_close, and
+ * read_stream_close is a no-op on NULL. Non-NULL pointers must be correctly
+ * aligned, live for the call, and cover the claimed readable/writable region
+ * within one allocated object; every region's byte extent must fit in Rust
+ * isize. Detectable NULL, size, overflow, and alignment errors return
+ * ABI_MISMATCH. Dangling, forged, out-of-bounds, or stale non-NULL pointers and
+ * handles remain caller UB.
  */
 
 /* Transport status. These values are not OpenDAL error kinds. */
@@ -122,6 +123,7 @@ typedef uint32_t opendal_mbt_range_kind_t;
 #define OPENDAL_MBT_FEATURE_LISTING (UINT64_C(1) << 2)
 #define OPENDAL_MBT_FEATURE_RANDOM_READER (UINT64_C(1) << 3)
 #define OPENDAL_MBT_FEATURE_CHUNKED_WRITER (UINT64_C(1) << 4)
+#define OPENDAL_MBT_FEATURE_READ_STREAM (UINT64_C(1) << 5)
 
 /* Capability bit positions. */
 #define OPENDAL_MBT_CAP_STAT (UINT64_C(1) << 0)
@@ -201,6 +203,25 @@ typedef struct opendal_mbt_reader_options_v1 {
 } opendal_mbt_reader_options_v1_t;
 #define OPENDAL_MBT_READER_OPTIONS_V1_MIN_SIZE                               \
   OPENDAL_MBT_FIELD_END(opendal_mbt_reader_options_v1_t, if_none_match)
+
+/* Read stream options presence bits. */
+#define OPENDAL_MBT_READ_STREAM_VERSION_PRESENT (UINT64_C(1) << 0)
+#define OPENDAL_MBT_READ_STREAM_IF_MATCH_PRESENT (UINT64_C(1) << 1)
+#define OPENDAL_MBT_READ_STREAM_IF_NONE_MATCH_PRESENT (UINT64_C(1) << 2)
+
+typedef struct opendal_mbt_read_stream_options_v1 {
+  uint32_t struct_size;
+  uint32_t struct_version;
+  uint64_t present_bits;
+  opendal_mbt_byte_range_v1_t range;
+  /* Required and nonzero. Each successful next result is at most this size. */
+  uint64_t chunk_size;
+  opendal_mbt_bytes_view_v1_t version;
+  opendal_mbt_bytes_view_v1_t if_match;
+  opendal_mbt_bytes_view_v1_t if_none_match;
+} opendal_mbt_read_stream_options_v1_t;
+#define OPENDAL_MBT_READ_STREAM_OPTIONS_V1_MIN_SIZE                           \
+  OPENDAL_MBT_FIELD_END(opendal_mbt_read_stream_options_v1_t, if_none_match)
 
 /* Write options flags and presence bits. */
 #define OPENDAL_MBT_WRITE_APPEND (UINT64_C(1) << 0)
@@ -361,6 +382,7 @@ typedef struct opendal_mbt_operator_v1 opendal_mbt_operator_v1_t;
 typedef struct opendal_mbt_lister_v1 opendal_mbt_lister_v1_t;
 typedef struct opendal_mbt_reader_v1 opendal_mbt_reader_v1_t;
 typedef struct opendal_mbt_writer_v1 opendal_mbt_writer_v1_t;
+typedef struct opendal_mbt_read_stream_v1 opendal_mbt_read_stream_v1_t;
 typedef struct opendal_mbt_buffer_v1 opendal_mbt_buffer_v1_t;
 typedef struct opendal_mbt_error_v1 opendal_mbt_error_v1_t;
 typedef struct opendal_mbt_metadata_v1 opendal_mbt_metadata_v1_t;
@@ -531,6 +553,31 @@ typedef struct opendal_mbt_api_v1 {
       opendal_mbt_metadata_v1_t **out_metadata,
       opendal_mbt_error_v1_t **out_error);
   void(OPENDAL_MBT_CALL *writer_free)(opendal_mbt_writer_v1_t *writer);
+
+  /*
+   * OPENDAL_MBT_FEATURE_READ_STREAM: operator_read_stream through
+   * read_stream_free. Appended in ABI v1.1.
+   */
+  opendal_mbt_status_t(OPENDAL_MBT_CALL *operator_read_stream)(
+      opendal_mbt_operator_v1_t *operator_,
+      const opendal_mbt_bytes_view_v1_t *path,
+      const opendal_mbt_read_stream_options_v1_t *options,
+      opendal_mbt_read_stream_v1_t **out_stream,
+      opendal_mbt_error_v1_t **out_error);
+  /*
+   * OK returns one non-NULL buffer. END returns NULL buffer and no error.
+   * ERROR returns NULL buffer and an optional owned error. Stream errors are
+   * terminal; END is stable. max_output_len must cover the configured chunk.
+   */
+  opendal_mbt_status_t(OPENDAL_MBT_CALL *read_stream_next)(
+      opendal_mbt_read_stream_v1_t *stream, uint64_t max_output_len,
+      opendal_mbt_buffer_v1_t **out_buffer,
+      opendal_mbt_error_v1_t **out_error);
+  /* NULL is a no-op; close is idempotent and never performs I/O. */
+  void(OPENDAL_MBT_CALL *read_stream_close)(
+      opendal_mbt_read_stream_v1_t *stream);
+  void(OPENDAL_MBT_CALL *read_stream_free)(
+      opendal_mbt_read_stream_v1_t *stream);
 } opendal_mbt_api_v1_t;
 
 /* End offset of one complete table field; never read a partially covered one. */

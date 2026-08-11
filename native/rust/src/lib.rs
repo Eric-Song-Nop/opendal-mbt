@@ -461,6 +461,74 @@ unsafe fn parse_reader_options(pointer: *const ReaderOptionsV1) -> CallResult<Re
     })
 }
 
+struct ParsedReadStreamOptions {
+    reader: ReaderOptions,
+    range: BytesRange,
+    chunk_size: u64,
+}
+
+unsafe fn parse_read_stream_options(
+    pointer: *const ReadStreamOptionsV1,
+) -> CallResult<ParsedReadStreamOptions> {
+    if pointer.is_null() {
+        return abi_mismatch();
+    }
+    // SAFETY: read stream options are required, validated, and copied.
+    let input = unsafe { read_input_struct(pointer)? };
+    let known = READ_STREAM_VERSION_PRESENT
+        | READ_STREAM_IF_MATCH_PRESENT
+        | READ_STREAM_IF_NONE_MATCH_PRESENT;
+    if input.present_bits & !known != 0 {
+        return abi_mismatch();
+    }
+    if input.chunk_size == 0 || input.chunk_size > MAX_OUTPUT_BYTES {
+        return Err(invalid_argument(format!(
+            "read stream chunk_size must be between 1 and {MAX_OUTPUT_BYTES}"
+        )));
+    }
+    let chunk_size = checked_len(input.chunk_size).map_err(|_| {
+        invalid_argument("read stream chunk_size is not representable on this platform")
+    })?;
+    Ok(ParsedReadStreamOptions {
+        // SAFETY: the embedded frozen range is validated by parse_range.
+        range: unsafe { parse_range(input.range)? },
+        chunk_size: input.chunk_size,
+        reader: ReaderOptions {
+            // SAFETY: all copied views borrow from the caller only for this call.
+            version: unsafe {
+                optional_text(
+                    input.version,
+                    input.present_bits,
+                    READ_STREAM_VERSION_PRESENT,
+                    "read stream version",
+                )?
+            },
+            // SAFETY: same as above.
+            if_match: unsafe {
+                optional_text(
+                    input.if_match,
+                    input.present_bits,
+                    READ_STREAM_IF_MATCH_PRESENT,
+                    "read stream if_match",
+                )?
+            },
+            // SAFETY: same as above.
+            if_none_match: unsafe {
+                optional_text(
+                    input.if_none_match,
+                    input.present_bits,
+                    READ_STREAM_IF_NONE_MATCH_PRESENT,
+                    "read stream if_none_match",
+                )?
+            },
+            concurrent: 1,
+            chunk: Some(chunk_size),
+            prefetch: 0,
+            ..ReaderOptions::default()
+        },
+    })
+}
+
 unsafe fn parse_stat_options(pointer: *const StatOptionsV1) -> CallResult<StatOptions> {
     if pointer.is_null() {
         return Ok(StatOptions::default());
@@ -861,6 +929,33 @@ fn close_reader_state(reader: &ReaderV1) {
     if let Some(inner) = open {
         drop_blocking_reader_contained(inner);
     }
+}
+
+fn close_read_stream_state(stream: &ReadStreamV1) {
+    let mut state = match stream.state.lock() {
+        Ok(state) => state,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    *state = ReadStreamStateV1::Closed;
+    stream.state.clear_poison();
+}
+
+fn fail_read_stream_state(stream: &ReadStreamV1) {
+    let mut state = match stream.state.lock() {
+        Ok(state) => state,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    *state = ReadStreamStateV1::Failed;
+    stream.state.clear_poison();
+}
+
+fn read_stream_lock_failure(stream: &ReadStreamV1) -> CallFailure {
+    fail_read_stream_state(stream);
+    binding_error(
+        ERROR_UNEXPECTED,
+        "Unexpected",
+        "read stream state lock was poisoned",
+    )
 }
 
 fn drop_blocking_writer_contained(writer: opendal::blocking::Writer) {
@@ -2003,6 +2098,153 @@ unsafe extern "C" fn reader_free(reader: *mut ReaderV1) {
     }));
 }
 
+unsafe extern "C" fn operator_read_stream(
+    operator: *mut OperatorV1,
+    path: *const BytesViewV1,
+    options: *const ReadStreamOptionsV1,
+    out_stream: *mut *mut ReadStreamV1,
+    out_error: *mut *mut ErrorV1,
+) -> Status {
+    catch_status(|| {
+        // SAFETY: outputs are validated and cleared before input or native work.
+        let outputs = [
+            unsafe { clear_required_output(out_stream, ptr::null_mut()) },
+            unsafe { clear_error_output(out_error) },
+        ];
+        if let Err(failure) = combine_output_validation(outputs) {
+            return unsafe { finish_failure(failure, out_error) };
+        }
+        let result = (|| -> CallResult<Box<ReadStreamV1>> {
+            // SAFETY: the handle, text, and options are validated and copied.
+            let operator = unsafe { borrow_required(operator.cast_const())? };
+            let path = unsafe { read_text(path, "path")? };
+            let parsed = unsafe { parse_read_stream_options(options)? };
+            let reader = operator
+                .inner
+                .reader_options(&path, parsed.reader)
+                .map_err(opendal_error)?;
+            let iterator = reader.into_iterator(parsed.range).map_err(opendal_error)?;
+            Ok(Box::new(ReadStreamV1 {
+                state: Mutex::new(ReadStreamStateV1::Open(Box::new(iterator))),
+                chunk_size: parsed.chunk_size,
+            }))
+        })();
+        match result {
+            Ok(stream) => {
+                // SAFETY: the output slot was validated above.
+                unsafe { out_stream.write(Box::into_raw(stream)) };
+                STATUS_OK
+            }
+            Err(failure) => unsafe { finish_failure(failure, out_error) },
+        }
+    })
+}
+
+unsafe extern "C" fn read_stream_next(
+    stream: *mut ReadStreamV1,
+    max_output_len: u64,
+    out_buffer: *mut *mut BufferV1,
+    out_error: *mut *mut ErrorV1,
+) -> Status {
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY: outputs are validated and cleared before the handle is inspected.
+        let outputs = [
+            unsafe { clear_required_output(out_buffer, ptr::null_mut()) },
+            unsafe { clear_error_output(out_error) },
+        ];
+        if let Err(failure) = combine_output_validation(outputs) {
+            return unsafe { finish_failure(failure, out_error) };
+        }
+        // SAFETY: opaque handle validity is a caller lifetime obligation.
+        let stream = match unsafe { borrow_required(stream.cast_const()) } {
+            Ok(stream) => stream,
+            Err(failure) => return unsafe { finish_failure(failure, out_error) },
+        };
+        let mut state = match stream.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => {
+                drop(poisoned);
+                let failure = read_stream_lock_failure(stream);
+                return unsafe { finish_failure(failure, out_error) };
+            }
+        };
+        let current = std::mem::replace(&mut *state, ReadStreamStateV1::Failed);
+        let mut iterator = match current {
+            ReadStreamStateV1::Open(iterator) => iterator,
+            ReadStreamStateV1::End => {
+                *state = ReadStreamStateV1::End;
+                return STATUS_END;
+            }
+            terminal @ (ReadStreamStateV1::Failed | ReadStreamStateV1::Closed) => {
+                *state = terminal;
+                return unsafe {
+                    finish_failure(
+                        binding_error(
+                            ERROR_RESOURCE_CLOSED,
+                            "ResourceClosed",
+                            "read stream is closed",
+                        ),
+                        out_error,
+                    )
+                };
+            }
+        };
+        let step = catch_unwind(AssertUnwindSafe(|| iterator.next()));
+        match step {
+            Ok(Some(Ok(buffer))) => {
+                let limit = max_output_len.min(stream.chunk_size);
+                match checked_read_buffer(buffer, limit, "read stream chunk") {
+                    Ok(buffer) => {
+                        *state = ReadStreamStateV1::Open(iterator);
+                        // SAFETY: the output slot was validated above.
+                        unsafe { out_buffer.write(Box::into_raw(buffer)) };
+                        STATUS_OK
+                    }
+                    Err(failure) => unsafe { finish_failure(failure, out_error) },
+                }
+            }
+            Ok(Some(Err(error))) => unsafe { finish_failure(opendal_error(error), out_error) },
+            Ok(None) => {
+                *state = ReadStreamStateV1::End;
+                STATUS_END
+            }
+            Err(_) => STATUS_PANIC,
+        }
+    }));
+    match outcome {
+        Ok(status) => status,
+        Err(_) => {
+            if !stream.is_null() && is_aligned(stream) {
+                // SAFETY: non-null live handle validity remains the caller's obligation.
+                fail_read_stream_state(unsafe { &*stream });
+            }
+            STATUS_PANIC
+        }
+    }
+}
+
+unsafe extern "C" fn read_stream_close(stream: *mut ReadStreamV1) {
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        if stream.is_null() {
+            return;
+        }
+        // SAFETY: non-null opaque handle validity is the caller's obligation.
+        close_read_stream_state(unsafe { &*stream });
+    }));
+}
+
+unsafe extern "C" fn read_stream_free(stream: *mut ReadStreamV1) {
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        if stream.is_null() {
+            return;
+        }
+        // SAFETY: every non-null handle is uniquely owned and freed once.
+        let stream = unsafe { Box::from_raw(stream) };
+        close_read_stream_state(&stream);
+        drop(stream);
+    }));
+}
+
 unsafe extern "C" fn operator_writer(
     operator: *mut OperatorV1,
     path: *const BytesViewV1,
@@ -2250,7 +2492,8 @@ fn stage_api() -> Option<ApiV1> {
             | FEATURE_WHOLE_OBJECT
             | FEATURE_LISTING
             | FEATURE_RANDOM_READER
-            | FEATURE_CHUNKED_WRITER,
+            | FEATURE_CHUNKED_WRITER
+            | FEATURE_READ_STREAM,
         max_output_bytes: MAX_OUTPUT_BYTES,
         library_info: Some(library_info),
         error_view: Some(error_view),
@@ -2288,6 +2531,10 @@ fn stage_api() -> Option<ApiV1> {
         writer_write: Some(writer_write),
         writer_close: Some(writer_close),
         writer_free: Some(writer_free),
+        operator_read_stream: Some(operator_read_stream),
+        read_stream_next: Some(read_stream_next),
+        read_stream_close: Some(read_stream_close),
+        read_stream_free: Some(read_stream_free),
     })
 }
 
@@ -2357,6 +2604,10 @@ unsafe fn install_api(base: *mut u8, caller_size: usize, staged: &ApiV1) {
     install_field!(writer_write);
     install_field!(writer_close);
     install_field!(writer_free);
+    install_field!(operator_read_stream);
+    install_field!(read_stream_next);
+    install_field!(read_stream_close);
+    install_field!(read_stream_free);
 }
 
 /// Negotiate the stable v1 function table.
@@ -2721,6 +2972,75 @@ mod tests {
         reader
     }
 
+    fn read_stream_options(range: ByteRangeV1, chunk_size: u64) -> ReadStreamOptionsV1 {
+        ReadStreamOptionsV1 {
+            struct_size: size_of::<ReadStreamOptionsV1>() as u32,
+            struct_version: STRUCT_VERSION,
+            present_bits: 0,
+            range,
+            chunk_size,
+            version: bytes(b""),
+            if_match: bytes(b""),
+            if_none_match: bytes(b""),
+        }
+    }
+
+    fn memory_read_stream(
+        api: &ApiV1,
+        operator: *mut OperatorV1,
+        path: &[u8],
+        options: &ReadStreamOptionsV1,
+    ) -> *mut ReadStreamV1 {
+        let path = bytes(path);
+        let mut stream = NonNull::<ReadStreamV1>::dangling().as_ptr();
+        let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: all input carriers and output slots are valid for this call.
+        let status = unsafe {
+            api.operator_read_stream
+                .expect("READ_STREAM constructor is installed")(
+                operator,
+                &path,
+                options,
+                &mut stream,
+                &mut error,
+            )
+        };
+        assert_eq!(status, STATUS_OK);
+        assert!(!stream.is_null());
+        assert!(error.is_null());
+        stream
+    }
+
+    fn collect_read_stream(api: &ApiV1, stream: *mut ReadStreamV1) -> Vec<Vec<u8>> {
+        let next = api.read_stream_next.expect("READ_STREAM next is installed");
+        let mut chunks = Vec::new();
+        loop {
+            let mut buffer = NonNull::<BufferV1>::dangling().as_ptr();
+            let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+            // SAFETY: stream is live and both output slots are writable.
+            let status = unsafe { next(stream, MAX_OUTPUT_BYTES, &mut buffer, &mut error) };
+            match status {
+                STATUS_OK => {
+                    assert!(!buffer.is_null());
+                    assert!(error.is_null());
+                    chunks.push(take_buffer(api, buffer));
+                }
+                STATUS_END => {
+                    assert!(buffer.is_null());
+                    assert!(error.is_null());
+                    break;
+                }
+                STATUS_ERROR => {
+                    assert!(buffer.is_null());
+                    let kind = take_error_kind(api, error);
+                    panic!("unexpected read stream error kind {kind}");
+                }
+                other => panic!("unexpected read stream transport status {other}"),
+            }
+        }
+        chunks
+    }
+
     fn memory_writer(
         api: &ApiV1,
         operator: *mut OperatorV1,
@@ -2935,7 +3255,8 @@ mod tests {
                 | FEATURE_WHOLE_OBJECT
                 | FEATURE_LISTING
                 | FEATURE_RANDOM_READER
-                | FEATURE_CHUNKED_WRITER,
+                | FEATURE_CHUNKED_WRITER
+                | FEATURE_READ_STREAM,
         );
         assert!(api.library_info.is_some());
         assert!(api.operator_new.is_some());
@@ -2952,6 +3273,10 @@ mod tests {
         assert!(api.writer_write.is_some());
         assert!(api.writer_close.is_some());
         assert!(api.writer_free.is_some());
+        assert!(api.operator_read_stream.is_some());
+        assert!(api.read_stream_next.is_some());
+        assert!(api.read_stream_close.is_some());
+        assert!(api.read_stream_free.is_some());
     }
 
     #[test]
@@ -3032,6 +3357,10 @@ mod tests {
             writer_write,
             writer_close,
             writer_free,
+            operator_read_stream,
+            read_stream_next,
+            read_stream_close,
+            read_stream_free,
         );
 
         for caller_size in API_PREFIX_SIZE..=size_of::<ApiV1>() + 16 {
@@ -4190,6 +4519,182 @@ mod tests {
     }
 
     #[test]
+    fn read_stream_is_bounded_range_aware_and_has_stable_end() {
+        let api = api();
+        let (operator, info) = memory_operator(&api);
+        let path = "streams/数据.bin".as_bytes();
+        write_memory_object(&api, operator, path, b"0123456789");
+        write_memory_object(&api, operator, b"streams/empty.bin", b"");
+
+        let cases = [
+            (byte_range(RANGE_FULL, 0, 0), b"0123456789".as_slice()),
+            (byte_range(RANGE_FROM, 3, 0), b"3456789".as_slice()),
+            (byte_range(RANGE_OFFSET_LENGTH, 2, 5), b"23456".as_slice()),
+            (byte_range(RANGE_SUFFIX, 0, 3), b"789".as_slice()),
+        ];
+        for (range, expected) in cases {
+            let options = read_stream_options(range, 4);
+            let stream = memory_read_stream(&api, operator, path, &options);
+            let chunks = collect_read_stream(&api, stream);
+            assert!(
+                chunks
+                    .iter()
+                    .all(|chunk| !chunk.is_empty() && chunk.len() <= 4)
+            );
+            assert_eq!(chunks.concat(), expected);
+
+            let mut buffer = NonNull::<BufferV1>::dangling().as_ptr();
+            let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+            // SAFETY: EOF is stable while the stream remains live and unclosed.
+            assert_eq!(
+                unsafe {
+                    api.read_stream_next.expect("READ_STREAM next is installed")(
+                        stream,
+                        MAX_OUTPUT_BYTES,
+                        &mut buffer,
+                        &mut error,
+                    )
+                },
+                STATUS_END,
+            );
+            assert!(buffer.is_null());
+            assert!(error.is_null());
+
+            // SAFETY: close and free are idempotent/unique as documented.
+            unsafe {
+                api.read_stream_close
+                    .expect("READ_STREAM close is installed")(stream);
+                api.read_stream_close
+                    .expect("READ_STREAM close is installed")(stream);
+            }
+            buffer = NonNull::<BufferV1>::dangling().as_ptr();
+            error = NonNull::<ErrorV1>::dangling().as_ptr();
+            // SAFETY: closed handles remain live for deterministic state reporting.
+            assert_eq!(
+                unsafe {
+                    api.read_stream_next.expect("READ_STREAM next is installed")(
+                        stream,
+                        MAX_OUTPUT_BYTES,
+                        &mut buffer,
+                        &mut error,
+                    )
+                },
+                STATUS_ERROR,
+            );
+            assert!(buffer.is_null());
+            assert_eq!(take_error_kind(&api, error), ERROR_RESOURCE_CLOSED);
+            unsafe {
+                api.read_stream_free.expect("READ_STREAM free is installed")(stream);
+            }
+        }
+
+        let empty = memory_read_stream(
+            &api,
+            operator,
+            b"streams/empty.bin",
+            &read_stream_options(byte_range(RANGE_FULL, 0, 0), 4),
+        );
+        assert!(collect_read_stream(&api, empty).is_empty());
+
+        let outliving = memory_read_stream(
+            &api,
+            operator,
+            path,
+            &read_stream_options(byte_range(RANGE_FULL, 0, 0), 3),
+        );
+        // SAFETY: streams own all state required after their originating Operator is freed.
+        unsafe {
+            api.operator_info_free.expect("BASE info free is installed")(info);
+            api.operator_free.expect("BASE operator free is installed")(operator);
+        }
+        let chunks = collect_read_stream(&api, outliving);
+        assert_eq!(
+            chunks.iter().map(Vec::len).collect::<Vec<_>>(),
+            [3, 3, 3, 1]
+        );
+        assert_eq!(chunks.concat(), b"0123456789");
+
+        // SAFETY: each stream handle is freed exactly once; NULL is a no-op.
+        unsafe {
+            api.read_stream_close
+                .expect("READ_STREAM close is installed")(ptr::null_mut());
+            api.read_stream_free.expect("READ_STREAM free is installed")(ptr::null_mut());
+            api.read_stream_free.expect("READ_STREAM free is installed")(empty);
+            api.read_stream_free.expect("READ_STREAM free is installed")(outliving);
+        }
+    }
+
+    #[test]
+    fn read_stream_rejects_invalid_bounds_and_fails_terminally() {
+        let api = api();
+        let (operator, info) = memory_operator(&api);
+        write_memory_object(&api, operator, b"streams/bounds.bin", b"bounded");
+        let constructor = api
+            .operator_read_stream
+            .expect("READ_STREAM constructor is installed");
+        let path = bytes(b"streams/bounds.bin");
+
+        for chunk_size in [0, MAX_OUTPUT_BYTES + 1] {
+            let options = read_stream_options(byte_range(RANGE_FULL, 0, 0), chunk_size);
+            let mut stream = NonNull::<ReadStreamV1>::dangling().as_ptr();
+            let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+            // SAFETY: complete options carry one deliberately invalid semantic value.
+            assert_eq!(
+                unsafe { constructor(operator, &path, &options, &mut stream, &mut error) },
+                STATUS_ERROR,
+            );
+            assert!(stream.is_null());
+            assert_eq!(take_error_kind(&api, error), ERROR_INVALID_ARGUMENT);
+        }
+
+        let mut malformed = read_stream_options(byte_range(RANGE_FULL, 0, 0), 4);
+        malformed.present_bits = 1 << 63;
+        let mut stream = NonNull::<ReadStreamV1>::dangling().as_ptr();
+        let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the complete options deliberately contain an unknown ABI bit.
+        assert_eq!(
+            unsafe { constructor(operator, &path, &malformed, &mut stream, &mut error) },
+            STATUS_ABI_MISMATCH,
+        );
+        assert!(stream.is_null());
+        assert!(error.is_null());
+
+        let stream = memory_read_stream(
+            &api,
+            operator,
+            b"streams/bounds.bin",
+            &read_stream_options(byte_range(RANGE_FULL, 0, 0), 4),
+        );
+        let next = api.read_stream_next.expect("READ_STREAM next is installed");
+        let mut buffer = NonNull::<BufferV1>::dangling().as_ptr();
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the per-call ceiling is intentionally below the fixed chunk bound.
+        assert_eq!(
+            unsafe { next(stream, 2, &mut buffer, &mut error) },
+            STATUS_ERROR,
+        );
+        assert!(buffer.is_null());
+        assert_eq!(take_error_kind(&api, error), ERROR_BUFFER_TOO_LARGE);
+
+        buffer = NonNull::<BufferV1>::dangling().as_ptr();
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: a bound failure is terminal because the cursor already advanced.
+        assert_eq!(
+            unsafe { next(stream, MAX_OUTPUT_BYTES, &mut buffer, &mut error) },
+            STATUS_ERROR,
+        );
+        assert!(buffer.is_null());
+        assert_eq!(take_error_kind(&api, error), ERROR_RESOURCE_CLOSED);
+
+        // SAFETY: all resources are uniquely owned here.
+        unsafe {
+            api.read_stream_free.expect("READ_STREAM free is installed")(stream);
+            api.operator_info_free.expect("BASE info free is installed")(info);
+            api.operator_free.expect("BASE operator free is installed")(operator);
+        }
+    }
+
+    #[test]
     fn copy_and_rename_preserve_backend_semantics_and_atomic_outputs() {
         let api = api();
         let unique = std::time::SystemTime::now()
@@ -4690,5 +5195,6 @@ mod tests {
         assert_send_sync::<ListerV1>();
         assert_send_sync::<ReaderV1>();
         assert_send_sync::<WriterV1>();
+        assert_send_sync::<ReadStreamV1>();
     }
 }
