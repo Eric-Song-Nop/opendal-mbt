@@ -801,7 +801,7 @@ function parseMaintainerLinkFlags(value) {
   return flags;
 }
 
-async function resolveLocalOverride(input, fallbackArtifact) {
+async function resolveLocalOverride(input, fallbackArtifact, dependencies = {}) {
   const configured = input.env.OPENDAL_MBT_NATIVE_LIB;
   if (typeof configured !== 'string' || configured.length === 0) {
     return null;
@@ -815,8 +815,16 @@ async function resolveLocalOverride(input, fallbackArtifact) {
     configuredLinkFlags.trim().length > 0
   ) {
     const systemLinkFlags = parseMaintainerLinkFlags(configuredLinkFlags);
+    const hostKey =
+      fallbackArtifact?.host_key ||
+      dependencies.hostKey ||
+      `${process.platform}-${process.arch}`;
     report(`Using maintainer native library ${staticLibrary}`);
-    return makeBuildOutput(staticLibrary, { system_link_flags: systemLinkFlags });
+    return makeBuildOutput(
+      staticLibrary,
+      { host_key: hostKey, system_link_flags: systemLinkFlags },
+      dependencies,
+    );
   }
   requireValid(
     fallbackArtifact !== undefined,
