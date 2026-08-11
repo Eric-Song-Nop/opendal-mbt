@@ -41,6 +41,23 @@ fn validate_retry_layer(
 }
 
 ///|
+fn validate_concurrency_limit_layer(
+  operation_limit : UInt,
+  http_request_limit : UInt?,
+) -> Unit raise OpenDalError {
+  if operation_limit == 0U {
+    raise invalid_layer_argument("operation_limit must be greater than zero")
+  }
+  match http_request_limit {
+    Some(0U) =>
+      raise invalid_layer_argument(
+        "http_request_limit must be greater than zero when provided",
+      )
+    _ => ()
+  }
+}
+
+///|
 fn take_layered_operator(result : NativeResult) -> Operator raise OpenDalError {
   if native_result_status(result) != 0U {
     raise error_from_native_result(result, NewOperator, None, None)
@@ -90,6 +107,39 @@ pub fn Operator::with_retry(
   validate_retry_layer(max_retries, min_delay_millis, max_delay_millis)
   native_operator_with_retry(
     self, max_retries, min_delay_millis, max_delay_millis, jitter,
+  )
+  |> take_layered_operator()
+}
+
+///|
+/// Return a new operator with explicit operation and optional HTTP concurrency
+/// limits.
+///
+/// `operation_limit` bounds concurrent OpenDAL operations. For body-style
+/// resources, including Reader-created streams, Writers, Listers, Deleters,
+/// and Copiers, a permit remains held for the body lifetime. When provided,
+/// `http_request_limit` separately bounds HTTP requests and its permit remains
+/// held until the response body is dropped.
+///
+/// The original operator and resources already opened from it are unchanged.
+/// Compose policies as timeout, then retry, then concurrency limit. This layer
+/// can be added only once and is always outermost; timeout or retry cannot be
+/// added afterward.
+pub fn Operator::with_concurrency_limit(
+  self : Operator,
+  operation_limit~ : UInt,
+  http_request_limit? : UInt,
+) -> Operator raise OpenDalError {
+  validate_concurrency_limit_layer(operation_limit, http_request_limit)
+  let (has_http_request_limit, http_request_limit) = match http_request_limit {
+    Some(limit) => (true, limit)
+    None => (false, 0U)
+  }
+  native_operator_with_concurrency_limit(
+    self,
+    operation_limit.to_uint64(),
+    has_http_request_limit,
+    http_request_limit.to_uint64(),
   )
   |> take_layered_operator()
 }

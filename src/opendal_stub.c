@@ -224,6 +224,19 @@ static opendal_mbt_status_t load_layers_api(opendal_mbt_api_v1_t *api) {
   return OPENDAL_MBT_STATUS_OK;
 }
 
+static opendal_mbt_status_t
+load_concurrency_limit_api(opendal_mbt_api_v1_t *api) {
+  opendal_mbt_status_t status = load_api(api, false);
+  if (status != OPENDAL_MBT_STATUS_OK) {
+    return status;
+  }
+  if ((api->feature_bits & OPENDAL_MBT_FEATURE_CONCURRENCY_LIMIT) == 0 ||
+      !API_HAS(api, operator_with_concurrency_limit)) {
+    return OPENDAL_MBT_STATUS_ABI_MISMATCH;
+  }
+  return OPENDAL_MBT_STATUS_OK;
+}
+
 static void result_set_local_error(moonbit_opendal_result_t *result,
                                    opendal_mbt_error_kind_t kind,
                                    const char *kind_name,
@@ -1473,6 +1486,37 @@ moonbit_opendal_operator_with_retry(
       operator_->operator_, max_retries, min_delay_millis, max_delay_millis,
       jitter == 0 ? OPENDAL_MBT_FALSE : OPENDAL_MBT_TRUE,
       &result->operator_, &result->info, &result->error);
+  if (result->status == OPENDAL_MBT_STATUS_OK &&
+      (result->operator_ == NULL || result->info == NULL ||
+       result->error != NULL || !validate_operator_info(result->info))) {
+    result->status = OPENDAL_MBT_STATUS_ABI_MISMATCH;
+  }
+  return result;
+}
+
+MOONBIT_FFI_EXPORT moonbit_opendal_result_t *
+moonbit_opendal_operator_with_concurrency_limit(
+    moonbit_opendal_operator_t *operator_, uint64_t operation_limit,
+    int32_t has_http_request_limit, uint64_t http_request_limit) {
+  moonbit_opendal_result_t *result = result_new();
+  opendal_mbt_api_v1_t api;
+  if (has_http_request_limit != 0 && has_http_request_limit != 1) {
+    result->status = OPENDAL_MBT_STATUS_ABI_MISMATCH;
+    return result;
+  }
+  result->status = load_concurrency_limit_api(&api);
+  if (result->status != OPENDAL_MBT_STATUS_OK) {
+    return result;
+  }
+  if (operator_ == NULL || operator_->operator_ == NULL) {
+    result_set_local_error(result, OPENDAL_MBT_ERROR_RESOURCE_CLOSED,
+                           "ResourceClosed", "operator is closed");
+    return result;
+  }
+  result->status = api.operator_with_concurrency_limit(
+      operator_->operator_, operation_limit,
+      has_http_request_limit == 0 ? OPENDAL_MBT_FALSE : OPENDAL_MBT_TRUE,
+      http_request_limit, &result->operator_, &result->info, &result->error);
   if (result->status == OPENDAL_MBT_STATUS_OK &&
       (result->operator_ == NULL || result->info == NULL ||
        result->error != NULL || !validate_operator_info(result->info))) {

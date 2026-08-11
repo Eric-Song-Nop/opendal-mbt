@@ -115,6 +115,15 @@ extern "C" fn native_operator_with_retry(
 
 ///|
 #borrow(operator)
+extern "C" fn native_operator_with_concurrency_limit(
+  operator : Operator,
+  operation_limit : UInt64,
+  has_http_request_limit : Bool,
+  http_request_limit : UInt64,
+) -> NativeResult = "moonbit_opendal_operator_with_concurrency_limit"
+
+///|
+#borrow(operator)
 extern "C" fn native_operator_check(operator : Operator) -> NativeResult = "moonbit_opendal_operator_check"
 
 ///|

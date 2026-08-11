@@ -149,6 +149,7 @@ pub fn Operator::read(Self, StringView, range? : ByteRange, version? : StringVie
 pub fn Operator::rename(Self, StringView, StringView) -> Unit raise OpenDalError
 pub fn Operator::s3(StringView, region~ : StringView, root? : StringView, endpoint? : StringView, auth? : S3Auth, virtual_host_style? : Bool) -> Self raise OpenDalError
 pub fn Operator::stat(Self, StringView, version? : StringView, if_match? : StringView, if_none_match? : StringView) -> Metadata raise OpenDalError
+pub fn Operator::with_concurrency_limit(Self, operation_limit~ : UInt, http_request_limit? : UInt) -> Self raise OpenDalError
 pub fn Operator::with_retry(Self, max_retries~ : UInt, min_delay_millis? : UInt64, max_delay_millis? : UInt64, jitter? : Bool) -> Self raise OpenDalError
 pub fn Operator::with_timeout(Self, operation_timeout_millis~ : UInt64, io_timeout_millis~ : UInt64) -> Self raise OpenDalError
 pub fn Operator::write(Self, StringView, BytesView, append? : Bool, content_type? : StringView, content_disposition? : StringView, content_encoding? : StringView, cache_control? : StringView, if_match? : StringView, if_none_match? : StringView) -> Metadata raise OpenDalError
