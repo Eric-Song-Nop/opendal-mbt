@@ -19,10 +19,12 @@ on:
       - rust-toolchain.toml
       - src/**
       - scripts/check-packaged-consumer.sh
+      - scripts/check-version-metadata.py
       - scripts/test-distribution-profiles.py
       - scripts/package-native-artifact.py
       - scripts/prepare-test-native-cache.js
       - scripts/test-package-native-artifact.py
+      - scripts/test-version-metadata.py
   push:
     tags:
       - v*
@@ -66,10 +68,12 @@ jobs:
         run: |
           curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash -s "$MOONBIT_VERSION"
           echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
-      - name: Test artifact profiles and packager
+      - name: Test artifact profiles, packager, and version metadata
         run: |
           python3 scripts/test-distribution-profiles.py
           python3 scripts/test-package-native-artifact.py
+          python3 scripts/test-version-metadata.py
+          python3 scripts/check-version-metadata.py
       - name: Build release static library
         env:
           MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos_deployment_target }}

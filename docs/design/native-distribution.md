@@ -173,6 +173,8 @@ A release is eligible only when all of the following pass:
    checkout, Cargo/Rust on `PATH`, `LIBRARY_PATH`, or consumer linker flags.
 5. That consumer runs every service workflow promised by the selected profile
    with ordinary `moon test --target native` commands on every advertised host.
+6. Moon module, Rust crate and lockfile, and registry-consumer dependency
+   versions are identical.
 
 The release workflow publishes one selected-profile archive per supported host
 under the package version tag, then publishes that exact source tree to
