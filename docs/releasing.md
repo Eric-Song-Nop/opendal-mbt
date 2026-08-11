@@ -48,6 +48,11 @@ that profile's committed table. It then:
 5. runs the acceptance suite for every service promised by the selected
    profile.
 
+Before upload, each artifact job links a strict C consumer with the manifest's
+recorded system flags and asks the resulting library for `library_info`. The
+reported binding version must match the package version; the artifact manifest
+must independently identify the standard service profile.
+
 If a step fails after the GitHub release is created, rerunning the workflow
 replaces its assets with the same verified bytes. Never change an existing
 release asset without also changing its pinned digest and artifact revision.
