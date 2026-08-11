@@ -1,27 +1,34 @@
 # Connecting to storage
 
-OpenDAL separates *what* your code does from *where* the data lives. Construct
-an `Operator` with a service scheme and a map of service-specific string
-configuration, then use the same operator methods for every supported service.
+OpenDAL separates *what* code does from *where* data lives. Construct one
+`Operator` for a storage boundary, inspect its capabilities, then use the same
+resource-oriented methods wherever the selected backend supports them.
+
+## Profiles are compile-time distribution choices
+
+A scheme name is not a plugin loader. The native archive fixes the available
+services before a MoonBit program starts:
+
+| Profile | Services | Availability |
+| --- | --- | --- |
+| `local` | `memory`, `fs` | Published and selected by `0.1.0` |
+| `standard` | `memory`, `fs`, `s3` | Implemented and candidate-tested in the current source; release pins pending |
+
+There is no public runtime profile selector. A package release selects exactly
+one compatible artifact table. Passing `"s3"` to the published `0.1.0` local
+archive cannot download or enable S3 dynamically.
+
+The generic constructor remains useful for compiled services and advanced
+string options:
 
 ```moonbit nocheck
 ///|
 let operator = @opendal.Operator::new(scheme, config={ "key": "value" })
 ```
 
-The configuration map is copied during construction. The binding does not
-retain or mutate the caller's `Map`.
-
-## Services available in v0.1.0
-
-| Scheme | Purpose | Required configuration |
-| --- | --- | --- |
-| `memory` | Ephemeral process-local object storage | none |
-| `fs` | Local filesystem rooted at one directory | `root` |
-
-This is the complete `local` profile currently shipped in the prebuilt native
-artifacts. A scheme string is not a plugin name: using `s3`, `gcs`, `azblob`,
-`webdav`, or another service cannot load that backend at runtime.
+The configuration map is copied during construction. For S3, prefer the typed
+constructor so credentials remain inside opaque values and invalid combinations
+are rejected before crossing the native boundary.
 
 ## Memory
 
@@ -39,8 +46,8 @@ test "connecting: memory operator" {
 }
 ```
 
-Use memory storage for unit tests, temporary transformations, and examples.
-Do not use it when data must outlive the operator or process.
+Use memory storage for unit tests and temporary transformations. Its data does
+not outlive the operator or process.
 
 ## Filesystem
 
@@ -67,15 +74,86 @@ test "connecting: filesystem operator" {
 }
 ```
 
-Application code should choose and validate the root before constructing the
+Application code chooses and validates the root before constructing the
 operator. Keep untrusted values in operation paths rather than allowing them
 to select an arbitrary host directory. OpenDAL paths use forward slashes and
 are relative to the configured root.
 
+## Typed S3 in the standard source profile
+
+`Operator::s3` requires a bucket and region. Root, endpoint, authentication,
+and virtual-host style are labelled options. All strings and credential bytes
+are copied while constructing the operator.
+
+The following checked example constructs a path-style operator for a local
+S3-compatible endpoint but performs no network request:
+
+```mbt check
+///|
+test "connecting: typed S3 operator" {
+  let auth = @opendal.S3Auth::static_credentials(
+    access_key_id="example-access-key",
+    secret_access_key="example-secret-key",
+  )
+  let operator = @opendal.Operator::s3(
+    "example-bucket",
+    region="us-east-1",
+    root="moonbit/",
+    endpoint="http://127.0.0.1:9000",
+    auth~,
+  )
+
+  let info = operator.info()
+  assert_eq(info.scheme, "s3")
+  assert_true(info.capability.can_read())
+}
+```
+
+For AWS, omitting `auth` selects the standard credential chain. The other
+policies are explicit and opaque—none derives `Debug` or `Show`:
+
+```mbt check
+///|
+test "connecting: typed S3 authentication policies" {
+  let default_chain = @opendal.S3Auth::default_chain(disable_ec2_metadata=true)
+  let session = @opendal.S3Auth::static_credentials(
+    access_key_id="example-access-key",
+    secret_access_key="example-secret-key",
+    session_token="example-session-token",
+  )
+  let source = @opendal.S3CredentialSource::static_credentials(
+    access_key_id="source-access-key",
+    secret_access_key="source-secret-key",
+  )
+  let assumed = @opendal.S3Auth::assume_role(
+    role_arn="arn:aws:iam::123456789012:role/example",
+    source~,
+    role_session_name="opendal-moonbit",
+    duration_seconds=900UL,
+  )
+  let unsigned = @opendal.S3Auth::unsigned()
+
+  ignore(default_chain)
+  ignore(session)
+  ignore(assumed)
+  ignore(unsigned)
+}
+```
+
+Use unsigned mode only for a public bucket or an endpoint deliberately
+configured for anonymous access. The first typed API has no connection-URI
+parser or named-profile string; named profile/environment precedence remains
+inside the native default credential chain.
+
+`operator.check()` performs backend I/O. The repository's integration suite
+runs it against a pinned MinIO image with ephemeral credentials; documentation
+examples do not assume a local S3 server.
+
 ## One operator per storage boundary
 
-An operator's service and configuration are fixed. Construct separate
-operators when an application needs separate roots:
+An operator's service and configuration are immutable. Construct separate
+operators for separate roots or buckets. Layer methods return new operators;
+they do not mutate the original or resources already opened from it.
 
 ```mbt nocheck
 ///|
@@ -88,8 +166,8 @@ fn open_app_stores(data_root : String, cache_root : String) raise {
 ```
 
 `Operator::info()` returns a snapshot containing `scheme`, normalized `root`,
-backend `name`, and its `Capability` set. Check capabilities when code uses an
-operation that varies by backend:
+backend `name`, and its `Capability` set. Check capabilities for operations
+that vary by backend or configuration:
 
 ```mbt check
 ///|
@@ -101,20 +179,22 @@ test "connecting: inspect capabilities" {
   assert_true(capability.can_write())
   assert_false(capability.can_copy())
   assert_false(capability.can_rename())
+  assert_false(capability.can_presign_read())
 }
 ```
 
-## Configuration and credentials not implemented yet
+ABI feature presence and backend capability are distinct. For example, the
+standard ABI can expose `open_copier` while memory correctly raises
+`Unsupported` for that operation.
 
-The Node.js binding's connecting guide covers cloud credentials and service
-options. This MoonBit release does not yet ship cloud/network services, so it
-does not currently expose working S3 endpoint/access-key examples, environment
-credential chains, HTTP clients, or per-service typed builders.
+## Host and service limits
 
-There is also no connection-URI constructor. Use
-`Operator::new(scheme, config=...)` with the two supported schemes above.
-Unknown services, invalid configuration, and unsupported options raise a typed
-`OpenDalError` during construction or operation.
+The published local release supports Apple silicon macOS and x86-64 glibc
+Linux. The standard source candidate also has a target-native Linux arm64 lane.
+Intel macOS is not advertised because the current MoonBit installer has no
+matching CLI; Windows and musl need separate build, link, and clean-consumer
+work. GCS, Azure Blob, WebDAV, and other OpenDAL services are not part of the
+standard profile.
 
-Cloud service profiles are tracked as deferred work in
-[the roadmap](../docs/roadmap.md#phase-5-deferred-capabilities).
+See [Common tasks](tasks.mbt.md) for presigned requests, explicit layers,
+batch deletion, Copier, and async I/O.

@@ -1,29 +1,50 @@
 # Apache OpenDAL for MoonBit
 
-OpenDAL provides one storage API over different storage services. This package
-is the native MoonBit binding: it presents an ordinary MoonBit package surface,
-uses checked MoonBit errors, and keeps the Rust and C ABI behind the package.
+OpenDAL provides one storage API over different storage services. This native
+binding presents an ordinary MoonBit package: behavior lives on resource types
+such as `Operator`, `ReadStream`, and `Writer`; fallible synchronous methods use
+checked errors; asynchronous I/O uses MoonBit `async fn`; Rust and the C ABI
+stay private.
 
-## Status
+## Release and source status
 
-`Eric-Song-Nop/opendal@0.1.0` is published on mooncakes.io. The current
-`local` service profile is synchronous and supports:
+The published package and this Phase 5 source tree are intentionally different
+until the next release is cut:
 
-- in-memory (`memory`) and local-filesystem (`fs`) operators;
-- whole and ranged reads, plus reusable random-access readers;
-- whole and chunked writes, with explicit finish or abort for chunked writers;
-- metadata, existence checks, directories, deletion, and listing;
-- backend-native copy and rename when the selected service reports support;
+| Track | Services and API | Native hosts |
+| --- | --- | --- |
+| Published `Eric-Song-Nop/opendal@0.1.0` | `local` profile: `memory`, `fs`, synchronous Phase 1-4 API | Apple silicon macOS 11+, x86-64 glibc Linux 2.35+ |
+| Current source candidate | `standard` profile: `memory`, `fs`, typed `s3`, complete Phase 5A-E source API | Apple silicon macOS 11+, x86-64 and arm64 glibc Linux 2.35+ |
+
+The repository still selects the immutable `local` `0.1.0` artifact table for
+ordinary package installation. The `standard` artifact table has no release
+pins yet. Consequently, installing `0.1.0` does not make the Phase 5 methods or
+S3 backend available; contributors exercise them by building the current
+source with the standard profile. A later release-preparation change will bump
+the version and select verified standard artifacts atomically.
+
+The current source facade implements:
+
+- whole, ranged, random-access, and hard-bounded sequential reads;
+- whole and chunked writes with explicit `finish` or `abort`;
+- metadata, existence, directories, listing, delete, copy, and rename;
+- typed S3 construction with default-chain, static/session, unsigned, and
+  assume-role authentication;
+- owned presigned read/write/stat requests;
+- immutable timeout, retry, and concurrency-limit layers, all opt-in;
+- all-or-error `delete_many` and a managed same-Operator, one-object `Copier`;
+- an initial async facade for read, bounded read streams, and chunked writers;
 - typed `OpenDalError` values and capability inspection.
 
-The public API is generated in [`src/pkg.generated.mbti`](pkg.generated.mbti).
+The generated public interface is
+[`src/pkg.generated.mbti`](pkg.generated.mbti).
 
-## Installation
+## Install the published local release
 
-Add the dependency like any other Moon package:
+Add the released package like any other Moon package:
 
 ```sh
-moon add Eric-Song-Nop/opendal
+moon add Eric-Song-Nop/opendal@0.1.0
 ```
 
 Import it from a native package:
@@ -38,15 +59,19 @@ import {
 
 No OpenDAL-specific linker flags are required. On the first native build, the
 package downloads and verifies the release artifact for the current host;
-later builds reuse Moon's shared cache.
+later builds reuse Moon's shared cache. The current prebuild hook requires
+Node.js 18 or newer and `tar` at build time. Consumers do not need Rust, Cargo,
+or this repository.
 
-The initial binary matrix supports:
+Contributors testing the Phase 5 source stack use the checked-out repository:
 
-- Apple silicon macOS 11 or newer;
-- x86-64 Linux with glibc 2.35 or newer.
+```sh
+moon install
+make test-profile NATIVE_SERVICE_PROFILE=standard
+```
 
-The current Moon native prebuild hook also requires Node.js 18 or newer and
-`tar` at build time. Consumers do not need Rust, Cargo, or this repository.
+That maintainer path builds the standard archive from source and does not alter
+the published `local` selection or artifact pins.
 
 ## First operation
 
@@ -79,43 +104,61 @@ test "README: typed storage error" {
 }
 ```
 
+Async methods are called directly inside an async context; MoonBit has no
+`await` keyword:
+
+```mbt check
+///|
+async test "README: async memory round trip" {
+  let operator = @opendal.Operator::new("memory")
+  let async_operator = operator.as_async()
+  let writer = async_operator.open_writer("async.txt")
+  writer.write(b"hello ")
+  writer.write(b"asynchronously")
+  writer.finish() |> ignore
+  assert_eq(async_operator.read("async.txt"), b"hello asynchronously")
+}
+```
+
 ## Guides
 
-- [Getting started](getting-started.mbt.md) — install the package and run the
-  first memory and filesystem programs.
-- [Connecting](connecting.mbt.md) — construct and validate operators for the
-  service profiles available today.
-- [Common tasks](tasks.mbt.md) — recipes for reads, writes, metadata, listing,
-  directories, copy, rename, and errors.
+- [Getting started](getting-started.mbt.md) — install the published package or
+  exercise the Phase 5 source candidate, then choose synchronous or async I/O.
+- [Connecting](connecting.mbt.md) — understand profiles and construct memory,
+  filesystem, and typed S3 operators.
+- [Common tasks](tasks.mbt.md) — recipes for streams, abort, presign, layers,
+  batch deletion, Copier, async I/O, and the blocking core.
+- [Roadmap](../docs/roadmap.md) — completed Phase 5 slices and the remaining
+  release gates.
 
-## Current limitations
+## Deliberate limits
 
-The upstream Node.js binding documents a broader OpenDAL surface. Version
-`0.1.0` of this MoonBit binding does **not** yet provide:
+- The current source enables only `memory`, `fs`, and `s3`; GCS, Azure Blob,
+  WebDAV, and other OpenDAL services are not compiled in.
+- `delete_many` is all-or-error and can have partial remote effects; it does
+  not fabricate ordered per-path results or promise atomicity.
+- `Copier` copies one object between two paths on the same Operator. It is not
+  recursive and cannot bridge two operators or services.
+- The first async slice covers read, bounded read streams, and chunked writers;
+  async stat/list/delete/copy/presign and public task handles remain later
+  work.
+- Retry, timeout, and concurrency limits are never implicit. Logging, tracing,
+  metrics exporters, and custom callback layers are not exposed.
+- Standard artifacts are not yet published. Intel macOS, Windows, and musl
+  Linux are not advertised; a Rust-only build is not treated as MoonBit host
+  support.
 
-- asynchronous APIs, callbacks, cancellation, or concurrent task handles;
-- S3, GCS, Azure Blob, WebDAV, or other cloud/network service profiles;
-- presigned requests;
-- layers such as retry, logging, metrics, timeout, or concurrency limiting;
-- batch delete or long-running recursive copier APIs;
-- a streaming read cursor for objects larger than one MoonBit `Bytes` value;
-- Windows or additional CPU/libc release artifacts.
-
-Passing a service name does not dynamically install it: available services are
-fixed by the native artifact's compiled profile. Unsupported services and
-options raise `OpenDalError` instead of silently falling back.
-
-These gaps are recorded in [the project roadmap](../docs/roadmap.md#phase-5-deferred-capabilities).
+Passing an arbitrary scheme does not install a backend. ABI feature presence,
+selected-profile services, and a backend's operation capabilities are separate
+checks; unsupported services and operations raise `OpenDalError` instead of
+silently falling back.
 
 ## Upstream references
 
 The organization of these guides follows Apache OpenDAL's official Node.js
-binding documentation:
+binding documentation while keeping the smaller MoonBit contracts explicit:
 
 - [Node.js binding overview](https://opendal.apache.org/docs/bindings/nodejs/)
 - [Getting started](https://opendal.apache.org/docs/bindings/nodejs/getting-started/)
 - [Connecting](https://opendal.apache.org/docs/bindings/nodejs/connecting/)
 - [Common tasks](https://opendal.apache.org/docs/bindings/nodejs/tasks/)
-
-The examples and support claims here are intentionally rewritten for the
-smaller MoonBit `0.1.0` surface.
