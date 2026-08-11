@@ -2,9 +2,16 @@ supported_targets = "native"
 
 import {
   "Eric-Song-Nop/opendal",
+  "moonbitlang/async",
+  "moonbitlang/async/http",
+  "moonbitlang/async/io",
+  "moonbitlang/core/encoding/utf8",
   "moonbitlang/core/env",
 } for "test"
 
 options(
-  targets: { "s3_integration_test.mbt": [ "native" ] },
+  targets: {
+    "presign_integration_test.mbt": [ "native" ],
+    "s3_integration_test.mbt": [ "native" ],
+  },
 )

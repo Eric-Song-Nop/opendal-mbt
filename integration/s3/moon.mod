@@ -6,4 +6,5 @@ preferred_target = "native"
 
 import {
   "Eric-Song-Nop/opendal@0.1.0",
+  "moonbitlang/async@0.20.5",
 }
