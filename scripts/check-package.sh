@@ -15,7 +15,8 @@ if printf '%s\n' "$package_files" | \
 fi
 
 for required_file in \
-  LICENSE README.mbt.md Cargo.toml Cargo.lock examples/c/Makefile \
+  LICENSE README.mbt.md build.js native/artifacts.json \
+  native/distribution-profile.json Cargo.toml Cargo.lock examples/c/Makefile \
   native/include/opendal_mbt.h; do
   if ! printf '%s\n' "$package_files" | grep -Fxq "$required_file"; then
     echo "required published file is missing: $required_file" >&2
