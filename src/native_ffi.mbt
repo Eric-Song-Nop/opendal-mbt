@@ -97,6 +97,24 @@ extern "C" fn native_operator_s3(
 
 ///|
 #borrow(operator)
+extern "C" fn native_operator_with_timeout(
+  operator : Operator,
+  operation_timeout_millis : UInt64,
+  io_timeout_millis : UInt64,
+) -> NativeResult = "moonbit_opendal_operator_with_timeout"
+
+///|
+#borrow(operator)
+extern "C" fn native_operator_with_retry(
+  operator : Operator,
+  max_retries : UInt,
+  min_delay_millis : UInt64,
+  max_delay_millis : UInt64,
+  jitter : Bool,
+) -> NativeResult = "moonbit_opendal_operator_with_retry"
+
+///|
+#borrow(operator)
 extern "C" fn native_operator_check(operator : Operator) -> NativeResult = "moonbit_opendal_operator_check"
 
 ///|
