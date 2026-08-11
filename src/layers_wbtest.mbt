@@ -34,12 +34,10 @@ test "retry layer validation requires positive ordered bounds" {
 test "concurrency layer validation requires positive limits" {
   validate_concurrency_limit_layer(1U, None)
   validate_concurrency_limit_layer(1U, Some(1U))
-  assert_invalid_layer_argument(() =>
-    validate_concurrency_limit_layer(0U, None)
-  )
-  assert_invalid_layer_argument(() =>
+  assert_invalid_layer_argument(() => validate_concurrency_limit_layer(0U, None))
+  assert_invalid_layer_argument(() => {
     validate_concurrency_limit_layer(1U, Some(0U))
-  )
+  })
 }
 
 ///|
