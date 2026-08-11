@@ -51,6 +51,7 @@ pub(crate) const FEATURE_BASE: u64 = 1 << 0;
 pub(crate) const FEATURE_WHOLE_OBJECT: u64 = 1 << 1;
 pub(crate) const FEATURE_LISTING: u64 = 1 << 2;
 pub(crate) const FEATURE_RANDOM_READER: u64 = 1 << 3;
+pub(crate) const FEATURE_CHUNKED_WRITER: u64 = 1 << 4;
 
 pub(crate) const CAP_STAT: u64 = 1 << 0;
 pub(crate) const CAP_READ: u64 = 1 << 1;
@@ -338,7 +339,13 @@ pub(crate) enum ReaderStateV1 {
 
 #[repr(C)]
 pub(crate) struct WriterV1 {
-    _private: [u8; 0],
+    pub(crate) state: std::sync::Mutex<WriterStateV1>,
+}
+
+pub(crate) enum WriterStateV1 {
+    Open(opendal::blocking::Writer),
+    Failed,
+    Closed,
 }
 
 pub(crate) type LibraryInfoFn = unsafe extern "C" fn(*mut LibraryInfoViewV1) -> Status;
