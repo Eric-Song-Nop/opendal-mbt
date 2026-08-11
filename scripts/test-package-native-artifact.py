@@ -158,7 +158,7 @@ opendal = { version = "=0.58.1", default-features = false, features = ["blocking
         result = json.loads(first.stdout)
         manifest = json.loads(Path(result["manifest"]).read_text(encoding="utf-8"))
         pinned_record = {
-            **manifest,
+            **{key: value for key, value in manifest.items() if key != "schema_version"},
             "archive_name": result["archive_name"],
             "archive_size": result["archive_size"],
             "archive_sha256": result["archive_sha256"],

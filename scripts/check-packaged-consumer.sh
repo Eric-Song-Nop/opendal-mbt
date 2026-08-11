@@ -45,7 +45,7 @@ cp "$repo_root/moon.work" "$stage_dir/moon.work"
 (
   cd "$stage_dir"
   cargo build --workspace --locked $cargo_profile_flag
-  LIBRARY_PATH="$stage_dir/target/$profile${LIBRARY_PATH:+:$LIBRARY_PATH}" \
+  OPENDAL_MBT_NATIVE_LIB="$stage_dir/target/$profile/libopendal_mbt_native.a" \
     moon test integration/consumer --target native --frozen \
       --warn-list '-68+73' --deny-warn \
       $(if [ "$profile" = release ]; then printf '%s' --release; fi)

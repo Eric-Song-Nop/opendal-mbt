@@ -280,6 +280,8 @@ def verify_pinned_artifact(table_file: Path, result: dict[str, Any]) -> None:
     if not isinstance(pinned, dict):
         raise ArtifactError(f"no pinned artifact exists for {host_key}")
     for key, value in manifest.items():
+        if key == "schema_version":
+            continue
         if pinned.get(key) != value:
             raise ArtifactError(f"pinned artifact field {key} does not match the build")
     for key in ("archive_name", "archive_size", "archive_sha256"):
