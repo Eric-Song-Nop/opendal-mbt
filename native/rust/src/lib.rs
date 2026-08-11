@@ -24,6 +24,9 @@ const MAX_OUTPUT_BYTES: u64 = i32::MAX as u64;
 const WHOLE_READ_CHUNK_BYTES: usize = 1024 * 1024;
 const BINDING_VERSION: &str = env!("CARGO_PKG_VERSION");
 const OPENDAL_VERSION: &str = "0.58.1";
+#[cfg(feature = "profile-standard")]
+const SERVICE_PROFILE: &str = "memory,fs,s3";
+#[cfg(not(feature = "profile-standard"))]
 const SERVICE_PROFILE: &str = "memory,fs";
 
 static RUNTIME: OnceLock<Result<Runtime, String>> = OnceLock::new();
@@ -274,7 +277,7 @@ fn catch_status(f: impl FnOnce() -> Status) -> Status {
 
 fn runtime() -> CallResult<&'static Runtime> {
     let result = RUNTIME.get_or_init(|| {
-        opendal::init_default_registry();
+        opendal::install_default();
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -3627,6 +3630,23 @@ mod tests {
             }
         }
         entries
+    }
+
+    #[test]
+    fn library_info_reports_the_selected_service_profile() {
+        let mut view = LibraryInfoViewV1 {
+            struct_size: size_of::<LibraryInfoViewV1>() as u32,
+            struct_version: STRUCT_VERSION,
+            reserved0: 0,
+            binding_version: bytes(b""),
+            opendal_version: bytes(b""),
+            service_profile: bytes(b""),
+        };
+        // SAFETY: the complete output carrier is writable for this call.
+        assert_eq!(unsafe { library_info(&mut view) }, STATUS_OK);
+        assert_eq!(copy_view(view.binding_version), BINDING_VERSION.as_bytes());
+        assert_eq!(copy_view(view.opendal_version), OPENDAL_VERSION.as_bytes());
+        assert_eq!(copy_view(view.service_profile), SERVICE_PROFILE.as_bytes());
     }
 
     #[test]
