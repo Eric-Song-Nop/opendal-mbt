@@ -386,6 +386,40 @@ test "native memory: blocking core operations preserve storage semantics" {
 }
 
 ///|
+test "native memory: batch delete accepts duplicate, missing, and empty batches" {
+  let operator = @opendal.Operator::new("memory")
+  operator.write("batch/first.bin", b"first") |> ignore
+  operator.write("batch/目录/second.bin", b"second") |> ignore
+  operator.delete_many([
+    "batch/first.bin", "batch/missing.bin", "batch/first.bin", "batch/目录/second.bin",
+  ])
+  assert_false(operator.exists("batch/first.bin"))
+  assert_false(operator.exists("batch/missing.bin"))
+  assert_false(operator.exists("batch/目录/second.bin"))
+  operator.delete_many([])
+}
+
+///|
+test "native memory: managed Copier reports backend Unsupported honestly" {
+  let operator = @opendal.Operator::new("memory")
+  operator.write("copier/source.bin", b"source") |> ignore
+  try
+    operator.open_copier("copier/source.bin", "copier/destination.bin")
+  catch {
+    OpenDalError(info) => {
+      assert_true(info.kind is Unsupported)
+      assert_true(info.operation is Copy)
+      assert_eq(info.path, Some("copier/source.bin"))
+      assert_eq(info.destination_path, Some("copier/destination.bin"))
+    }
+  } noraise {
+    _ => fail("expected memory Copier construction to be unsupported")
+  }
+  assert_eq(operator.read("copier/source.bin"), b"source")
+  assert_false(operator.exists("copier/destination.bin"))
+}
+
+///|
 test "native memory: stat missing path preserves typed context" {
   let operator = @opendal.Operator::new("memory")
   try operator.stat("missing-stat.bin") catch {
