@@ -16,6 +16,10 @@ priv type NativeLister
 priv type NativeReader
 
 ///|
+/// Native sequential read-stream storage finalized by the C stub.
+priv type NativeReadStream
+
+///|
 /// Native chunked writer storage finalized by the C stub without finishing.
 priv type NativeWriter
 
@@ -126,6 +130,33 @@ extern "C" fn native_reader_read(
 ///|
 #borrow(reader)
 extern "C" fn native_reader_close(reader : NativeReader) -> Unit = "moonbit_opendal_reader_close"
+
+///|
+#borrow(operator, path, version, if_match, if_none_match)
+extern "C" fn native_operator_read_stream(
+  operator : Operator,
+  path : String,
+  range_kind : UInt,
+  range_offset : UInt64,
+  range_length : UInt64,
+  chunk_size : Int,
+  has_version : Bool,
+  version : String,
+  has_if_match : Bool,
+  if_match : String,
+  has_if_none_match : Bool,
+  if_none_match : String,
+) -> NativeResult = "moonbit_opendal_operator_read_stream"
+
+///|
+#borrow(stream)
+extern "C" fn native_read_stream_next(
+  stream : NativeReadStream,
+) -> NativeResult = "moonbit_opendal_read_stream_next"
+
+///|
+#borrow(stream)
+extern "C" fn native_read_stream_close(stream : NativeReadStream) -> Unit = "moonbit_opendal_read_stream_close"
 
 ///|
 #borrow(operator, path, data, content_type, content_disposition, content_encoding, cache_control, if_match, if_none_match)
@@ -263,6 +294,12 @@ extern "C" fn native_result_take_lister(result : NativeResult) -> NativeLister =
 ///|
 #borrow(result)
 extern "C" fn native_result_take_reader(result : NativeResult) -> NativeReader = "moonbit_opendal_result_take_reader"
+
+///|
+#borrow(result)
+extern "C" fn native_result_take_read_stream(
+  result : NativeResult,
+) -> NativeReadStream = "moonbit_opendal_result_take_read_stream"
 
 ///|
 #borrow(result)

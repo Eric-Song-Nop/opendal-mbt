@@ -26,8 +26,8 @@ test "tasks: whole-object write and read" {
 }
 ```
 
-The whole-object read must fit in one MoonBit `Bytes` value. The binding does
-not yet offer a sequential streaming cursor for arbitrarily large objects.
+The whole-object read must fit in one MoonBit `Bytes` value. Use a `ReadStream`
+when the object should be consumed with a fixed per-chunk memory bound.
 
 ## Read byte ranges
 
@@ -49,6 +49,39 @@ test "tasks: independent byte ranges" {
 ```
 
 `Range(offset, length)` uses a byte count, not an end offset.
+
+## Read sequentially in bounded chunks
+
+`open_read_stream` owns a sequential cursor. Its `chunk_size` is fixed when the
+stream opens, and every returned chunk is an owned `Bytes` value no larger than
+that bound.
+
+```mbt check
+///|
+test "tasks: bounded sequential read" {
+  let operator = @opendal.Operator::new("memory")
+  operator.write("video.bin", b"0123456789") |> ignore
+
+  let stream = operator.open_read_stream("video.bin", chunk_size=4)
+  let mut bytes_read = 0
+  for ;; {
+    match stream.next() {
+      Some(chunk) => {
+        assert_true(chunk.length() <= 4)
+        bytes_read += chunk.length()
+      }
+      None => break
+    }
+  }
+  assert_eq(bytes_read, 10)
+  assert_eq(stream.next(), None)
+  stream.close()
+}
+```
+
+`None` remains stable until close. Closing is idempotent; a read error is
+terminal. `range`, `version`, `if_match`, and `if_none_match` use the same
+semantics as whole-object reads.
 
 ## Reuse a random-access reader
 
