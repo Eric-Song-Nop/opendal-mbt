@@ -130,8 +130,10 @@ test "tasks: chunked writer" {
 }
 ```
 
-Aborting is idempotent after its first success. It leaves no committed object,
-and the writer rejects later writes and finishes.
+Aborting is idempotent after its first success, and the writer rejects later
+writes and finishes. In the memory example below no committed object remains.
+Across backends, successful abort means OpenDAL reported cleanup success; it
+does not promise rollback of remote effects already made visible.
 
 ```mbt check
 ///|
@@ -352,7 +354,7 @@ test "tasks: create an owned presigned read request" {
     range=Range(offset=0UL, length=16UL),
   )
 
-  assert_eq(request.method, "GET")
+  assert_eq(request.http_method, "GET")
   assert_true(request.uri.length() > 0)
 }
 ```
