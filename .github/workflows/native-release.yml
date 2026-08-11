@@ -19,12 +19,14 @@ on:
       - rust-toolchain.toml
       - src/**
       - scripts/check-packaged-consumer.sh
+      - scripts/check-native-library-info.py
       - scripts/check-version-metadata.py
       - scripts/test-distribution-profiles.py
       - scripts/package-native-artifact.py
       - scripts/prepare-test-native-cache.js
       - scripts/render-registry-consumer.py
       - scripts/test-package-native-artifact.py
+      - scripts/test-native-library-info.py
       - scripts/test-render-registry-consumer.py
       - scripts/test-version-metadata.py
   push:
@@ -74,6 +76,7 @@ jobs:
         run: |
           python3 scripts/test-distribution-profiles.py
           python3 scripts/test-package-native-artifact.py
+          python3 scripts/test-native-library-info.py
           python3 scripts/test-render-registry-consumer.py
           python3 scripts/test-version-metadata.py
           python3 scripts/check-version-metadata.py
@@ -123,6 +126,22 @@ jobs:
           make packaged-consumer \
             NATIVE_ARTIFACT="$archive" \
             NATIVE_ARTIFACT_TABLE="$candidate_table"
+      - name: Verify native library release identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest=$(find target/native-dist -name '*.manifest.json' -type f)
+          test -n "$manifest"
+          version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' moon.mod)
+          if [[ '${{ steps.artifact-mode.outputs.mode }}' == 'release' ]]; then
+            test "$GITHUB_REF_NAME" = "v$version"
+          fi
+          python3 scripts/check-native-library-info.py \
+            --repo-root . \
+            --library target/release/libopendal_mbt_native.a \
+            --manifest "$manifest" \
+            --expected-version "$version" \
+            --expected-profile standard
       - uses: actions/upload-artifact@v4
         with:
           name: native-${{ matrix.rust_target }}

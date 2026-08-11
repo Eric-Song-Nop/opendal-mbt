@@ -62,6 +62,8 @@ abi-smoke:
 		-fsyntax-only tests/c/abi_header_smoke.c
 	$${CXX:-c++} -std=c++17 -Wall -Wextra -Werror -Wpedantic \
 		-x c++ -fsyntax-only tests/c/abi_header_smoke.c
+	$${CC:-cc} -std=c11 -Wall -Wextra -Werror -Wpedantic \
+		-fsyntax-only tests/c/library_info_probe.c
 	$(MAKE) -C examples/c syntax
 
 c-example:
@@ -94,6 +96,7 @@ version-contract:
 native-artifact-test:
 	python3 scripts/test-distribution-profiles.py
 	python3 scripts/test-package-native-artifact.py
+	python3 scripts/test-native-library-info.py
 	node --check scripts/prepare-test-native-cache.js
 	node --test scripts/test-native-resolver.js
 
