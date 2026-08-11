@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "artifact_revision": "r1",
+  "service_profile": "standard",
+  "services": [
+    "memory",
+    "fs",
+    "s3"
+  ],
+  "rust_features": [
+    "blocking",
+    "services-fs",
+    "services-s3",
+    "http-transport-reqwest",
+    "http-transport-reqwest-rustls",
+    "executors-tokio"
+  ],
+  "cargo_features": [
+    "profile-standard"
+  ],
+  "runtime_initialization": "install_default",
+  "targets": {
+    "aarch64-apple-darwin": {
+      "host_key": "darwin-arm64",
+      "minimum_macos_version": "11.0"
+    },
+    "x86_64-unknown-linux-gnu": {
+      "host_key": "linux-x64",
+      "minimum_glibc_version": "2.35"
+    }
+  }
+}

@@ -1,5 +1,6 @@
 {
   "schema_version": 1,
+  "service_profile": "local",
   "artifacts": {
     "darwin-arm64": {
       "artifact": "opendal-mbt-0.1.0-r1-local-aarch64-apple-darwin",

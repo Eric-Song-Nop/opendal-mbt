@@ -9,8 +9,19 @@ publish = false
 [lib]
 crate-type = ["staticlib"]
 
+[features]
+default = ["profile-standard"]
+profile-local = ["opendal/blocking", "opendal/services-fs"]
+profile-standard = [
+  "profile-local",
+  "opendal/services-s3",
+  "opendal/http-transport-reqwest",
+  "opendal/http-transport-reqwest-rustls",
+  "opendal/executors-tokio",
+]
+
 [dependencies]
-opendal = { version = "=0.58.1", default-features = false, features = ["blocking", "services-fs"] }
+opendal = { version = "=0.58.1", default-features = false }
 tokio = { version = "=1.52.0", features = ["rt-multi-thread", "fs"] }
 
 [dev-dependencies]
