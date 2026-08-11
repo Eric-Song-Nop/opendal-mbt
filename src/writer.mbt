@@ -72,3 +72,14 @@ pub fn Writer::finish(self : Writer) -> Metadata raise OpenDalError {
   native_result_release(result)
   metadata_from_native(metadata, Write, Some(self.path))
 }
+
+///|
+/// Discard an unfinished write. A successful abort is idempotent; after any
+/// other terminal outcome this method raises `ResourceClosed`.
+pub fn Writer::abort(self : Writer) -> Unit raise OpenDalError {
+  let result = native_writer_abort(self.native)
+  if native_result_status(result) != 0U {
+    raise error_from_native_result(result, Write, Some(self.path), None)
+  }
+  native_result_release(result)
+}
