@@ -154,10 +154,31 @@ Delivered:
 
 ### Phase 4: Distribution and service profiles
 
-- Decide and document source-build versus prebuilt-artifact installation.
-- Publish checksummed native artifacts for selected OS/architecture pairs.
-- Keep service features explicit and grouped into supported profiles.
-- Establish the minimum MoonBit and Rust toolchains.
+Status: in progress.
+
+The distribution contract is now fixed: `moon add`, a normal package import,
+and the native target must be sufficient for consumers. Rust, a source
+checkout, `LIBRARY_PATH`, and consumer-owned linker flags are not part of the
+installation contract.
+
+The implementation order is:
+
+1. build reproducible `local` profile artifacts for Apple silicon macOS and
+   x86-64 glibc Linux;
+2. install the selected artifact through Moon's prebuild configuration hook,
+   with pinned digests and a content-addressed shared cache;
+3. prove cold-cache, hot-cache/offline, corruption, and concurrent-install
+   behavior;
+4. run a packaged downstream consumer without Cargo, Rust, manual linker
+   settings, or repository files;
+5. publish the artifacts and package from the same version tag.
+
+The `local` profile contains the memory and filesystem services. The initial
+compatibility floors are macOS 11.0 and glibc 2.35. The minimum maintainer
+toolchains are MoonBit `0.10.6+80dc50f24` and Rust `1.91.0`; the temporary
+prebuild configuration mechanism requires Node.js 18 or newer at consumer
+build time. See `docs/design/native-distribution.md` for the artifact, trust,
+cache, and release contracts.
 
 The initial platform target is macOS and Linux. Windows support requires a
 separate linker and artifact-distribution decision.
@@ -191,4 +212,3 @@ cross-thread callbacks, and exactly-once completion.
   conditional-read semantics across backends.
 - A reliable public Writer abort operation, which requires an async-writer
   implementation in the Rust shim rather than OpenDAL's blocking Writer.
-- Source-build and prebuilt-library installation contract.
