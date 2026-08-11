@@ -29,6 +29,11 @@ const SERVICE_PROFILE: &str = "standard";
 #[cfg(not(feature = "profile-standard"))]
 const SERVICE_PROFILE: &str = "local";
 
+#[cfg(feature = "profile-standard")]
+const PROFILE_FEATURE_BITS: u64 = FEATURE_S3;
+#[cfg(not(feature = "profile-standard"))]
+const PROFILE_FEATURE_BITS: u64 = 0;
+
 static RUNTIME: OnceLock<Result<Runtime, String>> = OnceLock::new();
 
 #[cfg(test)]
@@ -748,6 +753,308 @@ unsafe fn parse_delete_options(pointer: *const DeleteOptionsV1) -> CallResult<De
             )?
         },
         recursive: input.flags & DELETE_RECURSIVE != 0,
+    })
+}
+
+#[cfg(feature = "profile-standard")]
+enum ParsedS3CredentialSource {
+    DefaultChain {
+        disable_ec2_metadata: bool,
+    },
+    Static {
+        access_key_id: String,
+        secret_access_key: String,
+        session_token: Option<String>,
+    },
+}
+
+#[cfg(feature = "profile-standard")]
+enum ParsedS3Auth {
+    Credentials(ParsedS3CredentialSource),
+    Unsigned,
+    AssumeRole {
+        role_arn: String,
+        source: ParsedS3CredentialSource,
+        external_id: Option<String>,
+        role_session_name: Option<String>,
+        duration_seconds: Option<u32>,
+    },
+}
+
+#[cfg(feature = "profile-standard")]
+struct ParsedS3Options {
+    bucket: String,
+    region: String,
+    root: Option<String>,
+    endpoint: Option<String>,
+    virtual_host_style: bool,
+    auth: ParsedS3Auth,
+}
+
+#[cfg(feature = "profile-standard")]
+unsafe fn required_nonempty_text(view: BytesViewV1, label: &str) -> CallResult<String> {
+    // SAFETY: the copied carrier borrows only for this call and is copied now.
+    let value = unsafe { read_text_value(view, label)? };
+    if value.is_empty() {
+        return Err(invalid_argument(format!("{label} must not be empty")));
+    }
+    Ok(value)
+}
+
+#[cfg(feature = "profile-standard")]
+unsafe fn optional_nonempty_text(
+    view: BytesViewV1,
+    present_bits: u64,
+    bit: u64,
+    label: &str,
+) -> CallResult<Option<String>> {
+    // SAFETY: optional_text validates/copies present views and enforces the
+    // canonical absent representation.
+    match unsafe { optional_text(view, present_bits, bit, label)? } {
+        Some(value) if value.is_empty() => {
+            Err(invalid_argument(format!("{label} must not be empty")))
+        }
+        value => Ok(value),
+    }
+}
+
+#[cfg(feature = "profile-standard")]
+fn require_absent_view(view: BytesViewV1) -> CallResult<()> {
+    if absent_bytes_is_canonical(view) {
+        Ok(())
+    } else {
+        abi_mismatch()
+    }
+}
+
+#[cfg(feature = "profile-standard")]
+fn reject_present_field(present_bits: u64, bit: u64, label: &str) -> CallResult<()> {
+    if present_bits & bit != 0 {
+        Err(invalid_argument(format!(
+            "{label} is not valid for the selected S3 authentication mode"
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(feature = "profile-standard")]
+fn reject_role_fields(input: &S3OptionsV1) -> CallResult<()> {
+    reject_present_field(input.present_bits, S3_EXTERNAL_ID_PRESENT, "S3 external_id")?;
+    reject_present_field(
+        input.present_bits,
+        S3_ROLE_SESSION_NAME_PRESENT,
+        "S3 role_session_name",
+    )?;
+    reject_present_field(
+        input.present_bits,
+        S3_ASSUME_ROLE_DURATION_PRESENT,
+        "S3 assume-role duration",
+    )?;
+    require_absent_view(input.role_arn)?;
+    require_absent_view(input.external_id)?;
+    require_absent_view(input.role_session_name)?;
+    if input.assume_role_duration_seconds != 0 {
+        return abi_mismatch();
+    }
+    Ok(())
+}
+
+#[cfg(feature = "profile-standard")]
+fn reject_static_credentials(input: &S3OptionsV1) -> CallResult<()> {
+    reject_present_field(
+        input.present_bits,
+        S3_SESSION_TOKEN_PRESENT,
+        "S3 session_token",
+    )?;
+    require_absent_view(input.access_key_id)?;
+    require_absent_view(input.secret_access_key)?;
+    require_absent_view(input.session_token)
+}
+
+#[cfg(feature = "profile-standard")]
+unsafe fn parse_static_credentials(input: &S3OptionsV1) -> CallResult<ParsedS3CredentialSource> {
+    // SAFETY: all copied views borrow only for this call and are copied now.
+    let access_key_id = unsafe { required_nonempty_text(input.access_key_id, "S3 access_key_id")? };
+    // SAFETY: same as above.
+    let secret_access_key =
+        unsafe { required_nonempty_text(input.secret_access_key, "S3 secret_access_key")? };
+    // SAFETY: same as above.
+    let session_token = unsafe {
+        optional_nonempty_text(
+            input.session_token,
+            input.present_bits,
+            S3_SESSION_TOKEN_PRESENT,
+            "S3 session_token",
+        )?
+    };
+    Ok(ParsedS3CredentialSource::Static {
+        access_key_id,
+        secret_access_key,
+        session_token,
+    })
+}
+
+#[cfg(feature = "profile-standard")]
+unsafe fn parse_s3_options(pointer: *const S3OptionsV1) -> CallResult<ParsedS3Options> {
+    if pointer.is_null() {
+        return abi_mismatch();
+    }
+    // SAFETY: the required input struct is validated and copied.
+    let input = unsafe { read_input_struct(pointer)? };
+    let known_present = S3_ROOT_PRESENT
+        | S3_ENDPOINT_PRESENT
+        | S3_SESSION_TOKEN_PRESENT
+        | S3_EXTERNAL_ID_PRESENT
+        | S3_ROLE_SESSION_NAME_PRESENT
+        | S3_ASSUME_ROLE_DURATION_PRESENT;
+    let known_flags = S3_VIRTUAL_HOST_STYLE | S3_DISABLE_EC2_METADATA;
+    if input.present_bits & !known_present != 0
+        || input.flags & !known_flags != 0
+        || input.reserved0 != 0
+    {
+        return abi_mismatch();
+    }
+
+    // SAFETY: required and optional text views borrow only for this call and
+    // are copied before construction proceeds.
+    let bucket = unsafe { required_nonempty_text(input.bucket, "S3 bucket")? };
+    // SAFETY: same as above.
+    let region = unsafe { required_nonempty_text(input.region, "S3 region")? };
+    // SAFETY: same as above.
+    let root = unsafe {
+        optional_nonempty_text(input.root, input.present_bits, S3_ROOT_PRESENT, "S3 root")?
+    };
+    // SAFETY: same as above.
+    let endpoint = unsafe {
+        optional_nonempty_text(
+            input.endpoint,
+            input.present_bits,
+            S3_ENDPOINT_PRESENT,
+            "S3 endpoint",
+        )?
+    };
+
+    let disable_ec2_metadata = input.flags & S3_DISABLE_EC2_METADATA != 0;
+    let auth = match input.auth_kind {
+        S3_AUTH_DEFAULT_CHAIN => {
+            if input.source_kind != S3_SOURCE_DEFAULT_CHAIN {
+                return Err(invalid_argument(
+                    "default-chain S3 authentication requires the default source kind",
+                ));
+            }
+            reject_static_credentials(&input)?;
+            reject_role_fields(&input)?;
+            ParsedS3Auth::Credentials(ParsedS3CredentialSource::DefaultChain {
+                disable_ec2_metadata,
+            })
+        }
+        S3_AUTH_STATIC => {
+            if input.source_kind != S3_SOURCE_STATIC {
+                return Err(invalid_argument(
+                    "static S3 authentication requires the static source kind",
+                ));
+            }
+            if disable_ec2_metadata {
+                return Err(invalid_argument(
+                    "disable_ec2_metadata is only valid for a default credential chain",
+                ));
+            }
+            reject_role_fields(&input)?;
+            // SAFETY: the static mode makes both key views required and permits
+            // only the optional session token.
+            ParsedS3Auth::Credentials(unsafe { parse_static_credentials(&input)? })
+        }
+        S3_AUTH_UNSIGNED => {
+            if input.source_kind != S3_SOURCE_DEFAULT_CHAIN {
+                return Err(invalid_argument(
+                    "unsigned S3 authentication requires the default source kind",
+                ));
+            }
+            if disable_ec2_metadata {
+                return Err(invalid_argument(
+                    "disable_ec2_metadata is not valid for unsigned S3 authentication",
+                ));
+            }
+            reject_static_credentials(&input)?;
+            reject_role_fields(&input)?;
+            ParsedS3Auth::Unsigned
+        }
+        S3_AUTH_ASSUME_ROLE => {
+            // SAFETY: role ARN is required in assume-role mode and copied now.
+            let role_arn = unsafe { required_nonempty_text(input.role_arn, "S3 role_arn")? };
+            // SAFETY: optional role values borrow only for this call and are copied now.
+            let external_id = unsafe {
+                optional_nonempty_text(
+                    input.external_id,
+                    input.present_bits,
+                    S3_EXTERNAL_ID_PRESENT,
+                    "S3 external_id",
+                )?
+            };
+            // SAFETY: same as above.
+            let role_session_name = unsafe {
+                optional_nonempty_text(
+                    input.role_session_name,
+                    input.present_bits,
+                    S3_ROLE_SESSION_NAME_PRESENT,
+                    "S3 role_session_name",
+                )?
+            };
+            let duration_seconds = if input.present_bits & S3_ASSUME_ROLE_DURATION_PRESENT != 0 {
+                if input.assume_role_duration_seconds == 0 {
+                    return Err(invalid_argument(
+                        "S3 assume-role duration_seconds must be positive",
+                    ));
+                }
+                Some(input.assume_role_duration_seconds)
+            } else {
+                if input.assume_role_duration_seconds != 0 {
+                    return abi_mismatch();
+                }
+                None
+            };
+            let source = match input.source_kind {
+                S3_SOURCE_DEFAULT_CHAIN => {
+                    reject_static_credentials(&input)?;
+                    ParsedS3CredentialSource::DefaultChain {
+                        disable_ec2_metadata,
+                    }
+                }
+                S3_SOURCE_STATIC => {
+                    if disable_ec2_metadata {
+                        return Err(invalid_argument(
+                            "disable_ec2_metadata is only valid for a default credential chain",
+                        ));
+                    }
+                    // SAFETY: a static assume-role source requires/copies both
+                    // keys and permits the optional session token.
+                    unsafe { parse_static_credentials(&input)? }
+                }
+                _ => {
+                    return Err(invalid_argument(
+                        "unsupported S3 assume-role credential source kind",
+                    ));
+                }
+            };
+            ParsedS3Auth::AssumeRole {
+                role_arn,
+                source,
+                external_id,
+                role_session_name,
+                duration_seconds,
+            }
+        }
+        _ => return Err(invalid_argument("unsupported S3 authentication kind")),
+    };
+
+    Ok(ParsedS3Options {
+        bucket,
+        region,
+        root,
+        endpoint,
+        virtual_host_style: input.flags & S3_VIRTUAL_HOST_STYLE != 0,
+        auth,
     })
 }
 
@@ -1663,6 +1970,120 @@ unsafe fn read_config(config: *const KvV1, config_len: u64) -> CallResult<Vec<(S
     Ok(output)
 }
 
+fn operator_handles(
+    async_operator: opendal::Operator,
+) -> CallResult<(Box<OperatorV1>, Box<OperatorInfoV1>)> {
+    let operator =
+        opendal::blocking::Operator::new(async_operator.clone()).map_err(construction_error)?;
+    let info = operator.info();
+    let scheme = info.scheme().to_owned();
+    let root = info.root();
+    let name = info.name();
+    for value in [&scheme, &root, &name] {
+        if u64::try_from(value.len()).map_or(true, |len| len > MAX_OUTPUT_BYTES) {
+            return Err(buffer_too_large(
+                "operator information exceeds the binding output limit",
+            ));
+        }
+    }
+    let info = OperatorInfoV1 {
+        scheme,
+        root,
+        name,
+        capability: capability_view(info.capability()),
+    };
+    Ok((
+        Box::new(OperatorV1 {
+            async_inner: async_operator,
+            inner: operator,
+        }),
+        Box::new(info),
+    ))
+}
+
+#[cfg(feature = "profile-standard")]
+fn configure_s3_source(
+    mut builder: opendal::services::S3,
+    source: ParsedS3CredentialSource,
+) -> opendal::services::S3 {
+    match source {
+        ParsedS3CredentialSource::DefaultChain {
+            disable_ec2_metadata,
+        } => {
+            if disable_ec2_metadata {
+                builder = builder.disable_ec2_metadata();
+            }
+            builder
+        }
+        ParsedS3CredentialSource::Static {
+            access_key_id,
+            secret_access_key,
+            session_token,
+        } => {
+            builder = builder
+                .access_key_id(&access_key_id)
+                .secret_access_key(&secret_access_key)
+                .disable_config_load()
+                .disable_ec2_metadata();
+            if let Some(session_token) = session_token {
+                builder = builder.session_token(&session_token);
+            }
+            builder
+        }
+    }
+}
+
+#[cfg(feature = "profile-standard")]
+fn build_s3_operator(options: ParsedS3Options) -> CallResult<opendal::Operator> {
+    let ParsedS3Options {
+        bucket,
+        region,
+        root,
+        endpoint,
+        virtual_host_style,
+        auth,
+    } = options;
+    let mut builder = opendal::services::S3::default()
+        .bucket(&bucket)
+        .region(&region);
+    if let Some(root) = root {
+        builder = builder.root(&root);
+    }
+    if let Some(endpoint) = endpoint {
+        builder = builder.endpoint(&endpoint);
+    }
+    if virtual_host_style {
+        builder = builder.enable_virtual_host_style();
+    }
+    builder = match auth {
+        ParsedS3Auth::Credentials(source) => configure_s3_source(builder, source),
+        ParsedS3Auth::Unsigned => builder
+            .skip_signature()
+            .disable_config_load()
+            .disable_ec2_metadata(),
+        ParsedS3Auth::AssumeRole {
+            role_arn,
+            source,
+            external_id,
+            role_session_name,
+            duration_seconds,
+        } => {
+            let mut builder = configure_s3_source(builder, source).role_arn(&role_arn);
+            if let Some(external_id) = external_id {
+                builder = builder.external_id(&external_id);
+            }
+            if let Some(role_session_name) = role_session_name {
+                builder = builder.role_session_name(&role_session_name);
+            }
+            if let Some(duration_seconds) = duration_seconds {
+                builder = builder.assume_role_duration_seconds(duration_seconds);
+            }
+            builder
+        }
+    };
+    opendal::Operator::new(builder).map_err(construction_error)
+}
+
 unsafe extern "C" fn operator_new(
     scheme: *const BytesViewV1,
     config: *const KvV1,
@@ -1690,32 +2111,7 @@ unsafe extern "C" fn operator_new(
             let _guard = runtime.enter();
             let async_operator =
                 opendal::Operator::via_iter(&scheme, config).map_err(construction_error)?;
-            let operator = opendal::blocking::Operator::new(async_operator.clone())
-                .map_err(construction_error)?;
-            let info = operator.info();
-            let scheme = info.scheme().to_owned();
-            let root = info.root();
-            let name = info.name();
-            for value in [&scheme, &root, &name] {
-                if u64::try_from(value.len()).map_or(true, |len| len > MAX_OUTPUT_BYTES) {
-                    return Err(buffer_too_large(
-                        "operator information exceeds the binding output limit",
-                    ));
-                }
-            }
-            let info = OperatorInfoV1 {
-                scheme,
-                root,
-                name,
-                capability: capability_view(info.capability()),
-            };
-            Ok((
-                Box::new(OperatorV1 {
-                    async_inner: async_operator,
-                    inner: operator,
-                }),
-                Box::new(info),
-            ))
+            operator_handles(async_operator)
         })();
         match result {
             Ok((operator, info)) => {
@@ -1725,6 +2121,46 @@ unsafe extern "C" fn operator_new(
                 unsafe {
                     out_operator.write(operator);
                     out_info.write(info);
+                }
+                STATUS_OK
+            }
+            Err(failure) => unsafe { finish_failure(failure, out_error) },
+        }
+    })
+}
+
+#[cfg(feature = "profile-standard")]
+unsafe extern "C" fn operator_s3(
+    options: *const S3OptionsV1,
+    out_operator: *mut *mut OperatorV1,
+    out_info: *mut *mut OperatorInfoV1,
+    out_error: *mut *mut ErrorV1,
+) -> Status {
+    catch_status(|| {
+        // SAFETY: required/optional outputs are validated and cleared before inputs.
+        let outputs = [
+            unsafe { clear_required_output(out_operator, ptr::null_mut()) },
+            unsafe { clear_required_output(out_info, ptr::null_mut()) },
+            unsafe { clear_error_output(out_error) },
+        ];
+        if let Err(failure) = combine_output_validation(outputs) {
+            return unsafe { finish_failure(failure, out_error) };
+        }
+        let result = (|| -> CallResult<(Box<OperatorV1>, Box<OperatorInfoV1>)> {
+            // SAFETY: the required options carrier and every selected nested
+            // view are validated and copied during parsing.
+            let options = unsafe { parse_s3_options(options)? };
+            let runtime = runtime()?;
+            let _guard = runtime.enter();
+            let async_operator = build_s3_operator(options)?;
+            operator_handles(async_operator)
+        })();
+        match result {
+            Ok((operator, info)) => {
+                // SAFETY: both outputs were validated and remain exclusively writable.
+                unsafe {
+                    out_operator.write(Box::into_raw(operator));
+                    out_info.write(Box::into_raw(info));
                 }
                 STATUS_OK
             }
@@ -2819,7 +3255,8 @@ fn stage_api() -> Option<ApiV1> {
             | FEATURE_RANDOM_READER
             | FEATURE_CHUNKED_WRITER
             | FEATURE_READ_STREAM
-            | FEATURE_WRITER_ABORT,
+            | FEATURE_WRITER_ABORT
+            | PROFILE_FEATURE_BITS,
         max_output_bytes: MAX_OUTPUT_BYTES,
         library_info: Some(library_info),
         error_view: Some(error_view),
@@ -2862,6 +3299,10 @@ fn stage_api() -> Option<ApiV1> {
         read_stream_close: Some(read_stream_close),
         read_stream_free: Some(read_stream_free),
         writer_abort: Some(writer_abort),
+        #[cfg(feature = "profile-standard")]
+        operator_s3: Some(operator_s3),
+        #[cfg(not(feature = "profile-standard"))]
+        operator_s3: None,
     })
 }
 
@@ -2936,6 +3377,7 @@ unsafe fn install_api(base: *mut u8, caller_size: usize, staged: &ApiV1) {
     install_field!(read_stream_close);
     install_field!(read_stream_free);
     install_field!(writer_abort);
+    install_field!(operator_s3);
 }
 
 /// Negotiate the stable v1 function table.
@@ -3005,6 +3447,70 @@ mod tests {
             ptr::addr_of_mut!((*pointer).requested_major).write(ABI_MAJOR);
             assert_eq!(opendal_mbt_get_api(pointer.cast()), STATUS_OK);
             api.assume_init()
+        }
+    }
+
+    #[cfg(feature = "profile-standard")]
+    fn s3_options() -> S3OptionsV1 {
+        S3OptionsV1 {
+            struct_size: size_of::<S3OptionsV1>() as u32,
+            struct_version: STRUCT_VERSION,
+            present_bits: S3_ENDPOINT_PRESENT,
+            flags: 0,
+            auth_kind: S3_AUTH_UNSIGNED,
+            source_kind: S3_SOURCE_DEFAULT_CHAIN,
+            bucket: bytes(b"moonbit-binding-test"),
+            region: bytes(b"us-east-1"),
+            root: bytes(b""),
+            endpoint: bytes(b"http://127.0.0.1:9000"),
+            access_key_id: bytes(b""),
+            secret_access_key: bytes(b""),
+            session_token: bytes(b""),
+            role_arn: bytes(b""),
+            external_id: bytes(b""),
+            role_session_name: bytes(b""),
+            assume_role_duration_seconds: 0,
+            reserved0: 0,
+        }
+    }
+
+    #[cfg(feature = "profile-standard")]
+    fn assert_s3_constructs(api: &ApiV1, options: &S3OptionsV1) {
+        let mut operator = NonNull::<OperatorV1>::dangling().as_ptr();
+        let mut info = NonNull::<OperatorInfoV1>::dangling().as_ptr();
+        let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the complete carrier, all nested views, and output slots stay live.
+        let status = unsafe {
+            api.operator_s3.expect("S3 constructor is installed")(
+                options,
+                &mut operator,
+                &mut info,
+                &mut error,
+            )
+        };
+        assert_eq!(status, STATUS_OK);
+        assert!(!operator.is_null());
+        assert!(!info.is_null());
+        assert!(error.is_null());
+
+        let mut view = OperatorInfoViewV1 {
+            struct_size: size_of::<OperatorInfoViewV1>() as u32,
+            struct_version: STRUCT_VERSION,
+            reserved0: 0,
+            scheme: bytes(b""),
+            root: bytes(b""),
+            name: bytes(b""),
+            capability: CapabilityV1::default(),
+        };
+        // SAFETY: both returned handles are owned and the view is complete storage.
+        unsafe {
+            assert_eq!(
+                api.operator_info_view.expect("BASE info view is installed")(info, &mut view),
+                STATUS_OK,
+            );
+            assert_eq!(copy_view(view.scheme), b"s3");
+            api.operator_info_free.expect("BASE info free is installed")(info);
+            api.operator_free.expect("BASE operator free is installed")(operator);
         }
     }
 
@@ -3667,7 +4173,8 @@ mod tests {
                 | FEATURE_RANDOM_READER
                 | FEATURE_CHUNKED_WRITER
                 | FEATURE_READ_STREAM
-                | FEATURE_WRITER_ABORT,
+                | FEATURE_WRITER_ABORT
+                | PROFILE_FEATURE_BITS,
         );
         assert!(api.library_info.is_some());
         assert!(api.operator_new.is_some());
@@ -3689,6 +4196,138 @@ mod tests {
         assert!(api.read_stream_close.is_some());
         assert!(api.read_stream_free.is_some());
         assert!(api.writer_abort.is_some());
+        #[cfg(feature = "profile-standard")]
+        assert!(api.operator_s3.is_some());
+        #[cfg(not(feature = "profile-standard"))]
+        assert!(api.operator_s3.is_none());
+    }
+
+    #[cfg(feature = "profile-standard")]
+    #[test]
+    fn s3_authentication_modes_construct_without_io() {
+        let api = api();
+
+        let mut default_chain = s3_options();
+        default_chain.auth_kind = S3_AUTH_DEFAULT_CHAIN;
+        default_chain.flags = S3_DISABLE_EC2_METADATA;
+        assert_s3_constructs(&api, &default_chain);
+
+        let mut static_credentials = s3_options();
+        static_credentials.auth_kind = S3_AUTH_STATIC;
+        static_credentials.source_kind = S3_SOURCE_STATIC;
+        static_credentials.present_bits |= S3_SESSION_TOKEN_PRESENT;
+        static_credentials.access_key_id = bytes(b"test-access-key");
+        static_credentials.secret_access_key = bytes(b"test-secret-key");
+        static_credentials.session_token = bytes(b"test-session-token");
+        assert_s3_constructs(&api, &static_credentials);
+
+        assert_s3_constructs(&api, &s3_options());
+
+        let mut assume_role = s3_options();
+        assume_role.auth_kind = S3_AUTH_ASSUME_ROLE;
+        assume_role.source_kind = S3_SOURCE_STATIC;
+        assume_role.present_bits |= S3_SESSION_TOKEN_PRESENT
+            | S3_EXTERNAL_ID_PRESENT
+            | S3_ROLE_SESSION_NAME_PRESENT
+            | S3_ASSUME_ROLE_DURATION_PRESENT;
+        assume_role.access_key_id = bytes(b"source-access-key");
+        assume_role.secret_access_key = bytes(b"source-secret-key");
+        assume_role.session_token = bytes(b"source-session-token");
+        assume_role.role_arn = bytes(b"arn:aws:iam::123456789012:role/moonbit-test");
+        assume_role.external_id = bytes(b"moonbit-external");
+        assume_role.role_session_name = bytes(b"moonbit-session");
+        assume_role.assume_role_duration_seconds = 900;
+        assert_s3_constructs(&api, &assume_role);
+    }
+
+    #[cfg(feature = "profile-standard")]
+    #[test]
+    fn s3_rejects_unknown_partial_conflicting_and_noncanonical_inputs() {
+        let api = api();
+        let constructor = api.operator_s3.expect("S3 constructor is installed");
+
+        let mut cases = Vec::new();
+        let mut unknown = s3_options();
+        unknown.flags = 1 << 63;
+        cases.push((unknown, STATUS_ABI_MISMATCH, None));
+
+        let mut partial_static = s3_options();
+        partial_static.auth_kind = S3_AUTH_STATIC;
+        partial_static.source_kind = S3_SOURCE_STATIC;
+        partial_static.access_key_id = bytes(b"only-one-half");
+        cases.push((partial_static, STATUS_ERROR, Some(ERROR_INVALID_ARGUMENT)));
+
+        let mut conflicting = s3_options();
+        conflicting.auth_kind = S3_AUTH_DEFAULT_CHAIN;
+        conflicting.source_kind = S3_SOURCE_STATIC;
+        cases.push((conflicting, STATUS_ERROR, Some(ERROR_INVALID_ARGUMENT)));
+
+        let mut noncanonical = s3_options();
+        noncanonical.root = bytes(b"hidden-without-presence-bit");
+        cases.push((noncanonical, STATUS_ABI_MISMATCH, None));
+
+        let mut empty_region = s3_options();
+        empty_region.region = bytes(b"");
+        cases.push((empty_region, STATUS_ERROR, Some(ERROR_INVALID_ARGUMENT)));
+
+        for (options, expected_status, expected_kind) in cases {
+            let mut operator = NonNull::<OperatorV1>::dangling().as_ptr();
+            let mut info = NonNull::<OperatorInfoV1>::dangling().as_ptr();
+            let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+            // SAFETY: carriers and output slots remain live for each call.
+            let status = unsafe { constructor(&options, &mut operator, &mut info, &mut error) };
+            assert_eq!(status, expected_status);
+            assert!(operator.is_null());
+            assert!(info.is_null());
+            match expected_kind {
+                Some(kind) => assert_eq!(take_error_kind(&api, error), kind),
+                None => assert!(error.is_null()),
+            }
+        }
+    }
+
+    #[cfg(feature = "profile-standard")]
+    #[test]
+    fn s3_virtual_host_dotted_bucket_redacts_construction_secrets() {
+        let api = api();
+        let secret = b"never-include-this-secret";
+        let mut options = s3_options();
+        options.bucket = bytes(b"dotted.bucket");
+        options.flags = S3_VIRTUAL_HOST_STYLE;
+        options.auth_kind = S3_AUTH_STATIC;
+        options.source_kind = S3_SOURCE_STATIC;
+        options.access_key_id = bytes(b"test-access-key");
+        options.secret_access_key = bytes(secret);
+
+        let mut operator = NonNull::<OperatorV1>::dangling().as_ptr();
+        let mut info = NonNull::<OperatorInfoV1>::dangling().as_ptr();
+        let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the complete carrier and all outputs remain live for the call.
+        let status = unsafe {
+            api.operator_s3.expect("S3 constructor is installed")(
+                &options,
+                &mut operator,
+                &mut info,
+                &mut error,
+            )
+        };
+        assert_eq!(status, STATUS_ERROR);
+        assert!(operator.is_null());
+        assert!(info.is_null());
+        assert!(!error.is_null());
+        // SAFETY: the error handle is owned until it is freed below.
+        let snapshot = unsafe { &*error };
+        assert_eq!(snapshot.kind, ERROR_CONFIG_INVALID);
+        assert_eq!(snapshot.message, "operator construction failed");
+        assert!(
+            !snapshot
+                .message
+                .as_bytes()
+                .windows(secret.len())
+                .any(|v| v == secret)
+        );
+        // SAFETY: this test owns the error handle exactly once.
+        unsafe { api.error_free.expect("BASE error free is installed")(error) };
     }
 
     #[test]
@@ -3774,6 +4413,7 @@ mod tests {
             read_stream_close,
             read_stream_free,
             writer_abort,
+            operator_s3,
         );
 
         for caller_size in API_PREFIX_SIZE..=size_of::<ApiV1>() + 16 {
