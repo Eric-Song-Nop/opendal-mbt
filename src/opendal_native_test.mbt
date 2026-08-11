@@ -92,6 +92,78 @@ test "native memory: read conditions cross the ABI" {
 }
 
 ///|
+test "native memory: bounded read stream preserves ranges and stable end" {
+  let operator = @opendal.Operator::new("memory")
+  operator.write("stream/value.bin", b"0123456789") |> ignore
+  let stream = operator.open_read_stream(
+    "stream/value.bin",
+    range=Range(offset=2UL, length=7UL),
+    chunk_size=3,
+  )
+  let collected : Array[Byte] = []
+  for ;; {
+    match stream.next() {
+      Some(chunk) => {
+        assert_true(chunk.length() <= 3)
+        for byte in chunk {
+          collected.push(byte)
+        }
+      }
+      None => break
+    }
+  }
+  assert_eq(Bytes::from_array(collected), b"2345678")
+  assert_eq(stream.next(), None)
+  assert_eq(stream.next(), None)
+  stream.close()
+}
+
+///|
+test "native memory: closing a read stream is idempotent and preserves context" {
+  let operator = @opendal.Operator::new("memory")
+  let path = "stream/closed.bin"
+  operator.write(path, b"content") |> ignore
+  let stream = operator.open_read_stream(path, chunk_size=2)
+  stream.close()
+  stream.close()
+  try stream.next() catch {
+    OpenDalError(info) => {
+      assert_true(info.kind is ResourceClosed)
+      assert_true(info.operation is Read)
+      assert_eq(info.path, Some(path))
+      assert_eq(info.destination_path, None)
+    }
+  } noraise {
+    _ => fail("expected next after close to raise")
+  }
+}
+
+///|
+test "native memory: read stream validates bounds and forwards conditions" {
+  let operator = @opendal.Operator::new("memory")
+  let path = "stream/options.bin"
+  operator.write(path, b"value") |> ignore
+  try operator.open_read_stream(path, chunk_size=0) catch {
+    OpenDalError(info) => {
+      assert_true(info.kind is InvalidArgument)
+      assert_true(info.operation is Read)
+      assert_eq(info.path, Some(path))
+    }
+  } noraise {
+    _ => fail("expected a zero chunk size to raise")
+  }
+  try operator.open_read_stream(path, version="not-a-version") catch {
+    OpenDalError(info) => {
+      assert_true(info.kind is Unsupported)
+      assert_true(info.operation is Read)
+      assert_eq(info.path, Some(path))
+    }
+  } noraise {
+    _ => fail("expected an unsupported read stream option to raise")
+  }
+}
+
+///|
 test "native memory: chunked writer commits slices and is terminal" {
   let operator = @opendal.Operator::new("memory")
   let writer = operator.open_writer(
