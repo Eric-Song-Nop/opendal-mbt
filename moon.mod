@@ -22,6 +22,8 @@ options(
     "integration",
     "moon.work",
     "/Makefile",
+    "scripts/package-native-artifact.py",
+    "scripts/test-package-native-artifact.py",
     "scripts/check-*",
     "skills-lock.json",
   ],

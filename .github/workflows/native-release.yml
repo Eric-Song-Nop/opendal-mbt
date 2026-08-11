@@ -1,0 +1,108 @@
+name: Native release artifacts
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/native-release.yml
+      - Cargo.lock
+      - Cargo.toml
+      - native/distribution-profile.json
+      - native/include/opendal_mbt.h
+      - native/rust/**
+      - rust-toolchain.toml
+      - scripts/package-native-artifact.py
+      - scripts/test-package-native-artifact.py
+  push:
+    tags:
+      - v*
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  artifact:
+    name: ${{ matrix.rust_target }} artifact
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            rust_target: aarch64-apple-darwin
+            macos_deployment_target: "11.0"
+          - os: ubuntu-22.04
+            rust_target: x86_64-unknown-linux-gnu
+            macos_deployment_target: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust toolchain
+        run: rustup show active-toolchain
+      - name: Test artifact packager
+        run: python3 scripts/test-package-native-artifact.py
+      - name: Build release static library
+        env:
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos_deployment_target }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p target/native-release
+          CARGO_TERM_COLOR=never cargo rustc \
+            -p opendal-mbt-native --locked --release \
+            -- --print native-static-libs 2>&1 | \
+            tee target/native-release/native-static-libs.log
+          grep -q 'native-static-libs:' \
+            target/native-release/native-static-libs.log
+          actual_target=$(rustc -vV | sed -n 's/^host: //p')
+          test "$actual_target" = '${{ matrix.rust_target }}'
+      - name: Package release artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/package-native-artifact.py \
+            --repo-root . \
+            --library target/release/libopendal_mbt_native.a \
+            --native-static-libs-log \
+              target/native-release/native-static-libs.log \
+            --rust-target '${{ matrix.rust_target }}' \
+            --output-dir target/native-dist | \
+            tee target/native-release/package-result.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.rust_target }}
+          path: target/native-dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish native release assets
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: artifact
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
+          path: target/native-dist
+          merge-multiple: true
+      - name: Verify release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' moon.mod)
+          test "$GITHUB_REF_NAME" = "v$version"
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" \
+            target/native-dist/*.tar.gz \
+            target/native-dist/*.tar.gz.sha256 \
+            target/native-dist/*.manifest.json \
+            --generate-notes \
+            --title "opendal-mbt $GITHUB_REF_NAME"
