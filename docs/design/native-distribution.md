@@ -151,8 +151,11 @@ system libraries to the link configuration for `Eric-Song-Nop/opendal`.
 
 Repository development still builds the Rust archive from source. Ordinary
 source builds use `profile-standard`; an explicit local artifact rebuild uses
-`make moon-test NATIVE_SERVICE_PROFILE=local`. The Makefile selects the
-corresponding Cargo feature explicitly and passes both the exact locally built
+`make native NATIVE_SERVICE_PROFILE=local`, and its native contract suite uses
+`make rust-test NATIVE_SERVICE_PROFILE=local`. The complete Phase 5 Moon test
+suite runs against `profile-standard` because it intentionally exercises
+standard-only S3 and operational-layer symbols. The Makefile selects the
+requested Cargo feature explicitly and passes both the exact locally built
 archive and its source profile to the configuration script. The script keeps
 the published artifact selection untouched while adding any host frameworks
 declared by that source profile, so Moon tests exercise uncommitted Rust
