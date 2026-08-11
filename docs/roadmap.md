@@ -289,25 +289,25 @@ A working API shape, to be finalized by compiler-checked acceptance examples,
 is:
 
 ```moonbit nocheck
-let reader = operator.open_sequential_reader(
+let stream = operator.open_read_stream(
   "large.bin",
   range=ByteRange::Full,
-  chunk_size=1024UL * 1024UL,
+  chunk_size=1024 * 1024,
 )
-while reader.next() is Some(chunk) {
+while stream.next() is Some(chunk) {
   consume(chunk)
 }
-reader.close()
+stream.close()
 
 let writer = operator.open_writer("output.bin")
 writer.write(first_chunk)
 writer.abort()
 ```
 
-The design must freeze these sequential-reader rules before ABI work starts:
+The design freezes these read-stream rules before ABI work starts:
 
-- the final type and method names;
-- whether `chunk_size` is fixed at open or supplied to each `next` call;
+- the names `ReadStream` and `Operator::open_read_stream`;
+- `chunk_size : Int`, fixed at open with a 1 MiB default;
 - valid minimum and maximum chunk sizes and their relationship to
   `max_output_bytes`, MoonBit array limits, `usize`, and `isize`;
 - preservation of `Full`, `From`, `Range`, and `Suffix`, plus `version`,
@@ -741,7 +741,7 @@ A feature is not complete when the Rust method exists. Every slice includes:
 
 | Decision | Blocks | Required outcome |
 | --- | --- | --- |
-| Sequential-reader name, chunk-size API, and terminal error behavior | 5A | Compiler-checked public contract |
+| Read-stream name, chunk-size API, and terminal error behavior | 5A | Resolved in `docs/design/public-api-semantics.md` |
 | Hard native allocation bound for whole and sequential reads | 5A | No whole-object materialization before the limit |
 | Repeated abort and finalizer behavior | 5A | Explicit Writer state machine |
 | ABI v1 minor-extension layout and feature grouping | 5A | Old caller compatibility test |

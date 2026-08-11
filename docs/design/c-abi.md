@@ -1,6 +1,6 @@
 # OpenDAL MoonBit C ABI
 
-Status: ABI v1.0 implemented for all five feature groups
+Status: ABI v1.0 implemented; v1.1 local-lifecycle extension frozen
 
 The executable header is `native/include/opendal_mbt.h`. It is the canonical
 source for exact field order, numeric constants, and function signatures. This
@@ -25,9 +25,10 @@ reference-counted value. This is important because `moonbit.h` explicitly
 describes itself as an unstable runtime API; it must not become the durable
 Rust ABI.
 
-ABI v1 covers the synchronous public contract. It intentionally excludes
-callbacks, async completion, layers, presigning, batch operations, and raw
-service-specific handles.
+ABI v1 covers the synchronous public contract, including the v1.1 bounded read
+stream and Writer abort additions. It intentionally excludes callbacks, async
+completion, layers, presigning, batch operations, and raw service-specific
+handles.
 
 ## Core choices
 
@@ -110,19 +111,65 @@ general pointer contract.
 Feature groups are exact: `BASE` covers bootstrap diagnostics, immutable
 snapshot helpers, and Operator construction/destruction; `WHOLE_OBJECT` covers
 check/exists/stat/read/write/create-dir/delete/copy/rename; `LISTING` covers
-Lister; `RANDOM_READER` covers Reader; and `CHUNKED_WRITER` covers Writer. A
-set feature bit guarantees that every pointer in that group is non-NULL. Every
-non-`BASE` group depends on `BASE`: a library must never advertise one without
-also advertising `BASE`, and a caller requiring any operation group must
-require and validate both bits. This guarantees construction plus the common
-buffer, snapshot, error, and destruction functions needed to consume that
-group's results.
+Lister; `RANDOM_READER` covers Reader; `CHUNKED_WRITER` covers the v1.0 Writer
+open/write/finish/free contract; `READ_STREAM` covers the v1.1 bounded stream;
+and `WRITER_ABORT` covers only the appended abort operation. A set feature bit
+guarantees that every pointer in that group is non-NULL. Every non-`BASE` group
+depends on `BASE`: a library must never advertise one without also advertising
+`BASE`, and a caller requiring any operation group must require and validate
+both bits. This guarantees construction plus the common buffer, snapshot,
+error, and destruction functions needed to consume that group's results.
 
 The table ranges are normative: `BASE` is `library_info` through
 `operator_free`; `WHOLE_OBJECT` is `operator_check` through `operator_rename`;
 `LISTING` is `operator_lister` through `lister_free`; `RANDOM_READER` is
-`operator_reader` through `reader_free`; and `CHUNKED_WRITER` is
-`operator_writer` through `writer_free`.
+`operator_reader` through `reader_free`; `CHUNKED_WRITER` is
+`operator_writer` through `writer_free`; `READ_STREAM` is the contiguous v1.1
+range `operator_read_stream` through `read_stream_free`; and `WRITER_ABORT` is
+the appended `writer_abort` pointer. `WRITER_ABORT` depends on
+`CHUNKED_WRITER` as well as `BASE`.
+
+### ABI v1.1 local-lifecycle extension
+
+ABI v1.1 appends, in order:
+
+1. a new `opendal_mbt_read_stream_options_v1_t` input with a complete
+   `opendal_mbt_byte_range_v1_t`, `uint64_t chunk_size`, and the same optional
+   version/condition views as read;
+2. an opaque `opendal_mbt_read_stream_v1_t` handle;
+3. `operator_read_stream`, `read_stream_next`, `read_stream_close`, and
+   `read_stream_free`;
+4. `writer_abort`.
+
+`operator_read_stream` validates `chunk_size` as nonzero, representable as
+Rust `usize`, no larger than `MAX_OUTPUT_BYTES`, and no larger than the
+caller's negotiated output ceiling. The C stub passes the MoonBit `Int` only
+after checking that it is positive and widening it to `uint64_t`. The Rust
+reader is constructed with exactly that chunk size, concurrency one, and
+prefetch zero.
+
+`read_stream_next` returns the existing transport statuses: `OK` with exactly
+one non-NULL buffer, `END` with a NULL buffer and no error, or `ERROR` with a
+NULL buffer and an owned error. `PANIC` also leaves both outputs NULL. Every OK
+buffer is no larger than the stream's fixed chunk size and the per-call
+`max_output_len`; a violation is treated as a terminal binding failure rather
+than copied across the boundary.
+
+The stream state is `Open(BufferIterator)`, `End`, `Failed`, or `Closed`.
+`next` serializes one upstream iterator step, treats an upstream error as
+terminal, and returns stable `END` after EOF. `read_stream_close` is a NULL-safe
+idempotent transition to `Closed`; `read_stream_free` only drops state. Neither
+operation performs MoonBit callbacks or commits remote effects.
+
+The Writer implementation changes internally from OpenDAL's blocking Writer to
+its async Writer so v1.1 can call `abort`. This does not reinterpret any v1.0
+function pointer or behavior. The Writer state adds `Busy`, `Finished`, and
+`Aborted` terminal distinctions. A call moves the inner Writer out while
+holding the mutex, marks the handle Busy/terminal, releases the mutex, then
+drives async work on the process runtime. This prevents a mutex guard from
+being held across `Runtime::block_on`. A successful repeated abort from
+`Aborted` returns `OK`; every other terminal operation returns a binding-owned
+`ResourceClosed` error. Free drops the Writer without calling close or abort.
 
 Version meaning:
 
@@ -509,8 +556,8 @@ can deterministically report their state; the paired free still occurs once.
 - Reader range reads on one handle are concurrent. Close linearizes through an
   internal state lock: admitted reads finish before close, later reads fail as
   closed.
-- Lister and Writer calls on one handle are internally serialized. Racing calls
-  are memory-safe, but their acquisition order is unspecified.
+- Lister, ReadStream, and Writer calls on one handle are internally serialized.
+  Racing calls are memory-safe, but their acquisition order is unspecified.
 - No handle has thread affinity. A finalizer may run on a different thread.
 - Free must not race any call on the same handle.
 
@@ -560,7 +607,7 @@ functions clear outputs, validate ABI inputs, and run implementation work
 inside `catch_unwind(AssertUnwindSafe(...))`; bootstrap uses the staged-table
 rule above. No unwind crosses C. Stateful panic transitions are Writer ->
 Failed, Lister -> Exhausted, and Reader -> Closed. Destructors also contain
-panics; they never call Writer close or report Writer completion.
+panics; they never call Writer close/abort or report Writer completion.
 
 The final linker requirements of a Rust `staticlib` are recorded from
 `rustc --print native-static-libs` rather than hard-coded from one machine.
@@ -587,8 +634,8 @@ The package-local C stub is intentionally mechanical:
   operation and path context at the safe wrapper call site.
 
 Private MoonBit wrappers retain cached OperatorInfo and the original path for
-Reader/Lister/Writer. They can be private structs while their public types stay
-opaque.
+Reader/ReadStream/Lister/Writer. They can be private structs while their public
+types stay opaque.
 
 ## Validation gates
 
