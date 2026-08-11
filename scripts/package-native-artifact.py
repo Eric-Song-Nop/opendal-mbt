@@ -270,6 +270,28 @@ def write_archive(
             raise
 
 
+def verify_pinned_artifact(table_file: Path, result: dict[str, Any]) -> None:
+    table = read_json(table_file)
+    if table.get("schema_version") != 1 or not isinstance(table.get("artifacts"), dict):
+        raise ArtifactError("unsupported pinned artifact table")
+    manifest = read_json(Path(result["manifest"]))
+    host_key = manifest.get("host_key")
+    pinned = table["artifacts"].get(host_key)
+    if not isinstance(pinned, dict):
+        raise ArtifactError(f"no pinned artifact exists for {host_key}")
+    for key, value in manifest.items():
+        if pinned.get(key) != value:
+            raise ArtifactError(f"pinned artifact field {key} does not match the build")
+    for key in ("archive_name", "archive_size", "archive_sha256"):
+        if pinned.get(key) != result[key]:
+            raise ArtifactError(f"pinned artifact field {key} does not match the build")
+    expected_url_suffix = f"/{result['archive_name']}"
+    if not isinstance(pinned.get("url"), str) or not pinned["url"].endswith(
+        expected_url_suffix
+    ):
+        raise ArtifactError("pinned artifact URL does not match the archive name")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", type=Path, default=Path.cwd())
@@ -277,6 +299,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--native-static-libs-log", type=Path, required=True)
     parser.add_argument("--rust-target", required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--verify-pinned", type=Path)
     return parser.parse_args()
 
 
@@ -313,7 +336,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
 def main() -> int:
     try:
-        result = run(parse_args())
+        args = parse_args()
+        result = run(args)
+        if args.verify_pinned is not None:
+            verify_pinned_artifact(args.verify_pinned.resolve(), result)
     except (ArtifactError, OSError) as error:
         print(f"package-native-artifact: {error}", file=sys.stderr)
         return 1

@@ -18,12 +18,14 @@ description = "MoonBit bindings for Apache OpenDAL"
 // publishing it as part of the library module.
 
 options(
+  "--moonbit-unstable-prebuild": "build.js",
   exclude: [
     "integration",
     "moon.work",
     "/Makefile",
     "scripts/package-native-artifact.py",
     "scripts/test-package-native-artifact.py",
+    "scripts/test-native-resolver.js",
     "scripts/check-*",
     "skills-lock.json",
   ],

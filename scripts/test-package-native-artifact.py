@@ -74,9 +74,13 @@ opendal = { version = "=0.58.1", default-features = false, features = ["blocking
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def invoke(self, output: Path, target: str = "aarch64-apple-darwin") -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            [
+    def invoke(
+        self,
+        output: Path,
+        target: str = "aarch64-apple-darwin",
+        pinned: Path | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        command = [
                 sys.executable,
                 str(SCRIPT),
                 "--repo-root",
@@ -89,7 +93,11 @@ opendal = { version = "=0.58.1", default-features = false, features = ["blocking
                 target,
                 "--output-dir",
                 str(output),
-            ],
+            ]
+        if pinned is not None:
+            command.extend(["--verify-pinned", str(pinned)])
+        return subprocess.run(
+            command,
             check=False,
             text=True,
             capture_output=True,
@@ -143,6 +151,45 @@ opendal = { version = "=0.58.1", default-features = false, features = ["blocking
         result = self.invoke(self.root / "output")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("did not report native-static-libs", result.stderr)
+
+    def test_published_digest_must_match_reproducible_build(self) -> None:
+        first = self.invoke(self.root / "candidate")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        result = json.loads(first.stdout)
+        manifest = json.loads(Path(result["manifest"]).read_text(encoding="utf-8"))
+        pinned_record = {
+            **manifest,
+            "archive_name": result["archive_name"],
+            "archive_size": result["archive_size"],
+            "archive_sha256": result["archive_sha256"],
+            "url": f"https://example.invalid/{result['archive_name']}",
+        }
+        table = self.root / "artifacts.json"
+        table.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "artifacts": {"darwin-arm64": pinned_record},
+                }
+            ),
+            encoding="utf-8",
+        )
+        verified = self.invoke(self.root / "verified", pinned=table)
+        self.assertEqual(verified.returncode, 0, verified.stderr)
+
+        pinned_record["archive_sha256"] = "0" * 64
+        table.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "artifacts": {"darwin-arm64": pinned_record},
+                }
+            ),
+            encoding="utf-8",
+        )
+        rejected = self.invoke(self.root / "rejected", pinned=table)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("archive_sha256 does not match", rejected.stderr)
 
 
 if __name__ == "__main__":
