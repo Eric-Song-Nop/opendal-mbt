@@ -4509,6 +4509,78 @@ mod tests {
 
     #[cfg(feature = "profile-standard")]
     #[test]
+    fn unsigned_s3_presign_roundtrips_without_storage_io() {
+        let api = api();
+        let options = s3_options();
+        let mut operator = ptr::null_mut();
+        let mut info = ptr::null_mut();
+        let mut error = ptr::null_mut();
+        // SAFETY: the complete carrier and all output slots stay live.
+        assert_eq!(
+            unsafe {
+                api.operator_s3.expect("S3 constructor is installed")(
+                    &options,
+                    &mut operator,
+                    &mut info,
+                    &mut error,
+                )
+            },
+            STATUS_OK,
+        );
+        assert!(!operator.is_null());
+        assert!(!info.is_null());
+        assert!(error.is_null());
+
+        let path = bytes(b"folder/object.txt");
+        let mut request = ptr::null_mut();
+        // SAFETY: the operator, path, and outputs remain live for the call.
+        assert_eq!(
+            unsafe {
+                api.operator_presign_read
+                    .expect("PRESIGN read is installed")(
+                    operator,
+                    &path,
+                    ptr::null(),
+                    60,
+                    &mut request,
+                    &mut error,
+                )
+            },
+            STATUS_OK,
+        );
+        assert!(!request.is_null());
+        assert!(error.is_null());
+        let mut view = PresignedRequestViewV1 {
+            struct_size: size_of::<PresignedRequestViewV1>() as u32,
+            struct_version: STRUCT_VERSION,
+            reserved0: 0,
+            method: bytes(b""),
+            uri: bytes(b""),
+            header_count: 0,
+        };
+        // SAFETY: request remains live while borrowed views are copied.
+        assert_eq!(
+            unsafe {
+                api.presigned_request_view
+                    .expect("PRESIGN request view is installed")(request, &mut view)
+            },
+            STATUS_OK,
+        );
+        assert_eq!(copy_view(view.method), b"GET");
+        let uri = String::from_utf8(copy_view(view.uri)).expect("presigned URI is UTF-8");
+        assert!(uri.contains("moonbit-binding-test"));
+        assert!(uri.contains("folder/object.txt"));
+        // SAFETY: this test owns all returned handles exactly once.
+        unsafe {
+            api.presigned_request_free
+                .expect("PRESIGN free is installed")(request);
+            api.operator_info_free.expect("BASE info free is installed")(info);
+            api.operator_free.expect("BASE operator free is installed")(operator);
+        }
+    }
+
+    #[cfg(feature = "profile-standard")]
+    #[test]
     fn s3_rejects_unknown_partial_conflicting_and_noncanonical_inputs() {
         let api = api();
         let constructor = api.operator_s3.expect("S3 constructor is installed");
