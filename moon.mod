@@ -1,4 +1,4 @@
-// MoonBit module metadata for the public contract and future native binding.
+// MoonBit module metadata for the public facade and native binding.
 
 name = "Eric-Song-Nop/opendal"
 

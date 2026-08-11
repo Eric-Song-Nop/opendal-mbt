@@ -34,7 +34,7 @@ variants:
 
 | Profile | OpenDAL services | Additional OpenDAL features |
 | --- | --- | --- |
-| `standard` | `memory`, `fs`, `s3` | `services-s3`, `http-transport-reqwest`, `http-transport-reqwest-rustls`, `executors-tokio` |
+| `standard` | `memory`, `fs`, `s3` | `services-s3`, `http-transport-reqwest`, `http-transport-reqwest-rustls`, `executors-tokio`, `layers-retry`, `layers-timeout`, `layers-concurrent-limit` |
 
 `standard` includes the local services, so the root Moon facade needs exactly
 one native archive on each host. There is no public profile selector and no
@@ -51,11 +51,13 @@ standard archive.
 The Rust crate mirrors the distribution boundary with `profile-local` and
 `profile-standard` Cargo features. The latter is the source-build default and
 extends the former. OpenDAL facade defaults remain disabled: retry, timeout,
-logging, and unrelated layers are not pulled in implicitly. Both
+and concurrency support are compiled explicitly for the public immutable layer
+constructors, but no layer is installed implicitly; logging and unrelated
+layers remain absent. Both
 `http-transport-reqwest` and its rustls backend are explicit because OpenDAL
 0.58.1 gates the HTTP installation performed by `install_default()` on the
-umbrella feature. The later standard-profile runtime slice must call
-`opendal::install_default()`; calling only `init_default_registry()` does not
+umbrella feature. Standard-profile runtime initialization calls
+`opendal::install_default()`; calling only `init_default_registry()` would not
 install the S3 HTTP transport.
 
 ## Supported host matrix
