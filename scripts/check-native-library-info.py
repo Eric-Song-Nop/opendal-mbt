@@ -100,7 +100,7 @@ def run_probe(
                 + compile_result.stderr
             )
         probe_result = subprocess.run(
-            [str(executable), expected_version],
+            [str(executable), expected_version, expected_profile],
             cwd=repo_root,
             check=False,
             text=True,

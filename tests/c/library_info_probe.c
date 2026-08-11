@@ -29,8 +29,10 @@ int main(int argc, char **argv) {
   opendal_mbt_library_info_view_v1_t info;
   opendal_mbt_status_t status;
 
-  if (argc != 2) {
-    (void)fputs("usage: library-info-probe <binding-version>\n", stderr);
+  if (argc != 3) {
+    (void)fputs(
+        "usage: library-info-probe <binding-version> <service-profile>\n",
+        stderr);
     return EXIT_FAILURE;
   }
   memset(&api, 0, sizeof(api));
@@ -58,6 +60,14 @@ int main(int argc, char **argv) {
     (void)fputs(argv[1], stderr);
     (void)fputs(", got ", stderr);
     print_view(stderr, info.binding_version);
+    (void)fputc('\n', stderr);
+    return EXIT_FAILURE;
+  }
+  if (!view_equals(info.service_profile, argv[2])) {
+    (void)fputs("service profile mismatch: expected ", stderr);
+    (void)fputs(argv[2], stderr);
+    (void)fputs(", got ", stderr);
+    print_view(stderr, info.service_profile);
     (void)fputc('\n', stderr);
     return EXIT_FAILURE;
   }
