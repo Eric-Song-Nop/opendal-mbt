@@ -106,6 +106,30 @@ static TEST_WRITER_NATIVE_ABORTS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
 #[cfg(test)]
+const TEST_COPIER_NEXT_ERROR: u8 = 1;
+#[cfg(test)]
+const TEST_COPIER_NEXT_PANIC: u8 = 2;
+#[cfg(test)]
+const TEST_COPIER_FINISH_ERROR: u8 = 3;
+#[cfg(test)]
+const TEST_COPIER_FINISH_PANIC: u8 = 4;
+#[cfg(test)]
+const TEST_COPIER_ABORT_ERROR: u8 = 5;
+#[cfg(test)]
+const TEST_COPIER_ABORT_PANIC: u8 = 6;
+#[cfg(test)]
+static TEST_COPIER_CALL_TARGET: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+static TEST_COPIER_CALL_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+#[cfg(test)]
+static TEST_COPIER_NATIVE_FINISHES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+static TEST_COPIER_NATIVE_ABORTS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
 fn install_lister_next_test_mode(lister: *mut ListerV1, mode: u8) {
     use std::sync::atomic::Ordering;
 
@@ -203,6 +227,29 @@ fn take_writer_call_test_mode(writer: &WriterV1) -> u8 {
         .is_ok()
     {
         TEST_WRITER_CALL_MODE.swap(0, Ordering::Relaxed)
+    } else {
+        0
+    }
+}
+
+#[cfg(test)]
+fn install_copier_call_test_mode(copier: *mut CopierV1, mode: u8) {
+    use std::sync::atomic::Ordering;
+
+    TEST_COPIER_CALL_MODE.store(mode, Ordering::Relaxed);
+    TEST_COPIER_CALL_TARGET.store(copier.addr(), Ordering::Release);
+}
+
+#[cfg(test)]
+fn take_copier_call_test_mode(copier: &CopierV1) -> u8 {
+    use std::sync::atomic::Ordering;
+
+    let address = ptr::from_ref(copier).addr();
+    if TEST_COPIER_CALL_TARGET
+        .compare_exchange(address, 0, Ordering::Acquire, Ordering::Relaxed)
+        .is_ok()
+    {
+        TEST_COPIER_CALL_MODE.swap(0, Ordering::Relaxed)
     } else {
         0
     }
@@ -1221,8 +1268,11 @@ fn capability_view(capability: Capability) -> CapabilityV1 {
     if capability.presign_write {
         word0 |= CAP_PRESIGN_WRITE;
     }
+    let delete_max_size = capability
+        .delete_max_size
+        .map_or(0, |value| u64::try_from(value).unwrap_or(u64::MAX));
     CapabilityV1 {
-        words: [word0, 0, 0, 0],
+        words: [word0, delete_max_size, 0, 0],
     }
 }
 
@@ -1493,6 +1543,128 @@ fn set_writer_state(writer: &WriterV1, next: WriterStateV1) -> CallResult<()> {
     };
     *state = next;
     writer.changed.notify_all();
+    Ok(())
+}
+
+fn drop_async_copier_contained(copier: CopierInnerV1) {
+    let _ = catch_unwind(AssertUnwindSafe(|| drop(copier)));
+}
+
+fn fail_copier_state(copier: &CopierV1) {
+    let open = {
+        let mut state = match copier.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let previous = std::mem::replace(&mut *state, CopierStateV1::Failed);
+        copier.state.clear_poison();
+        copier.changed.notify_all();
+        match previous {
+            CopierStateV1::Open(inner) | CopierStateV1::End(inner) => Some(inner),
+            CopierStateV1::Busy
+            | CopierStateV1::Finished
+            | CopierStateV1::Aborted
+            | CopierStateV1::Failed => None,
+        }
+    };
+    if let Some(inner) = open {
+        drop_async_copier_contained(inner);
+    }
+}
+
+fn copier_poison_failure(
+    copier: &CopierV1,
+    mut state: MutexGuard<'_, CopierStateV1>,
+) -> CallFailure {
+    let previous = std::mem::replace(&mut *state, CopierStateV1::Failed);
+    copier.state.clear_poison();
+    copier.changed.notify_all();
+    let open = match previous {
+        CopierStateV1::Open(inner) | CopierStateV1::End(inner) => Some(inner),
+        CopierStateV1::Busy
+        | CopierStateV1::Finished
+        | CopierStateV1::Aborted
+        | CopierStateV1::Failed => None,
+    };
+    drop(state);
+    if let Some(inner) = open {
+        drop_async_copier_contained(inner);
+    }
+    binding_error(
+        ERROR_UNEXPECTED,
+        "Unexpected",
+        "copier state lock was poisoned",
+    )
+}
+
+#[derive(Clone, Copy)]
+enum CopierCall {
+    Next,
+    Finish,
+    Abort,
+}
+
+fn take_copier_for_call(copier: &CopierV1, call: CopierCall) -> CallResult<Option<CopierInnerV1>> {
+    let mut state = match copier.state.lock() {
+        Ok(state) => state,
+        Err(poisoned) => return Err(copier_poison_failure(copier, poisoned.into_inner())),
+    };
+    loop {
+        let current = std::mem::replace(&mut *state, CopierStateV1::Busy);
+        match current {
+            CopierStateV1::Open(inner) => return Ok(Some(inner)),
+            CopierStateV1::End(inner) if matches!(call, CopierCall::Finish) => {
+                return Ok(Some(inner));
+            }
+            CopierStateV1::End(inner) if matches!(call, CopierCall::Next) => {
+                *state = CopierStateV1::End(inner);
+                return Ok(None);
+            }
+            CopierStateV1::Aborted if matches!(call, CopierCall::Abort) => {
+                *state = CopierStateV1::Aborted;
+                return Ok(None);
+            }
+            CopierStateV1::Busy => {
+                *state = CopierStateV1::Busy;
+                state = match copier.changed.wait(state) {
+                    Ok(state) => state,
+                    Err(poisoned) => {
+                        return Err(copier_poison_failure(copier, poisoned.into_inner()));
+                    }
+                };
+            }
+            terminal @ (CopierStateV1::End(_)
+            | CopierStateV1::Finished
+            | CopierStateV1::Aborted
+            | CopierStateV1::Failed) => {
+                *state = terminal;
+                return Err(binding_error(
+                    ERROR_RESOURCE_CLOSED,
+                    "ResourceClosed",
+                    "copier is closed",
+                ));
+            }
+        }
+    }
+}
+
+fn set_copier_state(copier: &CopierV1, next: CopierStateV1) -> CallResult<()> {
+    let mut state = match copier.state.lock() {
+        Ok(state) => state,
+        Err(poisoned) => {
+            let mut state = poisoned.into_inner();
+            *state = CopierStateV1::Failed;
+            copier.state.clear_poison();
+            copier.changed.notify_all();
+            return Err(binding_error(
+                ERROR_UNEXPECTED,
+                "Unexpected",
+                "copier state lock was poisoned",
+            ));
+        }
+    };
+    *state = next;
+    copier.changed.notify_all();
     Ok(())
 }
 
@@ -2165,6 +2337,56 @@ fn build_s3_operator(options: ParsedS3Options) -> CallResult<opendal::Operator> 
     opendal::Operator::new(builder).map_err(construction_error)
 }
 
+unsafe fn read_text_array(
+    values: *const BytesViewV1,
+    values_len: u64,
+    label: &str,
+) -> CallResult<Vec<String>> {
+    let length = checked_len(values_len)?;
+    let bytes = length
+        .checked_mul(size_of::<BytesViewV1>())
+        .filter(|bytes| *bytes <= isize::MAX as usize)
+        .ok_or(CallFailure::AbiMismatch)?;
+    if length == 0 {
+        return Ok(Vec::new());
+    }
+    if values.is_null()
+        || !is_aligned(values)
+        || values.cast::<u8>().addr().checked_add(bytes).is_none()
+    {
+        return abi_mismatch();
+    }
+    let mut total_bytes = u64::try_from(bytes).map_err(|_| CallFailure::AbiMismatch)?;
+    if total_bytes > MAX_OUTPUT_BYTES {
+        return Err(buffer_too_large(
+            "batch delete path carriers exceed the negotiated byte limit",
+        ));
+    }
+    // SAFETY: length, total bytes, alignment and non-null were checked, and the
+    // ABI guarantees one fully initialized contiguous allocation.
+    let values = unsafe { slice::from_raw_parts(values, length) };
+    for value in values {
+        // Validate every nested region and UTF-8 payload before allocating
+        // owned strings or allowing any OpenDAL work to begin.
+        let bytes = unsafe { borrowed_bytes(*value)? };
+        str::from_utf8(bytes)
+            .map_err(|_| invalid_argument(format!("{label} must be valid UTF-8")))?;
+        total_bytes = total_bytes
+            .checked_add(value.len)
+            .filter(|total| *total <= MAX_OUTPUT_BYTES)
+            .ok_or_else(|| {
+                buffer_too_large("batch delete paths exceed the negotiated byte limit")
+            })?;
+    }
+    let mut output = Vec::with_capacity(length);
+    for value in values {
+        // SAFETY: every nested view is borrowed from one validated array item
+        // and copied before this function returns.
+        output.push(unsafe { read_text_value(*value, label)? });
+    }
+    Ok(output)
+}
+
 unsafe extern "C" fn operator_new(
     scheme: *const BytesViewV1,
     config: *const KvV1,
@@ -2722,6 +2944,34 @@ unsafe extern "C" fn operator_delete(
                 .inner
                 .delete_options(&path, options)
                 .map_err(opendal_error)
+        })();
+        match result {
+            Ok(()) => STATUS_OK,
+            Err(failure) => unsafe { finish_failure(failure, out_error) },
+        }
+    })
+}
+
+unsafe extern "C" fn operator_delete_many(
+    operator: *mut OperatorV1,
+    paths: *const BytesViewV1,
+    paths_len: u64,
+    out_error: *mut *mut ErrorV1,
+) -> Status {
+    catch_status(|| {
+        // SAFETY: optional error output is cleared before input/work.
+        if let Err(failure) = unsafe { clear_error_output(out_error) } {
+            return unsafe { finish_failure(failure, out_error) };
+        }
+        let result = (|| -> CallResult<()> {
+            // SAFETY: the operator is borrowed only for this synchronous call.
+            let operator = unsafe { borrow_required(operator.cast_const())? };
+            // SAFETY: the carrier array and every nested UTF-8 view are checked
+            // and copied before OpenDAL work begins.
+            let paths = unsafe { read_text_array(paths, paths_len, "batch delete path")? };
+            // This deliberately binds OpenDAL's high-level all-or-error API.
+            // Its internal deleter may deduplicate and flush in backend order.
+            operator.inner.delete_iter(paths).map_err(opendal_error)
         })();
         match result {
             Ok(()) => STATUS_OK,
@@ -3546,6 +3796,325 @@ unsafe extern "C" fn writer_abort(writer: *mut WriterV1, out_error: *mut *mut Er
     }
 }
 
+unsafe extern "C" fn writer_free(writer: *mut WriterV1) {
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        if writer.is_null() {
+            return;
+        }
+        // SAFETY: every non-null handle is uniquely owned and freed once.
+        let writer = unsafe { Box::from_raw(writer) };
+        // This only drops the native Writer; it never invokes close/finish.
+        fail_writer_state(&writer);
+        drop(writer);
+    }));
+}
+
+unsafe extern "C" fn operator_copier(
+    operator: *mut OperatorV1,
+    source: *const BytesViewV1,
+    destination: *const BytesViewV1,
+    out_copier: *mut *mut CopierV1,
+    out_error: *mut *mut ErrorV1,
+) -> Status {
+    catch_status(|| {
+        // SAFETY: outputs are validated and cleared before input/work.
+        let outputs = [
+            unsafe { clear_required_output(out_copier, ptr::null_mut()) },
+            unsafe { clear_error_output(out_error) },
+        ];
+        if let Err(failure) = combine_output_validation(outputs) {
+            return unsafe { finish_failure(failure, out_error) };
+        }
+        let result = (|| -> CallResult<Box<CopierV1>> {
+            // SAFETY: the handle and both textual inputs are validated and
+            // copied before the asynchronous Copier is retained.
+            let operator = unsafe { borrow_required(operator.cast_const())? };
+            let source = unsafe { read_text(source, "source path")? };
+            let destination = unsafe { read_text(destination, "destination path")? };
+            let copier = runtime()?
+                .block_on(operator.async_inner.copier(&source, &destination))
+                .map_err(opendal_error)?;
+            Ok(Box::new(CopierV1 {
+                state: Mutex::new(CopierStateV1::Open(CopierInnerV1::OpenDal(copier))),
+                changed: Condvar::new(),
+            }))
+        })();
+        match result {
+            Ok(copier) => {
+                // SAFETY: output was validated above.
+                unsafe { out_copier.write(Box::into_raw(copier)) };
+                STATUS_OK
+            }
+            Err(failure) => unsafe { finish_failure(failure, out_error) },
+        }
+    })
+}
+
+unsafe extern "C" fn copier_next(
+    copier: *mut CopierV1,
+    out_bytes: *mut u64,
+    out_error: *mut *mut ErrorV1,
+) -> Status {
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY: outputs are validated and cleared before the handle is inspected.
+        let outputs = [unsafe { clear_required_output(out_bytes, 0) }, unsafe {
+            clear_error_output(out_error)
+        }];
+        if let Err(failure) = combine_output_validation(outputs) {
+            return unsafe { finish_failure(failure, out_error) };
+        }
+        // SAFETY: opaque handle validity is a caller lifetime obligation.
+        let copier = match unsafe { borrow_required(copier.cast_const()) } {
+            Ok(copier) => copier,
+            Err(failure) => return unsafe { finish_failure(failure, out_error) },
+        };
+        #[cfg(test)]
+        let test_mode = take_copier_call_test_mode(copier);
+        let runtime = match runtime() {
+            Ok(runtime) => runtime,
+            Err(failure) => return unsafe { finish_failure(failure, out_error) },
+        };
+        let mut inner = match take_copier_for_call(copier, CopierCall::Next) {
+            Ok(Some(inner)) => inner,
+            Ok(None) => return STATUS_END,
+            Err(failure) => return unsafe { finish_failure(failure, out_error) },
+        };
+        // State is Busy while async work runs, so no mutex guard crosses block_on.
+        let step = catch_unwind(AssertUnwindSafe(|| -> CallResult<Option<u64>> {
+            #[cfg(test)]
+            match test_mode {
+                TEST_COPIER_NEXT_ERROR => {
+                    return Err(binding_error(
+                        ERROR_UNEXPECTED,
+                        "Unexpected",
+                        "injected Copier next error",
+                    ));
+                }
+                TEST_COPIER_NEXT_PANIC => panic!("injected Copier next panic"),
+                _ => {}
+            }
+            let progress = match &mut inner {
+                CopierInnerV1::OpenDal(copier) => {
+                    runtime.block_on(copier.next()).map_err(opendal_error)?
+                }
+                #[cfg(test)]
+                CopierInnerV1::Test(copier) => copier.progress.pop_front(),
+            };
+            progress
+                .map(|value| {
+                    u64::try_from(value).map_err(|_| {
+                        buffer_too_large("copier progress is not representable as UInt64")
+                    })
+                })
+                .transpose()
+        }));
+        match step {
+            Ok(Ok(Some(bytes))) => match set_copier_state(copier, CopierStateV1::Open(inner)) {
+                Ok(()) => {
+                    // SAFETY: output was validated and remains exclusively writable.
+                    unsafe { out_bytes.write(bytes) };
+                    STATUS_OK
+                }
+                Err(failure) => unsafe { finish_failure(failure, out_error) },
+            },
+            Ok(Ok(None)) => match set_copier_state(copier, CopierStateV1::End(inner)) {
+                Ok(()) => STATUS_END,
+                Err(failure) => unsafe { finish_failure(failure, out_error) },
+            },
+            Ok(Err(failure)) => {
+                let _ = set_copier_state(copier, CopierStateV1::Failed);
+                drop_async_copier_contained(inner);
+                unsafe { finish_failure(failure, out_error) }
+            }
+            Err(_) => {
+                let _ = set_copier_state(copier, CopierStateV1::Failed);
+                drop_async_copier_contained(inner);
+                STATUS_PANIC
+            }
+        }
+    }));
+    match outcome {
+        Ok(status) => status,
+        Err(_) => {
+            if !copier.is_null() && is_aligned(copier) {
+                // SAFETY: non-null live handle validity remains the caller's obligation.
+                fail_copier_state(unsafe { &*copier });
+            }
+            STATUS_PANIC
+        }
+    }
+}
+
+unsafe extern "C" fn copier_finish(
+    copier: *mut CopierV1,
+    out_metadata: *mut *mut MetadataV1,
+    out_error: *mut *mut ErrorV1,
+) -> Status {
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY: outputs are validated and cleared before the handle is inspected.
+        let outputs = [
+            unsafe { clear_required_output(out_metadata, ptr::null_mut()) },
+            unsafe { clear_error_output(out_error) },
+        ];
+        if let Err(failure) = combine_output_validation(outputs) {
+            return unsafe { finish_failure(failure, out_error) };
+        }
+        // SAFETY: opaque handle validity is a caller lifetime obligation.
+        let copier = match unsafe { borrow_required(copier.cast_const()) } {
+            Ok(copier) => copier,
+            Err(failure) => return unsafe { finish_failure(failure, out_error) },
+        };
+        #[cfg(test)]
+        let test_mode = take_copier_call_test_mode(copier);
+        let runtime = match runtime() {
+            Ok(runtime) => runtime,
+            Err(failure) => return unsafe { finish_failure(failure, out_error) },
+        };
+        let mut inner = match take_copier_for_call(copier, CopierCall::Finish) {
+            Ok(Some(inner)) => inner,
+            Ok(None) => unreachable!("finish never has an idempotent terminal success"),
+            Err(failure) => return unsafe { finish_failure(failure, out_error) },
+        };
+        // The first finish attempt is terminal before native close begins.
+        let step = catch_unwind(AssertUnwindSafe(|| -> CallResult<Box<MetadataV1>> {
+            #[cfg(test)]
+            match test_mode {
+                TEST_COPIER_FINISH_ERROR => {
+                    return Err(binding_error(
+                        ERROR_UNEXPECTED,
+                        "Unexpected",
+                        "injected Copier finish error",
+                    ));
+                }
+                TEST_COPIER_FINISH_PANIC => panic!("injected Copier finish panic"),
+                _ => {}
+            }
+            #[cfg(test)]
+            TEST_COPIER_NATIVE_FINISHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let metadata = match &mut inner {
+                CopierInnerV1::OpenDal(copier) => {
+                    runtime.block_on(copier.close()).map_err(opendal_error)?
+                }
+                #[cfg(test)]
+                CopierInnerV1::Test(copier) => copier.metadata.clone(),
+            };
+            Ok(Box::new(checked_metadata(metadata)?))
+        }));
+        match step {
+            Ok(Ok(metadata)) => {
+                if let Err(failure) = set_copier_state(copier, CopierStateV1::Finished) {
+                    drop_async_copier_contained(inner);
+                    return unsafe { finish_failure(failure, out_error) };
+                }
+                drop_async_copier_contained(inner);
+                // SAFETY: output was validated above.
+                unsafe { out_metadata.write(Box::into_raw(metadata)) };
+                STATUS_OK
+            }
+            Ok(Err(failure)) => {
+                let _ = set_copier_state(copier, CopierStateV1::Failed);
+                drop_async_copier_contained(inner);
+                unsafe { finish_failure(failure, out_error) }
+            }
+            Err(_) => {
+                let _ = set_copier_state(copier, CopierStateV1::Failed);
+                drop_async_copier_contained(inner);
+                STATUS_PANIC
+            }
+        }
+    }));
+    match outcome {
+        Ok(status) => status,
+        Err(_) => {
+            if !copier.is_null() && is_aligned(copier) {
+                // SAFETY: non-null live handle validity remains the caller's obligation.
+                fail_copier_state(unsafe { &*copier });
+            }
+            STATUS_PANIC
+        }
+    }
+}
+
+unsafe extern "C" fn copier_abort(copier: *mut CopierV1, out_error: *mut *mut ErrorV1) -> Status {
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY: optional error output is cleared before the handle is inspected.
+        if let Err(failure) = unsafe { clear_error_output(out_error) } {
+            return unsafe { finish_failure(failure, out_error) };
+        }
+        // SAFETY: opaque handle validity is a caller lifetime obligation.
+        let copier = match unsafe { borrow_required(copier.cast_const()) } {
+            Ok(copier) => copier,
+            Err(failure) => return unsafe { finish_failure(failure, out_error) },
+        };
+        #[cfg(test)]
+        let test_mode = take_copier_call_test_mode(copier);
+        let runtime = match runtime() {
+            Ok(runtime) => runtime,
+            Err(failure) => return unsafe { finish_failure(failure, out_error) },
+        };
+        let mut inner = match take_copier_for_call(copier, CopierCall::Abort) {
+            Ok(Some(inner)) => inner,
+            Ok(None) => return STATUS_OK,
+            Err(failure) => return unsafe { finish_failure(failure, out_error) },
+        };
+        // State is Busy while async work runs, so finish/next/abort races
+        // linearize before one terminal operation enters OpenDAL.
+        let step = catch_unwind(AssertUnwindSafe(|| -> CallResult<()> {
+            #[cfg(test)]
+            match test_mode {
+                TEST_COPIER_ABORT_ERROR => {
+                    return Err(binding_error(
+                        ERROR_UNEXPECTED,
+                        "Unexpected",
+                        "injected Copier abort error",
+                    ));
+                }
+                TEST_COPIER_ABORT_PANIC => panic!("injected Copier abort panic"),
+                _ => {}
+            }
+            #[cfg(test)]
+            TEST_COPIER_NATIVE_ABORTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            match &mut inner {
+                CopierInnerV1::OpenDal(copier) => {
+                    runtime.block_on(copier.abort()).map_err(opendal_error)
+                }
+                #[cfg(test)]
+                CopierInnerV1::Test(_) => Ok(()),
+            }
+        }));
+        match step {
+            Ok(Ok(())) => {
+                let result = set_copier_state(copier, CopierStateV1::Aborted);
+                drop_async_copier_contained(inner);
+                match result {
+                    Ok(()) => STATUS_OK,
+                    Err(failure) => unsafe { finish_failure(failure, out_error) },
+                }
+            }
+            Ok(Err(failure)) => {
+                let _ = set_copier_state(copier, CopierStateV1::Failed);
+                drop_async_copier_contained(inner);
+                unsafe { finish_failure(failure, out_error) }
+            }
+            Err(_) => {
+                let _ = set_copier_state(copier, CopierStateV1::Failed);
+                drop_async_copier_contained(inner);
+                STATUS_PANIC
+            }
+        }
+    }));
+    match outcome {
+        Ok(status) => status,
+        Err(_) => {
+            if !copier.is_null() && is_aligned(copier) {
+                // SAFETY: non-null live handle validity remains the caller's obligation.
+                fail_copier_state(unsafe { &*copier });
+            }
+            STATUS_PANIC
+        }
+    }
+}
+
 unsafe extern "C" fn operator_presign_read(
     operator: *mut OperatorV1,
     path: *const BytesViewV1,
@@ -3740,16 +4309,16 @@ unsafe extern "C" fn presigned_request_free(request: *mut PresignedRequestV1) {
     }));
 }
 
-unsafe extern "C" fn writer_free(writer: *mut WriterV1) {
+unsafe extern "C" fn copier_free(copier: *mut CopierV1) {
     let _ = catch_unwind(AssertUnwindSafe(|| {
-        if writer.is_null() {
+        if copier.is_null() {
             return;
         }
         // SAFETY: every non-null handle is uniquely owned and freed once.
-        let writer = unsafe { Box::from_raw(writer) };
-        // This only drops the native Writer; it never invokes close/finish.
-        fail_writer_state(&writer);
-        drop(writer);
+        let copier = unsafe { Box::from_raw(copier) };
+        // This only drops the native Copier; it never invokes finish or abort.
+        fail_copier_state(&copier);
+        drop(copier);
     }));
 }
 
@@ -3787,7 +4356,9 @@ fn stage_api() -> Option<ApiV1> {
             | FEATURE_PRESIGN
             | PROFILE_FEATURE_BITS
             | TIMEOUT_RETRY_FEATURE_BITS
-            | CONCURRENCY_LIMIT_FEATURE_BITS,
+            | CONCURRENCY_LIMIT_FEATURE_BITS
+            | FEATURE_BATCH_DELETE
+            | FEATURE_COPIER,
         max_output_bytes: MAX_OUTPUT_BYTES,
         library_info: Some(library_info),
         error_view: Some(error_view),
@@ -3843,6 +4414,12 @@ fn stage_api() -> Option<ApiV1> {
         operator_with_timeout: OPERATOR_WITH_TIMEOUT_ENTRY,
         operator_with_retry: OPERATOR_WITH_RETRY_ENTRY,
         operator_with_concurrency_limit: OPERATOR_WITH_CONCURRENCY_LIMIT_ENTRY,
+        operator_delete_many: Some(operator_delete_many),
+        operator_copier: Some(operator_copier),
+        copier_next: Some(copier_next),
+        copier_finish: Some(copier_finish),
+        copier_abort: Some(copier_abort),
+        copier_free: Some(copier_free),
     })
 }
 
@@ -3927,6 +4504,12 @@ unsafe fn install_api(base: *mut u8, caller_size: usize, staged: &ApiV1) {
     install_field!(operator_with_timeout);
     install_field!(operator_with_retry);
     install_field!(operator_with_concurrency_limit);
+    install_field!(operator_delete_many);
+    install_field!(operator_copier);
+    install_field!(copier_next);
+    install_field!(copier_finish);
+    install_field!(copier_abort);
+    install_field!(copier_free);
 }
 
 /// Negotiate the stable v1 function table.
@@ -4633,6 +5216,78 @@ mod tests {
         assert!(error.is_null());
     }
 
+    fn delete_memory_objects(api: &ApiV1, operator: *mut OperatorV1, paths: &[&[u8]]) {
+        let paths: Vec<_> = paths.iter().map(|path| bytes(path)).collect();
+        let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the operator, contiguous path carriers, nested byte regions,
+        // and optional error slot remain live for this call.
+        let status = unsafe {
+            api.operator_delete_many
+                .expect("BATCH_DELETE operation is installed")(
+                operator,
+                paths.as_ptr(),
+                u64::try_from(paths.len()).expect("test path count fits u64"),
+                &mut error,
+            )
+        };
+        assert_eq!(status, STATUS_OK);
+        assert!(error.is_null());
+    }
+
+    fn test_copier(progress: &[usize]) -> *mut CopierV1 {
+        Box::into_raw(Box::new(CopierV1 {
+            state: Mutex::new(CopierStateV1::Open(CopierInnerV1::Test(TestCopierV1 {
+                progress: progress.iter().copied().collect(),
+                metadata: Metadata::default(),
+            }))),
+            changed: Condvar::new(),
+        }))
+    }
+
+    fn next_copier(api: &ApiV1, copier: *mut CopierV1) -> Option<u64> {
+        let mut bytes = u64::MAX;
+        let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the Copier and both output slots remain live for this call.
+        let status = unsafe {
+            api.copier_next.expect("COPIER next is installed")(copier, &mut bytes, &mut error)
+        };
+        assert!(error.is_null());
+        match status {
+            STATUS_OK => Some(bytes),
+            STATUS_END => {
+                assert_eq!(bytes, 0);
+                None
+            }
+            other => panic!("unexpected Copier next status {other}"),
+        }
+    }
+
+    fn finish_copier(api: &ApiV1, copier: *mut CopierV1) -> *mut MetadataV1 {
+        let mut metadata = NonNull::<MetadataV1>::dangling().as_ptr();
+        let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the Copier and both output slots remain live for this call.
+        let status = unsafe {
+            api.copier_finish.expect("COPIER finish is installed")(
+                copier,
+                &mut metadata,
+                &mut error,
+            )
+        };
+        assert_eq!(status, STATUS_OK);
+        assert!(!metadata.is_null());
+        assert!(error.is_null());
+        metadata
+    }
+
+    fn abort_copier(api: &ApiV1, copier: *mut CopierV1) {
+        let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the Copier and optional error slot remain live for this call.
+        let status =
+            unsafe { api.copier_abort.expect("COPIER abort is installed")(copier, &mut error) };
+        assert_eq!(status, STATUS_OK);
+        assert!(error.is_null());
+    }
+
     fn take_metadata_content_length(api: &ApiV1, metadata: *mut MetadataV1) -> u64 {
         let absent = bytes(b"");
         let mut view = MetadataViewV1 {
@@ -4858,6 +5513,7 @@ mod tests {
     fn bootstrap_installs_complete_supported_groups() {
         let api = api();
         assert_eq!(api.library_struct_size as usize, size_of::<ApiV1>());
+        assert_eq!(api.library_minor, ABI_MINOR);
         assert_eq!(
             api.feature_bits,
             FEATURE_BASE
@@ -4870,7 +5526,9 @@ mod tests {
                 | FEATURE_PRESIGN
                 | PROFILE_FEATURE_BITS
                 | TIMEOUT_RETRY_FEATURE_BITS
-                | CONCURRENCY_LIMIT_FEATURE_BITS,
+                | CONCURRENCY_LIMIT_FEATURE_BITS
+                | FEATURE_BATCH_DELETE
+                | FEATURE_COPIER,
         );
         assert!(api.library_info.is_some());
         assert!(api.operator_new.is_some());
@@ -4916,6 +5574,12 @@ mod tests {
         assert!(api.operator_with_concurrency_limit.is_some());
         #[cfg(not(feature = "layers-concurrent-limit"))]
         assert!(api.operator_with_concurrency_limit.is_none());
+        assert!(api.operator_delete_many.is_some());
+        assert!(api.operator_copier.is_some());
+        assert!(api.copier_next.is_some());
+        assert!(api.copier_finish.is_some());
+        assert!(api.copier_abort.is_some());
+        assert!(api.copier_free.is_some());
     }
 
     #[cfg(feature = "profile-standard")]
@@ -5388,6 +6052,12 @@ mod tests {
             operator_with_timeout,
             operator_with_retry,
             operator_with_concurrency_limit,
+            operator_delete_many,
+            operator_copier,
+            copier_next,
+            copier_finish,
+            copier_abort,
+            copier_free,
         );
 
         for caller_size in API_PREFIX_SIZE..=size_of::<ApiV1>() + 16 {
@@ -7592,6 +8262,333 @@ mod tests {
     }
 
     #[test]
+    fn batch_delete_is_high_level_all_or_error_and_validates_before_work() {
+        let api = api();
+        let (operator, info) = memory_operator(&api);
+        write_memory_object(&api, operator, b"batch/one", b"one");
+        write_memory_object(&api, operator, b"batch/two", b"two");
+
+        // Duplicate and missing paths are accepted by OpenDAL's high-level
+        // deleter; there is deliberately no ordered per-input output.
+        delete_memory_objects(
+            &api,
+            operator,
+            &[b"batch/one", b"batch/one", b"batch/missing", b"batch/two"],
+        );
+        assert!(!memory_object_exists(&api, operator, b"batch/one"));
+        assert!(!memory_object_exists(&api, operator, b"batch/two"));
+
+        let delete_many = api
+            .operator_delete_many
+            .expect("BATCH_DELETE operation is installed");
+        let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: NULL plus zero is the canonical empty carrier array.
+        assert_eq!(
+            unsafe { delete_many(operator, ptr::null(), 0, &mut error) },
+            STATUS_OK,
+        );
+        assert!(error.is_null());
+
+        write_memory_object(&api, operator, b"batch/kept", b"kept");
+        let invalid_utf8_bytes = [0xff];
+        let paths = [bytes(b"batch/kept"), bytes(&invalid_utf8_bytes)];
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the array is valid but its second textual view is not UTF-8.
+        assert_eq!(
+            unsafe { delete_many(operator, paths.as_ptr(), 2, &mut error) },
+            STATUS_ERROR,
+        );
+        assert_eq!(take_error_kind(&api, error), ERROR_INVALID_ARGUMENT);
+        assert!(memory_object_exists(&api, operator, b"batch/kept"));
+
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: NULL with a nonzero element count is intentionally malformed.
+        assert_eq!(
+            unsafe { delete_many(operator, ptr::null(), 1, &mut error) },
+            STATUS_ABI_MISMATCH,
+        );
+        assert!(error.is_null());
+
+        // SAFETY: both handles remain uniquely owned.
+        unsafe {
+            api.operator_info_free.expect("BASE info free is installed")(info);
+            api.operator_free.expect("BASE operator free is installed")(operator);
+        }
+    }
+
+    #[test]
+    fn capability_word_one_carries_delete_max_size() {
+        let capability = Capability {
+            delete: true,
+            delete_max_size: Some(1000),
+            ..Capability::default()
+        };
+        let view = capability_view(capability);
+        assert_eq!(view.words[0] & CAP_DELETE, CAP_DELETE);
+        assert_eq!(view.words[1], 1000);
+
+        let absent = capability_view(Capability::default());
+        assert_eq!(absent.words[1], 0);
+        assert_eq!(absent.words[2..], [0, 0]);
+    }
+
+    #[test]
+    fn copier_constructor_preserves_backend_support_and_atomic_outputs() {
+        let api = api();
+        let (operator, info) = memory_operator(&api);
+        write_memory_object(&api, operator, b"copier/source", b"source");
+        let constructor = api
+            .operator_copier
+            .expect("COPIER constructor is installed");
+        let source = bytes(b"copier/source");
+        let destination = bytes(b"copier/destination");
+        let mut copier = NonNull::<CopierV1>::dangling().as_ptr();
+        let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // Memory exposes one-shot copy but not OpenDAL's incremental Copier.
+        // SAFETY: both path carriers and output slots are valid.
+        assert_eq!(
+            unsafe { constructor(operator, &source, &destination, &mut copier, &mut error,) },
+            STATUS_ERROR,
+        );
+        assert!(copier.is_null());
+        assert_eq!(take_error_kind(&api, error), ERROR_UNSUPPORTED);
+
+        let invalid_utf8_bytes = [0xff];
+        let invalid_source = bytes(&invalid_utf8_bytes);
+        copier = NonNull::<CopierV1>::dangling().as_ptr();
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: source is readable but intentionally invalid UTF-8.
+        assert_eq!(
+            unsafe {
+                constructor(
+                    operator,
+                    &invalid_source,
+                    &destination,
+                    &mut copier,
+                    &mut error,
+                )
+            },
+            STATUS_ERROR,
+        );
+        assert!(copier.is_null());
+        assert_eq!(take_error_kind(&api, error), ERROR_INVALID_ARGUMENT);
+
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the required Copier output is intentionally NULL.
+        assert_eq!(
+            unsafe { constructor(operator, &source, &destination, ptr::null_mut(), &mut error,) },
+            STATUS_ABI_MISMATCH,
+        );
+        assert!(error.is_null());
+
+        // SAFETY: both handles remain uniquely owned.
+        unsafe {
+            api.operator_info_free.expect("BASE info free is installed")(info);
+            api.operator_free.expect("BASE operator free is installed")(operator);
+        }
+    }
+
+    #[test]
+    fn copier_end_is_stable_finish_is_once_and_abort_is_explicit() {
+        use std::sync::atomic::Ordering;
+
+        let api = api();
+        let copier = test_copier(&[7, 11, 5]);
+        let mut observed = 0u64;
+        while let Some(delta) = next_copier(&api, copier) {
+            observed = observed.checked_add(delta).expect("progress sum fits u64");
+        }
+        assert_eq!(next_copier(&api, copier), None);
+        assert_eq!(observed, 23);
+
+        let abort = api.copier_abort.expect("COPIER abort is installed");
+        let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // OpenDAL has already completed the underlying operation at END, so
+        // reporting a later abort as successful would be misleading.
+        assert_eq!(unsafe { abort(copier, &mut error) }, STATUS_ERROR);
+        assert_eq!(take_error_kind(&api, error), ERROR_RESOURCE_CLOSED);
+
+        let finishes_before = TEST_COPIER_NATIVE_FINISHES.load(Ordering::Relaxed);
+        let metadata = finish_copier(&api, copier);
+        assert_eq!(
+            TEST_COPIER_NATIVE_FINISHES.load(Ordering::Relaxed),
+            finishes_before + 1,
+        );
+        // The test Copier returns one owned metadata snapshot.
+        unsafe { api.metadata_free.expect("BASE metadata free is installed")(metadata) };
+
+        let finish = api.copier_finish.expect("COPIER finish is installed");
+        let mut repeated_metadata = NonNull::<MetadataV1>::dangling().as_ptr();
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: a finished outer handle remains live for deterministic errors.
+        assert_eq!(
+            unsafe { finish(copier, &mut repeated_metadata, &mut error) },
+            STATUS_ERROR,
+        );
+        assert!(repeated_metadata.is_null());
+        assert_eq!(take_error_kind(&api, error), ERROR_RESOURCE_CLOSED);
+
+        let mut progress = u64::MAX;
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: a finished Copier rejects later progress calls.
+        assert_eq!(
+            unsafe {
+                api.copier_next.expect("COPIER next is installed")(
+                    copier,
+                    &mut progress,
+                    &mut error,
+                )
+            },
+            STATUS_ERROR,
+        );
+        assert_eq!(progress, 0);
+        assert_eq!(take_error_kind(&api, error), ERROR_RESOURCE_CLOSED);
+
+        let aborted = test_copier(&[3]);
+        let aborts_before = TEST_COPIER_NATIVE_ABORTS.load(Ordering::Relaxed);
+        abort_copier(&api, aborted);
+        abort_copier(&api, aborted);
+        assert_eq!(
+            TEST_COPIER_NATIVE_ABORTS.load(Ordering::Relaxed),
+            aborts_before + 1,
+        );
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        progress = u64::MAX;
+        // SAFETY: an aborted Copier rejects later progress calls.
+        assert_eq!(
+            unsafe {
+                api.copier_next.expect("COPIER next is installed")(
+                    aborted,
+                    &mut progress,
+                    &mut error,
+                )
+            },
+            STATUS_ERROR,
+        );
+        assert_eq!(take_error_kind(&api, error), ERROR_RESOURCE_CLOSED);
+
+        let unfinished = test_copier(&[9]);
+        let finishes_before = TEST_COPIER_NATIVE_FINISHES.load(Ordering::Relaxed);
+        let aborts_before = TEST_COPIER_NATIVE_ABORTS.load(Ordering::Relaxed);
+        // SAFETY: free only drops uniquely owned state; NULL is a no-op.
+        unsafe {
+            api.copier_free.expect("COPIER free is installed")(ptr::null_mut());
+            api.copier_free.expect("COPIER free is installed")(unfinished);
+        }
+        assert_eq!(
+            TEST_COPIER_NATIVE_FINISHES.load(Ordering::Relaxed),
+            finishes_before,
+        );
+        assert_eq!(
+            TEST_COPIER_NATIVE_ABORTS.load(Ordering::Relaxed),
+            aborts_before,
+        );
+
+        // SAFETY: all remaining resources are uniquely owned.
+        unsafe {
+            api.copier_free.expect("COPIER free is installed")(copier);
+            api.copier_free.expect("COPIER free is installed")(aborted);
+        }
+    }
+
+    #[test]
+    fn copier_failures_and_panics_are_terminal() {
+        let api = api();
+        let next = api.copier_next.expect("COPIER next is installed");
+        let finish = api.copier_finish.expect("COPIER finish is installed");
+        let abort = api.copier_abort.expect("COPIER abort is installed");
+        let free = api.copier_free.expect("COPIER free is installed");
+
+        for mode in [TEST_COPIER_NEXT_ERROR, TEST_COPIER_NEXT_PANIC] {
+            let copier = test_copier(&[7]);
+            install_copier_call_test_mode(copier, mode);
+            let mut progress = u64::MAX;
+            let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+            // SAFETY: the test hook injects one contained next outcome.
+            let status = unsafe { next(copier, &mut progress, &mut error) };
+            assert_eq!(
+                status,
+                if mode == TEST_COPIER_NEXT_ERROR {
+                    STATUS_ERROR
+                } else {
+                    STATUS_PANIC
+                },
+            );
+            assert_eq!(progress, 0);
+            if status == STATUS_ERROR {
+                assert_eq!(take_error_kind(&api, error), ERROR_UNEXPECTED);
+            } else {
+                assert!(error.is_null());
+            }
+            error = NonNull::<ErrorV1>::dangling().as_ptr();
+            // SAFETY: the terminal handle deterministically rejects another next.
+            assert_eq!(
+                unsafe { next(copier, &mut progress, &mut error) },
+                STATUS_ERROR,
+            );
+            assert_eq!(take_error_kind(&api, error), ERROR_RESOURCE_CLOSED);
+            // SAFETY: this test owns the handle exactly once.
+            unsafe { free(copier) };
+        }
+
+        for mode in [TEST_COPIER_FINISH_ERROR, TEST_COPIER_FINISH_PANIC] {
+            let copier = test_copier(&[7]);
+            install_copier_call_test_mode(copier, mode);
+            let mut metadata = NonNull::<MetadataV1>::dangling().as_ptr();
+            let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+            // SAFETY: the test hook injects one contained finish outcome.
+            let status = unsafe { finish(copier, &mut metadata, &mut error) };
+            assert_eq!(
+                status,
+                if mode == TEST_COPIER_FINISH_ERROR {
+                    STATUS_ERROR
+                } else {
+                    STATUS_PANIC
+                },
+            );
+            assert!(metadata.is_null());
+            if status == STATUS_ERROR {
+                assert_eq!(take_error_kind(&api, error), ERROR_UNEXPECTED);
+            } else {
+                assert!(error.is_null());
+            }
+            error = NonNull::<ErrorV1>::dangling().as_ptr();
+            // SAFETY: failed finish is terminal rather than retryable.
+            assert_eq!(unsafe { abort(copier, &mut error) }, STATUS_ERROR);
+            assert_eq!(take_error_kind(&api, error), ERROR_RESOURCE_CLOSED);
+            // SAFETY: this test owns the handle exactly once.
+            unsafe { free(copier) };
+        }
+
+        for mode in [TEST_COPIER_ABORT_ERROR, TEST_COPIER_ABORT_PANIC] {
+            let copier = test_copier(&[7]);
+            install_copier_call_test_mode(copier, mode);
+            let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+            // SAFETY: the test hook injects one contained abort outcome.
+            let status = unsafe { abort(copier, &mut error) };
+            assert_eq!(
+                status,
+                if mode == TEST_COPIER_ABORT_ERROR {
+                    STATUS_ERROR
+                } else {
+                    STATUS_PANIC
+                },
+            );
+            if status == STATUS_ERROR {
+                assert_eq!(take_error_kind(&api, error), ERROR_UNEXPECTED);
+            } else {
+                assert!(error.is_null());
+            }
+            error = NonNull::<ErrorV1>::dangling().as_ptr();
+            // SAFETY: failed abort is terminal rather than idempotent.
+            assert_eq!(unsafe { abort(copier, &mut error) }, STATUS_ERROR);
+            assert_eq!(take_error_kind(&api, error), ERROR_RESOURCE_CLOSED);
+            // SAFETY: this test owns the handle exactly once.
+            unsafe { free(copier) };
+        }
+    }
+
+    #[test]
     fn abi_thread_promises_are_send_and_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<OperatorV1>();
@@ -7605,5 +8602,6 @@ mod tests {
         assert_send_sync::<WriterV1>();
         assert_send_sync::<ReadStreamV1>();
         assert_send_sync::<PresignedRequestV1>();
+        assert_send_sync::<CopierV1>();
     }
 }

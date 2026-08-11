@@ -55,14 +55,14 @@ extern "C" {
 /*
  * Pointer contract: every pointer is required and non-NULL unless explicitly
  * optional here. Exceptions are options, out_error, config when config_len is
- * zero, bytes_view.data when len is zero, and buffer_copy.destination for a
- * zero-capacity sizing query. Every *_free, lister_close, reader_close, and
- * read_stream_close is a no-op on NULL. Non-NULL pointers must be correctly
- * aligned, live for the call, and cover the claimed readable/writable region
- * within one allocated object; every region's byte extent must fit in Rust
- * isize. Detectable NULL, size, overflow, and alignment errors return
- * ABI_MISMATCH. Dangling, forged, out-of-bounds, or stale non-NULL pointers and
- * handles remain caller UB.
+ * zero, batch paths when paths_len is zero, bytes_view.data when len is zero,
+ * and buffer_copy.destination for a zero-capacity sizing query. Every *_free,
+ * lister_close, reader_close, and read_stream_close is a no-op on NULL.
+ * Non-NULL pointers must be correctly aligned, live for the call, and cover
+ * the claimed readable/writable region within one allocated object; every
+ * region's byte extent must fit in Rust isize. Detectable NULL, size, overflow,
+ * and alignment errors return ABI_MISMATCH. Dangling, forged, out-of-bounds,
+ * or stale non-NULL pointers and handles remain caller UB.
  */
 
 /* Transport status. These values are not OpenDAL error kinds. */
@@ -129,6 +129,8 @@ typedef uint32_t opendal_mbt_range_kind_t;
 #define OPENDAL_MBT_FEATURE_PRESIGN (UINT64_C(1) << 8)
 #define OPENDAL_MBT_FEATURE_LAYERS (UINT64_C(1) << 9)
 #define OPENDAL_MBT_FEATURE_CONCURRENCY_LIMIT (UINT64_C(1) << 10)
+#define OPENDAL_MBT_FEATURE_BATCH_DELETE (UINT64_C(1) << 11)
+#define OPENDAL_MBT_FEATURE_COPIER (UINT64_C(1) << 12)
 
 /* Capability bit positions. */
 #define OPENDAL_MBT_CAP_STAT (UINT64_C(1) << 0)
@@ -361,6 +363,7 @@ typedef struct opendal_mbt_timestamp_v1 {
 } opendal_mbt_timestamp_v1_t;
 
 typedef struct opendal_mbt_capability_v1 {
+  /* words[0] contains boolean CAP_* flags; words[1] is delete_max_size or 0. */
   uint64_t words[4];
 } opendal_mbt_capability_v1_t;
 
@@ -460,6 +463,7 @@ typedef struct opendal_mbt_lister_v1 opendal_mbt_lister_v1_t;
 typedef struct opendal_mbt_reader_v1 opendal_mbt_reader_v1_t;
 typedef struct opendal_mbt_writer_v1 opendal_mbt_writer_v1_t;
 typedef struct opendal_mbt_read_stream_v1 opendal_mbt_read_stream_v1_t;
+typedef struct opendal_mbt_copier_v1 opendal_mbt_copier_v1_t;
 typedef struct opendal_mbt_buffer_v1 opendal_mbt_buffer_v1_t;
 typedef struct opendal_mbt_error_v1 opendal_mbt_error_v1_t;
 typedef struct opendal_mbt_metadata_v1 opendal_mbt_metadata_v1_t;
@@ -759,6 +763,43 @@ typedef struct opendal_mbt_api_v1 {
       opendal_mbt_operator_v1_t **out_operator,
       opendal_mbt_operator_info_v1_t **out_info,
       opendal_mbt_error_v1_t **out_error);
+
+  /*
+   * OPENDAL_MBT_FEATURE_BATCH_DELETE: appended in ABI v1.6. Paths are copied
+   * before OpenDAL work begins. Success means the high-level deleter closed;
+   * an error may follow deletion of an unspecified subset. Input order and
+   * duplicate identity are not observable results. The carrier plus path byte
+   * extents must fit max_output_bytes; larger input returns BufferTooLarge.
+   */
+  opendal_mbt_status_t(OPENDAL_MBT_CALL *operator_delete_many)(
+      opendal_mbt_operator_v1_t *operator_,
+      const opendal_mbt_bytes_view_v1_t *paths, uint64_t paths_len,
+      opendal_mbt_error_v1_t **out_error);
+
+  /*
+   * OPENDAL_MBT_FEATURE_COPIER: appended in ABI v1.6. This is OpenDAL's
+   * same-Operator, one-object Copier rather than a recursive transfer engine.
+   */
+  opendal_mbt_status_t(OPENDAL_MBT_CALL *operator_copier)(
+      opendal_mbt_operator_v1_t *operator_,
+      const opendal_mbt_bytes_view_v1_t *source,
+      const opendal_mbt_bytes_view_v1_t *destination,
+      opendal_mbt_copier_v1_t **out_copier,
+      opendal_mbt_error_v1_t **out_error);
+  /* OK writes one progress delta. END writes zero and is stable until finish. */
+  opendal_mbt_status_t(OPENDAL_MBT_CALL *copier_next)(
+      opendal_mbt_copier_v1_t *copier, uint64_t *out_bytes,
+      opendal_mbt_error_v1_t **out_error);
+  opendal_mbt_status_t(OPENDAL_MBT_CALL *copier_finish)(
+      opendal_mbt_copier_v1_t *copier,
+      opendal_mbt_metadata_v1_t **out_metadata,
+      opendal_mbt_error_v1_t **out_error);
+  /* A successful repeated abort is idempotent. */
+  opendal_mbt_status_t(OPENDAL_MBT_CALL *copier_abort)(
+      opendal_mbt_copier_v1_t *copier,
+      opendal_mbt_error_v1_t **out_error);
+  /* NULL is a no-op; free never finishes or reports a successful abort. */
+  void(OPENDAL_MBT_CALL *copier_free)(opendal_mbt_copier_v1_t *copier);
 } opendal_mbt_api_v1_t;
 
 /* End offset of one complete table field; never read a partially covered one. */

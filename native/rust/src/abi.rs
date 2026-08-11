@@ -5,7 +5,7 @@
 pub(crate) type Status = u32;
 
 pub(crate) const ABI_MAJOR: u32 = 1;
-pub(crate) const ABI_MINOR: u32 = 5;
+pub(crate) const ABI_MINOR: u32 = 6;
 pub(crate) const ABI_PATCH: u32 = 0;
 pub(crate) const STRUCT_VERSION: u32 = 1;
 
@@ -60,6 +60,8 @@ pub(crate) const FEATURE_S3: u64 = 1 << 7;
 pub(crate) const FEATURE_PRESIGN: u64 = 1 << 8;
 pub(crate) const FEATURE_LAYERS: u64 = 1 << 9;
 pub(crate) const FEATURE_CONCURRENCY_LIMIT: u64 = 1 << 10;
+pub(crate) const FEATURE_BATCH_DELETE: u64 = 1 << 11;
+pub(crate) const FEATURE_COPIER: u64 = 1 << 12;
 
 pub(crate) const CAP_STAT: u64 = 1 << 0;
 pub(crate) const CAP_READ: u64 = 1 << 1;
@@ -467,6 +469,33 @@ pub(crate) enum WriterStateV1 {
     Failed,
 }
 
+#[repr(C)]
+pub(crate) struct CopierV1 {
+    pub(crate) state: std::sync::Mutex<CopierStateV1>,
+    pub(crate) changed: std::sync::Condvar,
+}
+
+pub(crate) enum CopierInnerV1 {
+    OpenDal(opendal::Copier),
+    #[cfg(test)]
+    Test(TestCopierV1),
+}
+
+#[cfg(test)]
+pub(crate) struct TestCopierV1 {
+    pub(crate) progress: std::collections::VecDeque<usize>,
+    pub(crate) metadata: opendal::Metadata,
+}
+
+pub(crate) enum CopierStateV1 {
+    Open(CopierInnerV1),
+    Busy,
+    End(CopierInnerV1),
+    Finished,
+    Aborted,
+    Failed,
+}
+
 pub(crate) type LibraryInfoFn = unsafe extern "C" fn(*mut LibraryInfoViewV1) -> Status;
 pub(crate) type ErrorViewFn = unsafe extern "C" fn(*const ErrorV1, *mut ErrorViewV1) -> Status;
 pub(crate) type ErrorFreeFn = unsafe extern "C" fn(*mut ErrorV1);
@@ -658,6 +687,21 @@ pub(crate) type OperatorWithConcurrencyLimitFn = unsafe extern "C" fn(
     *mut *mut OperatorInfoV1,
     *mut *mut ErrorV1,
 ) -> Status;
+pub(crate) type OperatorDeleteManyFn =
+    unsafe extern "C" fn(*mut OperatorV1, *const BytesViewV1, u64, *mut *mut ErrorV1) -> Status;
+pub(crate) type OperatorCopierFn = unsafe extern "C" fn(
+    *mut OperatorV1,
+    *const BytesViewV1,
+    *const BytesViewV1,
+    *mut *mut CopierV1,
+    *mut *mut ErrorV1,
+) -> Status;
+pub(crate) type CopierNextFn =
+    unsafe extern "C" fn(*mut CopierV1, *mut u64, *mut *mut ErrorV1) -> Status;
+pub(crate) type CopierFinishFn =
+    unsafe extern "C" fn(*mut CopierV1, *mut *mut MetadataV1, *mut *mut ErrorV1) -> Status;
+pub(crate) type CopierAbortFn = unsafe extern "C" fn(*mut CopierV1, *mut *mut ErrorV1) -> Status;
+pub(crate) type CopierFreeFn = unsafe extern "C" fn(*mut CopierV1);
 
 #[repr(C)]
 pub(crate) struct ApiV1 {
@@ -720,6 +764,12 @@ pub(crate) struct ApiV1 {
     pub(crate) operator_with_timeout: Option<OperatorWithTimeoutFn>,
     pub(crate) operator_with_retry: Option<OperatorWithRetryFn>,
     pub(crate) operator_with_concurrency_limit: Option<OperatorWithConcurrencyLimitFn>,
+    pub(crate) operator_delete_many: Option<OperatorDeleteManyFn>,
+    pub(crate) operator_copier: Option<OperatorCopierFn>,
+    pub(crate) copier_next: Option<CopierNextFn>,
+    pub(crate) copier_finish: Option<CopierFinishFn>,
+    pub(crate) copier_abort: Option<CopierAbortFn>,
+    pub(crate) copier_free: Option<CopierFreeFn>,
 }
 
 pub(crate) const API_INPUT_SIZE: usize =
@@ -756,7 +806,13 @@ const _: () = {
     assert!(core::mem::offset_of!(ApiV1, operator_with_timeout) == 424);
     assert!(core::mem::offset_of!(ApiV1, operator_with_retry) == 432);
     assert!(core::mem::offset_of!(ApiV1, operator_with_concurrency_limit) == 440);
-    assert!(core::mem::size_of::<ApiV1>() == 448);
+    assert!(core::mem::offset_of!(ApiV1, operator_delete_many) == 448);
+    assert!(core::mem::offset_of!(ApiV1, operator_copier) == 456);
+    assert!(core::mem::offset_of!(ApiV1, copier_next) == 464);
+    assert!(core::mem::offset_of!(ApiV1, copier_finish) == 472);
+    assert!(core::mem::offset_of!(ApiV1, copier_abort) == 480);
+    assert!(core::mem::offset_of!(ApiV1, copier_free) == 488);
+    assert!(core::mem::size_of::<ApiV1>() == 496);
     assert!(API_INPUT_SIZE == 8);
     assert!(API_PREFIX_SIZE == 40);
 };

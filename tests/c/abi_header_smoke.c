@@ -11,6 +11,9 @@
 
 ABI_STATIC_ASSERT(sizeof(opendal_mbt_status_t) == 4,
                   "transport status must be 32-bit");
+ABI_STATIC_ASSERT(OPENDAL_MBT_ABI_V1_MAJOR == 1 &&
+                      OPENDAL_MBT_ABI_V1_MINOR == 2,
+                  "Phase 5D requires ABI v1.2");
 ABI_STATIC_ASSERT(sizeof(opendal_mbt_bool_t) == 4,
                   "ABI boolean must be 32-bit");
 ABI_STATIC_ASSERT(sizeof(opendal_mbt_bytes_view_v1_t) == 16,
@@ -84,8 +87,20 @@ ABI_STATIC_ASSERT(offsetof(opendal_mbt_api_v1_t, operator_with_retry) == 432,
 ABI_STATIC_ASSERT(
     offsetof(opendal_mbt_api_v1_t, operator_with_concurrency_limit) == 440,
     "v1.5 concurrency-limit function offset drifted");
-ABI_STATIC_ASSERT(sizeof(opendal_mbt_api_v1_t) == 448,
-                  "v1.5 function table size drifted");
+ABI_STATIC_ASSERT(offsetof(opendal_mbt_api_v1_t, operator_delete_many) == 448,
+                  "v1.6 batch delete function offset drifted");
+ABI_STATIC_ASSERT(offsetof(opendal_mbt_api_v1_t, operator_copier) == 456,
+                  "v1.6 Copier constructor offset drifted");
+ABI_STATIC_ASSERT(offsetof(opendal_mbt_api_v1_t, copier_next) == 464,
+                  "v1.6 Copier next offset drifted");
+ABI_STATIC_ASSERT(offsetof(opendal_mbt_api_v1_t, copier_finish) == 472,
+                  "v1.6 Copier finish offset drifted");
+ABI_STATIC_ASSERT(offsetof(opendal_mbt_api_v1_t, copier_abort) == 480,
+                  "v1.6 Copier abort offset drifted");
+ABI_STATIC_ASSERT(offsetof(opendal_mbt_api_v1_t, copier_free) == 488,
+                  "v1.6 Copier free offset drifted");
+ABI_STATIC_ASSERT(sizeof(opendal_mbt_api_v1_t) == 496,
+                  "v1.6 function table size drifted");
 #endif
 ABI_STATIC_ASSERT(OPENDAL_MBT_API_V1_FIELD_END(library_info) <=
                       OPENDAL_MBT_API_V1_FIELD_END(error_view),
@@ -112,6 +127,23 @@ ABI_STATIC_ASSERT(
     OPENDAL_MBT_API_V1_FIELD_END(operator_with_retry) <=
         OPENDAL_MBT_API_V1_FIELD_END(operator_with_concurrency_limit),
     "v1.5 concurrency-limit append order drifted");
+ABI_STATIC_ASSERT(OPENDAL_MBT_API_V1_FIELD_END(operator_with_concurrency_limit) <=
+                      OPENDAL_MBT_API_V1_FIELD_END(operator_delete_many),
+                  "v1.6 batch append order drifted");
+ABI_STATIC_ASSERT(OPENDAL_MBT_API_V1_FIELD_END(operator_delete_many) <=
+                      OPENDAL_MBT_API_V1_FIELD_END(operator_copier) &&
+                      OPENDAL_MBT_API_V1_FIELD_END(operator_copier) <=
+                          OPENDAL_MBT_API_V1_FIELD_END(copier_next) &&
+                      OPENDAL_MBT_API_V1_FIELD_END(copier_next) <=
+                          OPENDAL_MBT_API_V1_FIELD_END(copier_finish) &&
+                      OPENDAL_MBT_API_V1_FIELD_END(copier_finish) <=
+                          OPENDAL_MBT_API_V1_FIELD_END(copier_abort) &&
+                      OPENDAL_MBT_API_V1_FIELD_END(copier_abort) <=
+                          OPENDAL_MBT_API_V1_FIELD_END(copier_free),
+                  "v1.6 Copier append order drifted");
+ABI_STATIC_ASSERT((OPENDAL_MBT_FEATURE_BATCH_DELETE &
+                   OPENDAL_MBT_FEATURE_COPIER) == 0,
+                  "v1.6 feature bits must be independent");
 ABI_STATIC_ASSERT(OPENDAL_MBT_READ_OPTIONS_V1_MIN_SIZE <=
                       sizeof(opendal_mbt_read_options_v1_t),
                   "read options v1.0 prefix drifted");
