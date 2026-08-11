@@ -54,6 +54,7 @@ async function fixture(serviceProfile = 'local') {
           'executors-tokio',
           'layers-retry',
           'layers-timeout',
+          'layers-concurrent-limit',
         ]
       : ['blocking', 'services-fs'],
     rust_target: 'aarch64-apple-darwin',

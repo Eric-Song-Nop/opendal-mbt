@@ -19,6 +19,7 @@ STANDARD_FEATURES = [
     "executors-tokio",
     "layers-retry",
     "layers-timeout",
+    "layers-concurrent-limit",
 ]
 STANDARD_TARGETS = {
     "aarch64-apple-darwin": {
@@ -109,6 +110,7 @@ class DistributionProfilesTest(unittest.TestCase):
             features["profile-standard"],
             [
                 "profile-local",
+                "layers-concurrent-limit",
                 "layers-timeout-retry",
                 "opendal/services-s3",
                 "opendal/http-transport-reqwest",

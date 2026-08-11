@@ -15,7 +15,8 @@
     "http-transport-reqwest-rustls",
     "executors-tokio",
     "layers-retry",
-    "layers-timeout"
+    "layers-timeout",
+    "layers-concurrent-limit"
   ],
   "cargo_features": [
     "profile-standard"

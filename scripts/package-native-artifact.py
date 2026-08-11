@@ -204,6 +204,7 @@ def load_profile(
             "executors-tokio",
             "layers-retry",
             "layers-timeout",
+            "layers-concurrent-limit",
         ]
         if profile.get("rust_features") != expected_features:
             raise ArtifactError("the standard profile Rust features are inconsistent")
