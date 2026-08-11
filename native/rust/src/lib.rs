@@ -11,7 +11,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
 use std::slice;
 use std::str;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Condvar, Mutex, MutexGuard, OnceLock};
 
 use abi::*;
 use opendal::options::{
@@ -60,12 +60,19 @@ const TEST_WRITER_CLOSE_ERROR: u8 = 3;
 #[cfg(test)]
 const TEST_WRITER_CLOSE_PANIC: u8 = 4;
 #[cfg(test)]
+const TEST_WRITER_ABORT_ERROR: u8 = 5;
+#[cfg(test)]
+const TEST_WRITER_ABORT_PANIC: u8 = 6;
+#[cfg(test)]
 static TEST_WRITER_CALL_TARGET: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 #[cfg(test)]
 static TEST_WRITER_CALL_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 #[cfg(test)]
 static TEST_WRITER_NATIVE_CLOSES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+static TEST_WRITER_NATIVE_ABORTS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
 #[cfg(test)]
@@ -996,7 +1003,7 @@ fn read_stream_lock_failure(stream: &ReadStreamV1) -> CallFailure {
     )
 }
 
-fn drop_blocking_writer_contained(writer: opendal::blocking::Writer) {
+fn drop_async_writer_contained(writer: opendal::Writer) {
     let _ = catch_unwind(AssertUnwindSafe(|| drop(writer)));
 }
 
@@ -1008,37 +1015,102 @@ fn fail_writer_state(writer: &WriterV1) {
         };
         let previous = std::mem::replace(&mut *state, WriterStateV1::Failed);
         writer.state.clear_poison();
+        writer.changed.notify_all();
         match previous {
             WriterStateV1::Open(inner) => Some(inner),
-            WriterStateV1::Failed | WriterStateV1::Closed => None,
+            WriterStateV1::Busy
+            | WriterStateV1::Finished
+            | WriterStateV1::Aborted
+            | WriterStateV1::Failed => None,
         }
     };
     if let Some(inner) = open {
-        drop_blocking_writer_contained(inner);
+        drop_async_writer_contained(inner);
     }
 }
 
-fn writer_lock_failure(writer: &WriterV1) -> CallFailure {
-    let open = {
-        let mut state = match writer.state.lock() {
-            Ok(state) => state,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        let previous = std::mem::replace(&mut *state, WriterStateV1::Failed);
-        writer.state.clear_poison();
-        match previous {
-            WriterStateV1::Open(inner) => Some(inner),
-            WriterStateV1::Failed | WriterStateV1::Closed => None,
-        }
+fn writer_poison_failure(
+    writer: &WriterV1,
+    mut state: MutexGuard<'_, WriterStateV1>,
+) -> CallFailure {
+    let previous = std::mem::replace(&mut *state, WriterStateV1::Failed);
+    writer.state.clear_poison();
+    writer.changed.notify_all();
+    let open = match previous {
+        WriterStateV1::Open(inner) => Some(inner),
+        WriterStateV1::Busy
+        | WriterStateV1::Finished
+        | WriterStateV1::Aborted
+        | WriterStateV1::Failed => None,
     };
+    drop(state);
     if let Some(inner) = open {
-        drop_blocking_writer_contained(inner);
+        drop_async_writer_contained(inner);
     }
     binding_error(
         ERROR_UNEXPECTED,
         "Unexpected",
         "writer state lock was poisoned",
     )
+}
+
+fn take_writer_for_call(
+    writer: &WriterV1,
+    repeated_abort_is_ok: bool,
+) -> CallResult<Option<opendal::Writer>> {
+    let mut state = match writer.state.lock() {
+        Ok(state) => state,
+        Err(poisoned) => return Err(writer_poison_failure(writer, poisoned.into_inner())),
+    };
+    loop {
+        let current = std::mem::replace(&mut *state, WriterStateV1::Busy);
+        match current {
+            WriterStateV1::Open(inner) => return Ok(Some(inner)),
+            WriterStateV1::Busy => {
+                *state = WriterStateV1::Busy;
+                state = match writer.changed.wait(state) {
+                    Ok(state) => state,
+                    Err(poisoned) => {
+                        return Err(writer_poison_failure(writer, poisoned.into_inner()));
+                    }
+                };
+            }
+            WriterStateV1::Aborted if repeated_abort_is_ok => {
+                *state = WriterStateV1::Aborted;
+                return Ok(None);
+            }
+            terminal @ (WriterStateV1::Finished
+            | WriterStateV1::Aborted
+            | WriterStateV1::Failed) => {
+                *state = terminal;
+                return Err(binding_error(
+                    ERROR_RESOURCE_CLOSED,
+                    "ResourceClosed",
+                    "writer is closed",
+                ));
+            }
+        }
+    }
+}
+
+fn set_writer_state(writer: &WriterV1, next: WriterStateV1) -> CallResult<()> {
+    let mut state = match writer.state.lock() {
+        Ok(state) => state,
+        Err(poisoned) => {
+            let mut state = poisoned.into_inner();
+            *state = WriterStateV1::Failed;
+            writer.state.clear_poison();
+            writer.changed.notify_all();
+            return Err(binding_error(
+                ERROR_UNEXPECTED,
+                "Unexpected",
+                "writer state lock was poisoned",
+            ));
+        }
+    };
+    *state = next;
+    writer.changed.notify_all();
+    Ok(())
 }
 
 fn checked_read_buffer(
@@ -1615,8 +1687,8 @@ unsafe extern "C" fn operator_new(
             let _guard = runtime.enter();
             let async_operator =
                 opendal::Operator::via_iter(&scheme, config).map_err(construction_error)?;
-            let operator =
-                opendal::blocking::Operator::new(async_operator).map_err(construction_error)?;
+            let operator = opendal::blocking::Operator::new(async_operator.clone())
+                .map_err(construction_error)?;
             let info = operator.info();
             let scheme = info.scheme().to_owned();
             let root = info.root();
@@ -1634,7 +1706,13 @@ unsafe extern "C" fn operator_new(
                 name,
                 capability: capability_view(info.capability()),
             };
-            Ok((Box::new(OperatorV1 { inner: operator }), Box::new(info)))
+            Ok((
+                Box::new(OperatorV1 {
+                    async_inner: async_operator,
+                    inner: operator,
+                }),
+                Box::new(info),
+            ))
         })();
         match result {
             Ok((operator, info)) => {
@@ -2458,12 +2536,12 @@ unsafe extern "C" fn operator_writer(
             let operator = unsafe { borrow_required(operator.cast_const())? };
             let path = unsafe { read_text(path, "path")? };
             let options = unsafe { parse_write_options(options)? };
-            let writer = operator
-                .inner
-                .writer_options(&path, options)
+            let writer = runtime()?
+                .block_on(operator.async_inner.writer_options(&path, options))
                 .map_err(opendal_error)?;
             Ok(Box::new(WriterV1 {
                 state: Mutex::new(WriterStateV1::Open(writer)),
+                changed: Condvar::new(),
             }))
         })();
         match result {
@@ -2499,28 +2577,16 @@ unsafe extern "C" fn writer_write(
         };
         #[cfg(test)]
         let test_mode = take_writer_call_test_mode(writer);
-        let mut state = match writer.state.lock() {
-            Ok(state) => state,
-            Err(poisoned) => {
-                drop(poisoned);
-                let failure = writer_lock_failure(writer);
-                return unsafe { finish_failure(failure, out_error) };
-            }
+        let runtime = match runtime() {
+            Ok(runtime) => runtime,
+            Err(failure) => return unsafe { finish_failure(failure, out_error) },
         };
-        let current = std::mem::replace(&mut *state, WriterStateV1::Failed);
-        let mut inner = match current {
-            WriterStateV1::Open(inner) => inner,
-            terminal @ (WriterStateV1::Failed | WriterStateV1::Closed) => {
-                *state = terminal;
-                return unsafe {
-                    finish_failure(
-                        binding_error(ERROR_RESOURCE_CLOSED, "ResourceClosed", "writer is closed"),
-                        out_error,
-                    )
-                };
-            }
+        let mut inner = match take_writer_for_call(writer, false) {
+            Ok(Some(inner)) => inner,
+            Ok(None) => unreachable!("non-abort writer call cannot observe idempotent abort"),
+            Err(failure) => return unsafe { finish_failure(failure, out_error) },
         };
-        // State is already Failed while fallible or panicking native work runs.
+        // State is Busy while async work runs, so no mutex guard crosses block_on.
         let step = catch_unwind(AssertUnwindSafe(|| -> CallResult<()> {
             #[cfg(test)]
             match test_mode {
@@ -2534,21 +2600,21 @@ unsafe extern "C" fn writer_write(
                 TEST_WRITER_WRITE_PANIC => panic!("injected writer write panic"),
                 _ => {}
             }
-            inner.write(data).map_err(opendal_error)
+            runtime.block_on(inner.write(data)).map_err(opendal_error)
         }));
         match step {
-            Ok(Ok(())) => {
-                *state = WriterStateV1::Open(inner);
-                STATUS_OK
-            }
+            Ok(Ok(())) => match set_writer_state(writer, WriterStateV1::Open(inner)) {
+                Ok(()) => STATUS_OK,
+                Err(failure) => unsafe { finish_failure(failure, out_error) },
+            },
             Ok(Err(failure)) => {
-                drop(state);
-                drop_blocking_writer_contained(inner);
+                let _ = set_writer_state(writer, WriterStateV1::Failed);
+                drop_async_writer_contained(inner);
                 unsafe { finish_failure(failure, out_error) }
             }
             Err(_) => {
-                drop(state);
-                drop_blocking_writer_contained(inner);
+                let _ = set_writer_state(writer, WriterStateV1::Failed);
+                drop_async_writer_contained(inner);
                 STATUS_PANIC
             }
         }
@@ -2586,26 +2652,14 @@ unsafe extern "C" fn writer_close(
         };
         #[cfg(test)]
         let test_mode = take_writer_call_test_mode(writer);
-        let mut state = match writer.state.lock() {
-            Ok(state) => state,
-            Err(poisoned) => {
-                drop(poisoned);
-                let failure = writer_lock_failure(writer);
-                return unsafe { finish_failure(failure, out_error) };
-            }
+        let runtime = match runtime() {
+            Ok(runtime) => runtime,
+            Err(failure) => return unsafe { finish_failure(failure, out_error) },
         };
-        let current = std::mem::replace(&mut *state, WriterStateV1::Failed);
-        let mut inner = match current {
-            WriterStateV1::Open(inner) => inner,
-            terminal @ (WriterStateV1::Failed | WriterStateV1::Closed) => {
-                *state = terminal;
-                return unsafe {
-                    finish_failure(
-                        binding_error(ERROR_RESOURCE_CLOSED, "ResourceClosed", "writer is closed"),
-                        out_error,
-                    )
-                };
-            }
+        let mut inner = match take_writer_for_call(writer, false) {
+            Ok(Some(inner)) => inner,
+            Ok(None) => unreachable!("non-abort writer call cannot observe idempotent abort"),
+            Err(failure) => return unsafe { finish_failure(failure, out_error) },
         };
         // The first close attempt is terminal before native close begins.
         let step = catch_unwind(AssertUnwindSafe(|| -> CallResult<Box<MetadataV1>> {
@@ -2623,26 +2677,102 @@ unsafe extern "C" fn writer_close(
             }
             #[cfg(test)]
             TEST_WRITER_NATIVE_CLOSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let metadata = inner.close().map_err(opendal_error)?;
+            let metadata = runtime.block_on(inner.close()).map_err(opendal_error)?;
             Ok(Box::new(checked_metadata(metadata)?))
         }));
         match step {
             Ok(Ok(metadata)) => {
-                *state = WriterStateV1::Closed;
-                drop(state);
-                drop_blocking_writer_contained(inner);
+                if let Err(failure) = set_writer_state(writer, WriterStateV1::Finished) {
+                    drop_async_writer_contained(inner);
+                    return unsafe { finish_failure(failure, out_error) };
+                }
+                drop_async_writer_contained(inner);
                 // SAFETY: output was validated above.
                 unsafe { out_metadata.write(Box::into_raw(metadata)) };
                 STATUS_OK
             }
             Ok(Err(failure)) => {
-                drop(state);
-                drop_blocking_writer_contained(inner);
+                let _ = set_writer_state(writer, WriterStateV1::Failed);
+                drop_async_writer_contained(inner);
                 unsafe { finish_failure(failure, out_error) }
             }
             Err(_) => {
-                drop(state);
-                drop_blocking_writer_contained(inner);
+                let _ = set_writer_state(writer, WriterStateV1::Failed);
+                drop_async_writer_contained(inner);
+                STATUS_PANIC
+            }
+        }
+    }));
+    match outcome {
+        Ok(status) => status,
+        Err(_) => {
+            if !writer.is_null() && is_aligned(writer) {
+                // SAFETY: non-null live handle validity remains the caller's obligation.
+                fail_writer_state(unsafe { &*writer });
+            }
+            STATUS_PANIC
+        }
+    }
+}
+
+unsafe extern "C" fn writer_abort(writer: *mut WriterV1, out_error: *mut *mut ErrorV1) -> Status {
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY: optional error output is cleared before the handle is inspected.
+        if let Err(failure) = unsafe { clear_error_output(out_error) } {
+            return unsafe { finish_failure(failure, out_error) };
+        }
+        // SAFETY: opaque handle validity is a caller lifetime obligation.
+        let writer = match unsafe { borrow_required(writer.cast_const()) } {
+            Ok(writer) => writer,
+            Err(failure) => return unsafe { finish_failure(failure, out_error) },
+        };
+        #[cfg(test)]
+        let test_mode = take_writer_call_test_mode(writer);
+        let runtime = match runtime() {
+            Ok(runtime) => runtime,
+            Err(failure) => return unsafe { finish_failure(failure, out_error) },
+        };
+        let mut inner = match take_writer_for_call(writer, true) {
+            Ok(Some(inner)) => inner,
+            Ok(None) => return STATUS_OK,
+            Err(failure) => return unsafe { finish_failure(failure, out_error) },
+        };
+        // State is Busy while async work runs, so finish/write/abort races
+        // linearize before one terminal operation enters OpenDAL.
+        let step = catch_unwind(AssertUnwindSafe(|| -> CallResult<()> {
+            #[cfg(test)]
+            match test_mode {
+                TEST_WRITER_ABORT_ERROR => {
+                    return Err(binding_error(
+                        ERROR_UNEXPECTED,
+                        "Unexpected",
+                        "injected writer abort error",
+                    ));
+                }
+                TEST_WRITER_ABORT_PANIC => panic!("injected writer abort panic"),
+                _ => {}
+            }
+            #[cfg(test)]
+            TEST_WRITER_NATIVE_ABORTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            runtime.block_on(inner.abort()).map_err(opendal_error)
+        }));
+        match step {
+            Ok(Ok(())) => {
+                let result = set_writer_state(writer, WriterStateV1::Aborted);
+                drop_async_writer_contained(inner);
+                match result {
+                    Ok(()) => STATUS_OK,
+                    Err(failure) => unsafe { finish_failure(failure, out_error) },
+                }
+            }
+            Ok(Err(failure)) => {
+                let _ = set_writer_state(writer, WriterStateV1::Failed);
+                drop_async_writer_contained(inner);
+                unsafe { finish_failure(failure, out_error) }
+            }
+            Err(_) => {
+                let _ = set_writer_state(writer, WriterStateV1::Failed);
+                drop_async_writer_contained(inner);
                 STATUS_PANIC
             }
         }
@@ -2685,7 +2815,8 @@ fn stage_api() -> Option<ApiV1> {
             | FEATURE_LISTING
             | FEATURE_RANDOM_READER
             | FEATURE_CHUNKED_WRITER
-            | FEATURE_READ_STREAM,
+            | FEATURE_READ_STREAM
+            | FEATURE_WRITER_ABORT,
         max_output_bytes: MAX_OUTPUT_BYTES,
         library_info: Some(library_info),
         error_view: Some(error_view),
@@ -2727,6 +2858,7 @@ fn stage_api() -> Option<ApiV1> {
         read_stream_next: Some(read_stream_next),
         read_stream_close: Some(read_stream_close),
         read_stream_free: Some(read_stream_free),
+        writer_abort: Some(writer_abort),
     })
 }
 
@@ -2800,6 +2932,7 @@ unsafe fn install_api(base: *mut u8, caller_size: usize, staged: &ApiV1) {
     install_field!(read_stream_next);
     install_field!(read_stream_close);
     install_field!(read_stream_free);
+    install_field!(writer_abort);
 }
 
 /// Negotiate the stable v1 function table.
@@ -3287,6 +3420,17 @@ mod tests {
         metadata
     }
 
+    fn abort_writer(api: &ApiV1, writer: *mut WriterV1) {
+        let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the writer and optional error slot remain live for this call.
+        let status = unsafe {
+            api.writer_abort
+                .expect("WRITER_ABORT operation is installed")(writer, &mut error)
+        };
+        assert_eq!(status, STATUS_OK);
+        assert!(error.is_null());
+    }
+
     fn take_metadata_content_length(api: &ApiV1, metadata: *mut MetadataV1) -> u64 {
         let absent = bytes(b"");
         let mut view = MetadataViewV1 {
@@ -3496,7 +3640,8 @@ mod tests {
                 | FEATURE_LISTING
                 | FEATURE_RANDOM_READER
                 | FEATURE_CHUNKED_WRITER
-                | FEATURE_READ_STREAM,
+                | FEATURE_READ_STREAM
+                | FEATURE_WRITER_ABORT,
         );
         assert!(api.library_info.is_some());
         assert!(api.operator_new.is_some());
@@ -3517,6 +3662,7 @@ mod tests {
         assert!(api.read_stream_next.is_some());
         assert!(api.read_stream_close.is_some());
         assert!(api.read_stream_free.is_some());
+        assert!(api.writer_abort.is_some());
     }
 
     #[test]
@@ -3601,6 +3747,7 @@ mod tests {
             read_stream_next,
             read_stream_close,
             read_stream_free,
+            writer_abort,
         );
 
         for caller_size in API_PREFIX_SIZE..=size_of::<ApiV1>() + 16 {
@@ -5208,6 +5355,106 @@ mod tests {
         unsafe {
             api.writer_free.expect("CHUNKED_WRITER free is installed")(ptr::null_mut());
             api.writer_free.expect("CHUNKED_WRITER free is installed")(writer);
+        }
+    }
+
+    #[test]
+    fn writer_abort_is_explicit_idempotent_and_terminal() {
+        use std::sync::atomic::Ordering;
+
+        let api = api();
+        let (operator, info) = memory_operator(&api);
+        let writer = memory_writer(&api, operator, b"writer/aborted.bin", ptr::null());
+        write_writer_chunk(&api, writer, b"discard-me");
+        let aborts_before = TEST_WRITER_NATIVE_ABORTS.load(Ordering::Relaxed);
+        abort_writer(&api, writer);
+        abort_writer(&api, writer);
+        assert_eq!(
+            TEST_WRITER_NATIVE_ABORTS.load(Ordering::Relaxed),
+            aborts_before + 1,
+        );
+        assert!(!memory_object_exists(&api, operator, b"writer/aborted.bin"));
+
+        let write = api.writer_write.expect("CHUNKED_WRITER write is installed");
+        let close = api.writer_close.expect("CHUNKED_WRITER close is installed");
+        let abort = api
+            .writer_abort
+            .expect("WRITER_ABORT operation is installed");
+        let data = bytes(b"late");
+        let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: an aborted live handle deterministically rejects writes.
+        assert_eq!(unsafe { write(writer, &data, &mut error) }, STATUS_ERROR);
+        assert_eq!(take_error_kind(&api, error), ERROR_RESOURCE_CLOSED);
+        let mut metadata = NonNull::<MetadataV1>::dangling().as_ptr();
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: an aborted live handle deterministically rejects finish.
+        assert_eq!(
+            unsafe { close(writer, &mut metadata, &mut error) },
+            STATUS_ERROR,
+        );
+        assert!(metadata.is_null());
+        assert_eq!(take_error_kind(&api, error), ERROR_RESOURCE_CLOSED);
+
+        let finished = memory_writer(&api, operator, b"writer/finished.bin", ptr::null());
+        write_writer_chunk(&api, finished, b"committed");
+        let metadata = finish_writer(&api, finished);
+        assert_eq!(take_metadata_content_length(&api, metadata), 9);
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: abort after a successful finish is not reported as cleanup.
+        assert_eq!(unsafe { abort(finished, &mut error) }, STATUS_ERROR);
+        assert_eq!(take_error_kind(&api, error), ERROR_RESOURCE_CLOSED);
+
+        // SAFETY: all resources remain uniquely owned.
+        unsafe {
+            api.writer_free.expect("CHUNKED_WRITER free is installed")(writer);
+            api.writer_free.expect("CHUNKED_WRITER free is installed")(finished);
+            api.operator_info_free.expect("BASE info free is installed")(info);
+            api.operator_free.expect("BASE operator free is installed")(operator);
+        }
+    }
+
+    #[test]
+    fn writer_abort_failure_and_panic_are_terminal() {
+        let api = api();
+        let (operator, info) = memory_operator(&api);
+        let abort = api
+            .writer_abort
+            .expect("WRITER_ABORT operation is installed");
+        let write = api.writer_write.expect("CHUNKED_WRITER write is installed");
+        let free = api.writer_free.expect("CHUNKED_WRITER free is installed");
+        let data = bytes(b"late");
+
+        let abort_error = memory_writer(&api, operator, b"writer/abort-error", ptr::null());
+        install_writer_call_test_mode(abort_error, TEST_WRITER_ABORT_ERROR);
+        let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the test hook injects one ordinary native abort failure.
+        assert_eq!(unsafe { abort(abort_error, &mut error) }, STATUS_ERROR);
+        assert_eq!(take_error_kind(&api, error), ERROR_UNEXPECTED);
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: a failed abort attempt is terminal rather than idempotent.
+        assert_eq!(unsafe { abort(abort_error, &mut error) }, STATUS_ERROR);
+        assert_eq!(take_error_kind(&api, error), ERROR_RESOURCE_CLOSED);
+
+        let abort_panic = memory_writer(&api, operator, b"writer/abort-panic", ptr::null());
+        install_writer_call_test_mode(abort_panic, TEST_WRITER_ABORT_PANIC);
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the injected panic is contained and leaves a terminal handle.
+        assert_eq!(unsafe { abort(abort_panic, &mut error) }, STATUS_PANIC);
+        assert!(error.is_null());
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the terminal handle rejects later writes.
+        assert_eq!(
+            unsafe { write(abort_panic, &data, &mut error) },
+            STATUS_ERROR
+        );
+        assert_eq!(take_error_kind(&api, error), ERROR_RESOURCE_CLOSED);
+
+        // SAFETY: all resources remain uniquely owned.
+        unsafe {
+            free(abort_error);
+            free(abort_panic);
+            api.operator_info_free.expect("BASE info free is installed")(info);
+            api.operator_free.expect("BASE operator free is installed")(operator);
         }
     }
 
