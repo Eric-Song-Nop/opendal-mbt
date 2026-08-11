@@ -180,6 +180,22 @@ extern "C" fn native_writer_write(
 extern "C" fn native_writer_close(writer : NativeWriter) -> NativeResult = "moonbit_opendal_writer_close"
 
 ///|
+#borrow(operator, source, destination)
+extern "C" fn native_operator_copy(
+  operator : Operator,
+  source : String,
+  destination : String,
+) -> NativeResult = "moonbit_opendal_operator_copy"
+
+///|
+#borrow(operator, source, destination)
+extern "C" fn native_operator_rename(
+  operator : Operator,
+  source : String,
+  destination : String,
+) -> NativeResult = "moonbit_opendal_operator_rename"
+
+///|
 #borrow(operator, path)
 extern "C" fn native_operator_create_dir(
   operator : Operator,
@@ -505,9 +521,10 @@ fn optional_metadata_text(
   bytes : Bytes,
   operation : Operation,
   path : String?,
+  destination_path : String?,
 ) -> String? raise OpenDalError {
   if present {
-    Some(decode_abi_text(bytes, operation, path, None))
+    Some(decode_abi_text(bytes, operation, path, destination_path))
   } else {
     None
   }
@@ -518,6 +535,7 @@ fn metadata_from_native(
   metadata : NativeMetadata,
   operation : Operation,
   path : String?,
+  destination_path? : String,
 ) -> Metadata raise OpenDalError {
   let bits = native_metadata_present_bits(metadata)
   let mode_code = native_metadata_mode(metadata)
@@ -562,36 +580,42 @@ fn metadata_from_native(
       cache_control_bytes,
       operation,
       path,
+      destination_path,
     ),
     content_disposition: optional_metadata_text(
       metadata_bit(bits, 3),
       content_disposition_bytes,
       operation,
       path,
+      destination_path,
     ),
     content_encoding: optional_metadata_text(
       metadata_bit(bits, 4),
       content_encoding_bytes,
       operation,
       path,
+      destination_path,
     ),
     content_md5: optional_metadata_text(
       metadata_bit(bits, 5),
       content_md5_bytes,
       operation,
       path,
+      destination_path,
     ),
     content_type: optional_metadata_text(
       metadata_bit(bits, 6),
       content_type_bytes,
       operation,
       path,
+      destination_path,
     ),
     etag: optional_metadata_text(
       metadata_bit(bits, 7),
       etag_bytes,
       operation,
       path,
+      destination_path,
     ),
     last_modified,
     version: optional_metadata_text(
@@ -599,6 +623,7 @@ fn metadata_from_native(
       version_bytes,
       operation,
       path,
+      destination_path,
     ),
   }
 }

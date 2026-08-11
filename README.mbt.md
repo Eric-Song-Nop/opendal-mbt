@@ -141,6 +141,9 @@ test "README checked errors" {
 }
 ```
 
+`copy(source, destination)` and `rename(source, destination)` invoke the
+backend operations directly. Check `can_copy()` and `can_rename()` when code
+must adapt across services; unsupported backends raise `Unsupported` with both
+paths retained in the error context.
+
 The generated pkg.generated.mbti file is the authoritative public surface.
-Copy and rename will be added only when their complete MoonBit, C, and Rust
-vertical slices are implemented.

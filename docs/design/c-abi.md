@@ -445,8 +445,8 @@ exceptions cannot be converted into normal errors.
 | `write` | `operator_write` + metadata view/free |
 | `create_dir` | `operator_create_dir` |
 | `delete` | `operator_delete` |
-| proposed `copy` | `operator_copy` + metadata view/free |
-| proposed `rename` | `operator_rename` |
+| `copy` | `operator_copy` + metadata view/free |
+| `rename` | `operator_rename` |
 | `open_lister` | `operator_lister` |
 | `list` | materialize `operator_lister` + repeated `lister_next` |
 | `Lister::next` | `lister_next` + entry views/free |

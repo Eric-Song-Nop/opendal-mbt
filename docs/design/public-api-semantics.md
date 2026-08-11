@@ -1,15 +1,14 @@
 # Public API Semantics
 
-Status: Phase 3 in progress; Reader, Writer, and operation options are implemented
+Status: Phase 3 complete
 
 This document defines the intended MoonBit-facing behavior of the synchronous
 OpenDAL binding. It deliberately avoids fixing the native ABI or implementation
 layout; those are Phase 1 concerns and must implement this contract.
 
-This document includes implemented Reader and Writer semantics plus
-forward-looking copy and rename semantics. Proposed operations remain
-unpublished until their complete MoonBit, C, and Rust slices land. The generated
-`pkg.generated.mbti` is the authoritative current public surface.
+This document defines the implemented synchronous Reader, Writer, copy, and
+rename semantics. The generated `pkg.generated.mbti` is the authoritative
+current public surface.
 
 ## Design stance
 
@@ -136,10 +135,9 @@ op.read(path, range?, version?, if_match?, if_none_match?) -> Bytes raise OpenDa
 op.write(path, data : BytesView, append?, content_type?, content_disposition?, content_encoding?, cache_control?, if_match?, if_none_match?) -> Metadata raise OpenDalError
 op.create_dir(path) -> Unit raise OpenDalError
 op.delete(path, version?, recursive?) -> Unit raise OpenDalError
+op.copy(source, destination) -> Metadata raise OpenDalError
+op.rename(source, destination) -> Unit raise OpenDalError
 ```
-
-Copy and rename are not published until their complete Phase 3 slices are
-available.
 
 Important guarantees and non-guarantees:
 
@@ -153,6 +151,8 @@ Important guarantees and non-guarantees:
 - `copy` and `rename` retain upstream semantics. The binding never implements
   rename as copy plus delete because that would change atomicity and failure
   behavior.
+- `copy` returns the metadata supplied by the backend. It can be partial; use
+  `stat(destination)` when complete destination metadata is required.
 - unsupported operations raise `Unsupported`; they are not silently emulated.
 
 ## Listing
@@ -281,9 +281,8 @@ unsupported options according to the operation and service. The MoonBit layer
 must not claim a stricter universal policy unless it implements and documents
 one.
 
-Reader, Writer, suffix-read, and append capability accessors are available.
-Copy and rename capability accessors are added only with their callable MoonBit
-operations.
+Reader, Writer, copy, rename, suffix-read, and append capability accessors are
+available with their corresponding MoonBit operations.
 
 ## Retry policy
 

@@ -16,6 +16,8 @@ test "downstream consumer executes every published operator workflow" {
   ignore(info.capability.can_write_append())
   assert_true(info.capability.can_create_dir())
   assert_true(info.capability.can_delete())
+  ignore(info.capability.can_copy())
+  ignore(info.capability.can_rename())
   assert_true(info.capability.can_list())
   ignore(info.capability.can_list_with_limit())
   ignore(info.capability.can_list_with_start_after())
@@ -94,6 +96,15 @@ test "downstream consumer uses the filesystem service profile" {
   operator.check()
   operator.write("consumer/nested/value.bin", b"filesystem") |> ignore
   assert_eq(operator.read("consumer/nested/value.bin"), b"filesystem")
+  assert_true(operator.info().capability.can_copy())
+  assert_true(operator.info().capability.can_rename())
+  let copied = operator.copy(
+    "consumer/nested/value.bin", "consumer/nested/copied.bin",
+  )
+  ignore(copied)
+  operator.rename("consumer/nested/copied.bin", "consumer/nested/renamed.bin")
+  assert_false(operator.exists("consumer/nested/copied.bin"))
+  assert_eq(operator.read("consumer/nested/renamed.bin"), b"filesystem")
   assert_true(
     contains_path(
       operator.list("consumer/", recursive=true),

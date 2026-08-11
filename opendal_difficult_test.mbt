@@ -69,10 +69,22 @@ fn chunked_writer_contract(
 }
 
 ///|
+fn two_path_contract(
+  op : @opendal.Operator,
+  source : StringView,
+  destination : StringView,
+) -> @opendal.Metadata raise @opendal.OpenDalError {
+  let metadata = op.copy(source, destination)
+  op.rename(destination, source)
+  metadata
+}
+
+///|
 test "contract: snapshots and materialized errors type-check" {
   ignore(materialized_error_contract)
   ignore(readonly_value_contract)
   ignore(structured_error_contract)
   ignore(random_reader_contract)
   ignore(chunked_writer_contract)
+  ignore(two_path_contract)
 }
