@@ -14,7 +14,9 @@ use std::str;
 use std::sync::{Mutex, OnceLock};
 
 use abi::*;
-use opendal::options::{DeleteOptions, ListOptions, ReadOptions, StatOptions, WriteOptions};
+use opendal::options::{
+    DeleteOptions, ListOptions, ReadOptions, ReaderOptions, StatOptions, WriteOptions,
+};
 use opendal::{BytesRange, Capability, EntryMode, ErrorKind, Metadata};
 use tokio::runtime::Runtime;
 
@@ -36,6 +38,16 @@ static TEST_LISTER_NEXT_TARGET: std::sync::atomic::AtomicUsize =
 static TEST_LISTER_NEXT_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
 #[cfg(test)]
+const TEST_READER_READ_ERROR: u8 = 1;
+#[cfg(test)]
+const TEST_READER_READ_PANIC: u8 = 2;
+#[cfg(test)]
+static TEST_READER_READ_TARGET: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+static TEST_READER_READ_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+#[cfg(test)]
 fn install_lister_next_test_mode(lister: *mut ListerV1, mode: u8) {
     use std::sync::atomic::Ordering;
 
@@ -53,6 +65,29 @@ fn take_lister_next_test_mode(lister: &ListerV1) -> u8 {
         .is_ok()
     {
         TEST_LISTER_NEXT_MODE.swap(0, Ordering::Relaxed)
+    } else {
+        0
+    }
+}
+
+#[cfg(test)]
+fn install_reader_read_test_mode(reader: *mut ReaderV1, mode: u8) {
+    use std::sync::atomic::Ordering;
+
+    TEST_READER_READ_MODE.store(mode, Ordering::Relaxed);
+    TEST_READER_READ_TARGET.store(reader.addr(), Ordering::Release);
+}
+
+#[cfg(test)]
+fn take_reader_read_test_mode(reader: &ReaderV1) -> u8 {
+    use std::sync::atomic::Ordering;
+
+    let address = ptr::from_ref(reader).addr();
+    if TEST_READER_READ_TARGET
+        .compare_exchange(address, 0, Ordering::Acquire, Ordering::Relaxed)
+        .is_ok()
+    {
+        TEST_READER_READ_MODE.swap(0, Ordering::Relaxed)
     } else {
         0
     }
@@ -341,6 +376,48 @@ unsafe fn parse_read_options(pointer: *const ReadOptionsV1) -> CallResult<ReadOp
             )?
         },
         ..ReadOptions::default()
+    })
+}
+
+unsafe fn parse_reader_options(pointer: *const ReaderOptionsV1) -> CallResult<ReaderOptions> {
+    if pointer.is_null() {
+        return Ok(ReaderOptions::default());
+    }
+    // SAFETY: non-null options are validated and copied.
+    let input = unsafe { read_input_struct(pointer)? };
+    let known = READER_VERSION_PRESENT | READER_IF_MATCH_PRESENT | READER_IF_NONE_MATCH_PRESENT;
+    if input.present_bits & !known != 0 {
+        return abi_mismatch();
+    }
+    Ok(ReaderOptions {
+        // SAFETY: all copied views borrow from the caller for this call.
+        version: unsafe {
+            optional_text(
+                input.version,
+                input.present_bits,
+                READER_VERSION_PRESENT,
+                "reader version",
+            )?
+        },
+        // SAFETY: same as above.
+        if_match: unsafe {
+            optional_text(
+                input.if_match,
+                input.present_bits,
+                READER_IF_MATCH_PRESENT,
+                "reader if_match",
+            )?
+        },
+        // SAFETY: same as above.
+        if_none_match: unsafe {
+            optional_text(
+                input.if_none_match,
+                input.present_bits,
+                READER_IF_NONE_MATCH_PRESENT,
+                "reader if_none_match",
+            )?
+        },
+        ..ReaderOptions::default()
     })
 }
 
@@ -722,6 +799,45 @@ fn close_lister_state(lister: &ListerV1) {
     if let Some(inner) = open {
         drop_blocking_lister_contained(inner);
     }
+}
+
+fn drop_blocking_reader_contained(reader: opendal::blocking::Reader) {
+    let _ = catch_unwind(AssertUnwindSafe(|| drop(reader)));
+}
+
+fn close_reader_state(reader: &ReaderV1) {
+    let open = {
+        let mut state = match reader.state.write() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let previous = std::mem::replace(&mut *state, ReaderStateV1::Closed);
+        reader.state.clear_poison();
+        match previous {
+            ReaderStateV1::Open(inner) => Some(inner),
+            ReaderStateV1::Closed => None,
+        }
+    };
+    if let Some(inner) = open {
+        drop_blocking_reader_contained(inner);
+    }
+}
+
+fn checked_read_buffer(
+    buffer: opendal::Buffer,
+    max_output_len: u64,
+    subject: &str,
+) -> CallResult<Box<BufferV1>> {
+    let length = u64::try_from(buffer.len())
+        .map_err(|_| buffer_too_large(format!("{subject} length is not representable")))?;
+    if length > MAX_OUTPUT_BYTES || length > max_output_len {
+        return Err(buffer_too_large(format!(
+            "{subject} exceeds the negotiated output limit"
+        )));
+    }
+    Ok(Box::new(BufferV1 {
+        bytes: buffer.to_vec(),
+    }))
 }
 
 fn metadata_output_view(metadata: &Metadata, header: StructHeaderV1) -> CallResult<MetadataViewV1> {
@@ -1642,6 +1758,166 @@ unsafe extern "C" fn lister_free(lister: *mut ListerV1) {
     }));
 }
 
+unsafe extern "C" fn operator_reader(
+    operator: *mut OperatorV1,
+    path: *const BytesViewV1,
+    options: *const ReaderOptionsV1,
+    out_reader: *mut *mut ReaderV1,
+    out_error: *mut *mut ErrorV1,
+) -> Status {
+    catch_status(|| {
+        // SAFETY: outputs are validated and cleared before input/work.
+        let outputs = [
+            unsafe { clear_required_output(out_reader, ptr::null_mut()) },
+            unsafe { clear_error_output(out_error) },
+        ];
+        if let Err(failure) = combine_output_validation(outputs) {
+            return unsafe { finish_failure(failure, out_error) };
+        }
+        let result = (|| -> CallResult<Box<ReaderV1>> {
+            // SAFETY: handle/text/options are validated and copied as needed.
+            let operator = unsafe { borrow_required(operator.cast_const())? };
+            let path = unsafe { read_text(path, "path")? };
+            let options = unsafe { parse_reader_options(options)? };
+            let reader = operator
+                .inner
+                .reader_options(&path, options)
+                .map_err(opendal_error)?;
+            Ok(Box::new(ReaderV1 {
+                state: std::sync::RwLock::new(ReaderStateV1::Open(reader)),
+            }))
+        })();
+        match result {
+            Ok(reader) => {
+                // SAFETY: output was validated above.
+                unsafe { out_reader.write(Box::into_raw(reader)) };
+                STATUS_OK
+            }
+            Err(failure) => unsafe { finish_failure(failure, out_error) },
+        }
+    })
+}
+
+unsafe extern "C" fn reader_read(
+    reader: *mut ReaderV1,
+    range: *const ByteRangeV1,
+    max_output_len: u64,
+    out_buffer: *mut *mut BufferV1,
+    out_error: *mut *mut ErrorV1,
+) -> Status {
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY: outputs are validated and cleared before the handle is inspected.
+        let outputs = [
+            unsafe { clear_required_output(out_buffer, ptr::null_mut()) },
+            unsafe { clear_error_output(out_error) },
+        ];
+        if let Err(failure) = combine_output_validation(outputs) {
+            return unsafe { finish_failure(failure, out_error) };
+        }
+        // SAFETY: opaque handle validity is a caller lifetime obligation.
+        let reader = match unsafe { borrow_required(reader.cast_const()) } {
+            Ok(reader) => reader,
+            Err(failure) => return unsafe { finish_failure(failure, out_error) },
+        };
+        let result = (|| -> CallResult<Box<BufferV1>> {
+            // SAFETY: the range is required, copied, and validated before use.
+            let range = unsafe { parse_range(read_required(range)?)? };
+            let negotiated_limit = max_output_len.min(MAX_OUTPUT_BYTES);
+            match range {
+                BytesRange::Range {
+                    size: Some(size), ..
+                }
+                | BytesRange::Suffix { size }
+                    if size > negotiated_limit =>
+                {
+                    return Err(buffer_too_large(
+                        "reader range exceeds the negotiated output limit",
+                    ));
+                }
+                _ => {}
+            }
+            #[cfg(test)]
+            let test_mode = take_reader_read_test_mode(reader);
+            let state = match reader.state.read() {
+                Ok(state) => state,
+                Err(poisoned) => {
+                    drop(poisoned);
+                    close_reader_state(reader);
+                    return Err(binding_error(
+                        ERROR_UNEXPECTED,
+                        "Unexpected",
+                        "reader state lock was poisoned",
+                    ));
+                }
+            };
+            let inner = match &*state {
+                ReaderStateV1::Open(inner) => inner,
+                ReaderStateV1::Closed => {
+                    return Err(binding_error(
+                        ERROR_RESOURCE_CLOSED,
+                        "ResourceClosed",
+                        "reader is closed",
+                    ));
+                }
+            };
+            #[cfg(test)]
+            match test_mode {
+                TEST_READER_READ_ERROR => {
+                    return Err(binding_error(
+                        ERROR_UNEXPECTED,
+                        "Unexpected",
+                        "injected reader error",
+                    ));
+                }
+                TEST_READER_READ_PANIC => panic!("injected reader panic"),
+                _ => {}
+            }
+            let buffer = inner.read(range).map_err(opendal_error)?;
+            checked_read_buffer(buffer, negotiated_limit, "reader result")
+        })();
+        match result {
+            Ok(buffer) => {
+                // SAFETY: output was validated above.
+                unsafe { out_buffer.write(Box::into_raw(buffer)) };
+                STATUS_OK
+            }
+            Err(failure) => unsafe { finish_failure(failure, out_error) },
+        }
+    }));
+    match outcome {
+        Ok(status) => status,
+        Err(_) => {
+            if !reader.is_null() && is_aligned(reader) {
+                // SAFETY: non-null live handle validity remains the caller's obligation.
+                close_reader_state(unsafe { &*reader });
+            }
+            STATUS_PANIC
+        }
+    }
+}
+
+unsafe extern "C" fn reader_close(reader: *mut ReaderV1) {
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        if reader.is_null() {
+            return;
+        }
+        // SAFETY: non-null opaque handle validity is the caller's obligation.
+        close_reader_state(unsafe { &*reader });
+    }));
+}
+
+unsafe extern "C" fn reader_free(reader: *mut ReaderV1) {
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        if reader.is_null() {
+            return;
+        }
+        // SAFETY: every non-null handle is uniquely owned and freed once.
+        let reader = unsafe { Box::from_raw(reader) };
+        close_reader_state(&reader);
+        drop(reader);
+    }));
+}
+
 fn stage_api() -> Option<ApiV1> {
     Some(ApiV1 {
         struct_size: 0,
@@ -1650,7 +1926,7 @@ fn stage_api() -> Option<ApiV1> {
         library_minor: ABI_MINOR,
         library_patch: ABI_PATCH,
         reserved0: 0,
-        feature_bits: FEATURE_BASE | FEATURE_WHOLE_OBJECT | FEATURE_LISTING,
+        feature_bits: FEATURE_BASE | FEATURE_WHOLE_OBJECT | FEATURE_LISTING | FEATURE_RANDOM_READER,
         max_output_bytes: MAX_OUTPUT_BYTES,
         library_info: Some(library_info),
         error_view: Some(error_view),
@@ -1680,10 +1956,10 @@ fn stage_api() -> Option<ApiV1> {
         lister_next: Some(lister_next),
         lister_close: Some(lister_close),
         lister_free: Some(lister_free),
-        operator_reader: None,
-        reader_read: None,
-        reader_close: None,
-        reader_free: None,
+        operator_reader: Some(operator_reader),
+        reader_read: Some(reader_read),
+        reader_close: Some(reader_close),
+        reader_free: Some(reader_free),
         operator_writer: None,
         writer_write: None,
         writer_close: None,
@@ -1749,8 +2025,11 @@ unsafe fn install_api(base: *mut u8, caller_size: usize, staged: &ApiV1) {
     install_field!(lister_next);
     install_field!(lister_close);
     install_field!(lister_free);
-    // Disabled Reader and Writer groups are intentionally left zero by the
-    // bounded clear.
+    install_field!(operator_reader);
+    install_field!(reader_read);
+    install_field!(reader_close);
+    install_field!(reader_free);
+    // The disabled Writer group is intentionally left zero by the bounded clear.
 }
 
 /// Negotiate the stable v1 function table.
@@ -2058,6 +2337,100 @@ mod tests {
         lister
     }
 
+    fn memory_reader(
+        api: &ApiV1,
+        operator: *mut OperatorV1,
+        path: &[u8],
+        options: *const ReaderOptionsV1,
+    ) -> *mut ReaderV1 {
+        let path = bytes(path);
+        let mut reader = NonNull::<ReaderV1>::dangling().as_ptr();
+        let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: all input carriers and output slots are valid for this call.
+        let status = unsafe {
+            api.operator_reader
+                .expect("RANDOM_READER constructor is installed")(
+                operator,
+                &path,
+                options,
+                &mut reader,
+                &mut error,
+            )
+        };
+        assert_eq!(status, STATUS_OK);
+        assert!(!reader.is_null());
+        assert!(error.is_null());
+        reader
+    }
+
+    fn byte_range(kind: u32, offset: u64, length: u64) -> ByteRangeV1 {
+        ByteRangeV1 {
+            struct_size: size_of::<ByteRangeV1>() as u32,
+            struct_version: STRUCT_VERSION,
+            kind,
+            reserved0: 0,
+            offset,
+            length,
+        }
+    }
+
+    fn take_buffer(api: &ApiV1, buffer: *mut BufferV1) -> Vec<u8> {
+        assert!(!buffer.is_null());
+        let mut length = u64::MAX;
+        // SAFETY: the buffer is live and length is writable.
+        assert_eq!(
+            unsafe { api.buffer_len.expect("BASE buffer len is installed")(buffer, &mut length) },
+            STATUS_OK,
+        );
+        let length = usize::try_from(length).expect("test buffer length fits usize");
+        let mut output = vec![0; length];
+        let mut required = u64::MAX;
+        let destination = if output.is_empty() {
+            ptr::null_mut()
+        } else {
+            output.as_mut_ptr()
+        };
+        // SAFETY: destination covers the reported immutable buffer length.
+        unsafe {
+            assert_eq!(
+                api.buffer_copy.expect("BASE buffer copy is installed")(
+                    buffer,
+                    destination,
+                    length as u64,
+                    &mut required,
+                ),
+                STATUS_OK,
+            );
+            api.buffer_free.expect("BASE buffer free is installed")(buffer);
+        }
+        assert_eq!(required, length as u64);
+        output
+    }
+
+    fn read_reader_bytes(
+        api: &ApiV1,
+        reader: *mut ReaderV1,
+        range: &ByteRangeV1,
+        max_output_len: u64,
+    ) -> Vec<u8> {
+        let mut buffer = NonNull::<BufferV1>::dangling().as_ptr();
+        let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the reader, range, and output slots remain live for this call.
+        let status = unsafe {
+            api.reader_read.expect("RANDOM_READER read is installed")(
+                reader,
+                range,
+                max_output_len,
+                &mut buffer,
+                &mut error,
+            )
+        };
+        assert_eq!(status, STATUS_OK);
+        assert!(!buffer.is_null());
+        assert!(error.is_null());
+        take_buffer(api, buffer)
+    }
+
     fn collect_lister(api: &ApiV1, lister: *mut ListerV1) -> Vec<ListedEntry> {
         let next = api.lister_next.expect("LISTING next is installed");
         let mut entries = Vec::new();
@@ -2094,7 +2467,7 @@ mod tests {
         assert_eq!(api.library_struct_size as usize, size_of::<ApiV1>());
         assert_eq!(
             api.feature_bits,
-            FEATURE_BASE | FEATURE_WHOLE_OBJECT | FEATURE_LISTING,
+            FEATURE_BASE | FEATURE_WHOLE_OBJECT | FEATURE_LISTING | FEATURE_RANDOM_READER,
         );
         assert!(api.library_info.is_some());
         assert!(api.operator_new.is_some());
@@ -2103,7 +2476,10 @@ mod tests {
         assert!(api.lister_next.is_some());
         assert!(api.lister_close.is_some());
         assert!(api.lister_free.is_some());
-        assert!(api.operator_reader.is_none());
+        assert!(api.operator_reader.is_some());
+        assert!(api.reader_read.is_some());
+        assert!(api.reader_close.is_some());
+        assert!(api.reader_free.is_some());
         assert!(api.operator_writer.is_none());
     }
 
@@ -3103,6 +3479,246 @@ mod tests {
     }
 
     #[test]
+    fn random_reader_ranges_are_independent_concurrent_and_outlive_operator() {
+        let api = api();
+        let (operator, info) = memory_operator(&api);
+        write_memory_object(&api, operator, b"reader/data.bin", b"0123456789");
+        let reader = memory_reader(&api, operator, b"reader/data.bin", ptr::null());
+
+        // OpenDAL readers own the state needed after construction.
+        // SAFETY: both constructor outputs remain uniquely owned here.
+        unsafe {
+            api.operator_info_free.expect("BASE info free is installed")(info);
+            api.operator_free.expect("BASE operator free is installed")(operator);
+        }
+
+        assert_eq!(
+            read_reader_bytes(&api, reader, &byte_range(RANGE_FULL, 0, 0), 64),
+            b"0123456789",
+        );
+        assert_eq!(
+            read_reader_bytes(&api, reader, &byte_range(RANGE_FROM, 3, 0), 64),
+            b"3456789",
+        );
+        assert_eq!(
+            read_reader_bytes(&api, reader, &byte_range(RANGE_OFFSET_LENGTH, 2, 4), 64,),
+            b"2345",
+        );
+        assert_eq!(
+            read_reader_bytes(&api, reader, &byte_range(RANGE_SUFFIX, 0, 3), 64),
+            b"789",
+        );
+
+        // Shared reader calls take read locks, so independent ranges can execute together.
+        let reader_ref = unsafe { &*reader };
+        let (left, right) = std::thread::scope(|scope| {
+            let left = scope.spawn(|| {
+                read_reader_bytes(
+                    &api,
+                    ptr::from_ref(reader_ref).cast_mut(),
+                    &byte_range(RANGE_OFFSET_LENGTH, 0, 5),
+                    64,
+                )
+            });
+            let right = scope.spawn(|| {
+                read_reader_bytes(
+                    &api,
+                    ptr::from_ref(reader_ref).cast_mut(),
+                    &byte_range(RANGE_OFFSET_LENGTH, 5, 5),
+                    64,
+                )
+            });
+            (
+                left.join().expect("left range read did not panic"),
+                right.join().expect("right range read did not panic"),
+            )
+        });
+        assert_eq!(left, b"01234");
+        assert_eq!(right, b"56789");
+
+        let read = api.reader_read.expect("RANDOM_READER read is installed");
+        let oversized = byte_range(RANGE_OFFSET_LENGTH, 0, 6);
+        let mut buffer = NonNull::<BufferV1>::dangling().as_ptr();
+        let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the explicit range exceeds the negotiated cap before native allocation.
+        assert_eq!(
+            unsafe { read(reader, &oversized, 5, &mut buffer, &mut error) },
+            STATUS_ERROR,
+        );
+        assert!(buffer.is_null());
+        assert_eq!(take_error_kind(&api, error), ERROR_BUFFER_TOO_LARGE);
+
+        let overflow = byte_range(RANGE_OFFSET_LENGTH, u64::MAX, 1);
+        buffer = NonNull::<BufferV1>::dangling().as_ptr();
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: overflow is an ABI-only malformed range and leaves outputs clear.
+        assert_eq!(
+            unsafe { read(reader, &overflow, 64, &mut buffer, &mut error) },
+            STATUS_ABI_MISMATCH,
+        );
+        assert!(buffer.is_null());
+        assert!(error.is_null());
+
+        // Neither a size rejection nor malformed input closes a valid reader.
+        assert_eq!(
+            read_reader_bytes(&api, reader, &byte_range(RANGE_OFFSET_LENGTH, 1, 2), 64,),
+            b"12",
+        );
+
+        // SAFETY: close is idempotent and keeps the outer handle alive.
+        unsafe {
+            api.reader_close.expect("RANDOM_READER close is installed")(reader);
+            api.reader_close.expect("RANDOM_READER close is installed")(reader);
+        }
+        buffer = NonNull::<BufferV1>::dangling().as_ptr();
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        let full = byte_range(RANGE_FULL, 0, 0);
+        // SAFETY: the closed handle remains live for deterministic state reporting.
+        assert_eq!(
+            unsafe { read(reader, &full, 64, &mut buffer, &mut error) },
+            STATUS_ERROR,
+        );
+        assert!(buffer.is_null());
+        assert_eq!(take_error_kind(&api, error), ERROR_RESOURCE_CLOSED);
+
+        // SAFETY: NULL destruction is a no-op; the live handle is freed once.
+        unsafe {
+            api.reader_close.expect("RANDOM_READER close is installed")(ptr::null_mut());
+            api.reader_free.expect("RANDOM_READER free is installed")(ptr::null_mut());
+            api.reader_free.expect("RANDOM_READER free is installed")(reader);
+        }
+    }
+
+    #[test]
+    fn random_reader_options_error_panic_and_poison_preserve_terminal_rules() {
+        let api = api();
+        let (operator, info) = memory_operator(&api);
+        write_memory_object(&api, operator, b"reader/state.bin", b"state");
+        let constructor = api
+            .operator_reader
+            .expect("RANDOM_READER constructor is installed");
+        let path = bytes(b"reader/state.bin");
+        let absent = bytes(b"");
+
+        let assert_abi_mismatch = |options: &ReaderOptionsV1| {
+            let mut reader = NonNull::<ReaderV1>::dangling().as_ptr();
+            let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+            // SAFETY: the complete options carrier deliberately violates one ABI invariant.
+            assert_eq!(
+                unsafe { constructor(operator, &path, options, &mut reader, &mut error) },
+                STATUS_ABI_MISMATCH,
+            );
+            assert!(reader.is_null());
+            assert!(error.is_null());
+        };
+
+        let mut options = ReaderOptionsV1 {
+            struct_size: size_of::<ReaderOptionsV1>() as u32,
+            struct_version: STRUCT_VERSION,
+            present_bits: 1 << 63,
+            version: absent,
+            if_match: absent,
+            if_none_match: absent,
+        };
+        assert_abi_mismatch(&options);
+        options.present_bits = 0;
+        options.version = bytes(b"noncanonical-absent");
+        assert_abi_mismatch(&options);
+        options.version = absent;
+        options.struct_version = STRUCT_VERSION + 1;
+        assert_abi_mismatch(&options);
+
+        let invalid_utf8 = [0xFF];
+        options.struct_version = STRUCT_VERSION;
+        options.present_bits = READER_IF_MATCH_PRESENT;
+        options.if_match = bytes(&invalid_utf8);
+        let mut invalid_reader = NonNull::<ReaderV1>::dangling().as_ptr();
+        let mut invalid_error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the present text view is readable but intentionally invalid UTF-8.
+        assert_eq!(
+            unsafe {
+                constructor(
+                    operator,
+                    &path,
+                    &options,
+                    &mut invalid_reader,
+                    &mut invalid_error,
+                )
+            },
+            STATUS_ERROR,
+        );
+        assert!(invalid_reader.is_null());
+        assert_eq!(take_error_kind(&api, invalid_error), ERROR_INVALID_ARGUMENT);
+
+        let reader = memory_reader(&api, operator, b"reader/state.bin", ptr::null());
+        let read = api.reader_read.expect("RANDOM_READER read is installed");
+        let full = byte_range(RANGE_FULL, 0, 0);
+        install_reader_read_test_mode(reader, TEST_READER_READ_ERROR);
+        let mut buffer = NonNull::<BufferV1>::dangling().as_ptr();
+        let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the test hook injects an ordinary operation failure.
+        assert_eq!(
+            unsafe { read(reader, &full, 64, &mut buffer, &mut error) },
+            STATUS_ERROR,
+        );
+        assert!(buffer.is_null());
+        assert_eq!(take_error_kind(&api, error), ERROR_UNEXPECTED);
+        assert_eq!(read_reader_bytes(&api, reader, &full, 64), b"state");
+
+        install_reader_read_test_mode(reader, TEST_READER_READ_PANIC);
+        buffer = NonNull::<BufferV1>::dangling().as_ptr();
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the injected panic is contained and closes uncertain state.
+        assert_eq!(
+            unsafe { read(reader, &full, 64, &mut buffer, &mut error) },
+            STATUS_PANIC,
+        );
+        assert!(buffer.is_null());
+        assert!(error.is_null());
+        buffer = NonNull::<BufferV1>::dangling().as_ptr();
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: a contained panic leaves the handle deterministically closed.
+        assert_eq!(
+            unsafe { read(reader, &full, 64, &mut buffer, &mut error) },
+            STATUS_ERROR,
+        );
+        assert_eq!(take_error_kind(&api, error), ERROR_RESOURCE_CLOSED);
+
+        let poisoned_reader = memory_reader(&api, operator, b"reader/state.bin", ptr::null());
+        let poisoned = catch_unwind(AssertUnwindSafe(|| {
+            // SAFETY: this test owns the live handle and intentionally poisons its state lock.
+            let reader = unsafe { &*poisoned_reader };
+            let _guard = reader.state.write().expect("fresh reader lock is healthy");
+            panic!("intentionally poison reader state");
+        }));
+        assert!(poisoned.is_err());
+        buffer = NonNull::<BufferV1>::dangling().as_ptr();
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: poison is reported once while transitioning to Closed.
+        assert_eq!(
+            unsafe { read(poisoned_reader, &full, 64, &mut buffer, &mut error) },
+            STATUS_ERROR,
+        );
+        assert_eq!(take_error_kind(&api, error), ERROR_UNEXPECTED);
+        buffer = NonNull::<BufferV1>::dangling().as_ptr();
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: later calls observe the deterministic terminal state.
+        assert_eq!(
+            unsafe { read(poisoned_reader, &full, 64, &mut buffer, &mut error) },
+            STATUS_ERROR,
+        );
+        assert_eq!(take_error_kind(&api, error), ERROR_RESOURCE_CLOSED);
+
+        // SAFETY: all resources remain uniquely owned by this test.
+        unsafe {
+            api.reader_free.expect("RANDOM_READER free is installed")(reader);
+            api.reader_free.expect("RANDOM_READER free is installed")(poisoned_reader);
+            api.operator_info_free.expect("BASE info free is installed")(info);
+            api.operator_free.expect("BASE operator free is installed")(operator);
+        }
+    }
+
+    #[test]
     fn buffer_copy_is_atomic_for_sizing_errors_and_success_tail() {
         let api = api();
         let copy = api.buffer_copy.expect("BASE buffer copy is installed");
@@ -3187,5 +3803,6 @@ mod tests {
         assert_send_sync::<EntryV1>();
         assert_send_sync::<OperatorInfoV1>();
         assert_send_sync::<ListerV1>();
+        assert_send_sync::<ReaderV1>();
     }
 }
