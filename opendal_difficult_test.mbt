@@ -32,8 +32,27 @@ fn structured_error_contract(
 }
 
 ///|
+fn random_reader_contract(
+  op : @opendal.Operator,
+  range : @opendal.ByteRange,
+) -> @opendal.Reader raise @opendal.OpenDalError {
+  let reader = op.open_reader(
+    "value.bin",
+    version="version",
+    if_match="etag",
+    if_none_match="other-etag",
+  )
+  let bytes = reader.read(range)
+  let ranged = op.read("value.bin", range~, version="version")
+  ignore(bytes)
+  ignore(ranged)
+  reader
+}
+
+///|
 test "contract: snapshots and materialized errors type-check" {
   ignore(materialized_error_contract)
   ignore(readonly_value_contract)
   ignore(structured_error_contract)
+  ignore(random_reader_contract)
 }

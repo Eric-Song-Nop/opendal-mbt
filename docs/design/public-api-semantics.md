@@ -1,15 +1,15 @@
 # Public API Semantics
 
-Status: Phase 3 design proposal; only implemented operations are published
+Status: Phase 3 in progress; Reader and read options are implemented
 
 This document defines the intended MoonBit-facing behavior of the synchronous
 OpenDAL binding. It deliberately avoids fixing the native ABI or implementation
 layout; those are Phase 1 concerns and must implement this contract.
 
-This document includes forward-looking Reader, Writer, copy, and rename
-semantics. Those sections are proposals until their complete MoonBit, C, and
-Rust slices land. The generated `pkg.generated.mbti` is the authoritative
-current public surface and contains implemented operations only.
+This document includes implemented Reader semantics and forward-looking Writer,
+copy, and rename semantics. Proposed sections remain unpublished until their
+complete MoonBit, C, and Rust slices land. The generated
+`pkg.generated.mbti` is the authoritative current public surface.
 
 ## Design stance
 
@@ -34,10 +34,10 @@ It is not a transliteration of either Rust or OCaml:
 
 | Category | Types | Contract |
 |---|---|---|
-| Native resources | `Operator`, `Lister`, and proposed `Reader`/`Writer` | Opaque and impossible for callers to fabricate |
+| Native resources | `Operator`, `Lister`, `Reader`, and proposed `Writer` | Opaque and impossible for callers to fabricate |
 | Read-only snapshots | `Metadata`, `Entry`, `ErrorInfo`, `OperatorInfo`, `Timestamp` | Fields are readable but values are produced by the binding |
 | Read-only algebraic outputs | `EntryMode`, `ErrorKind`, `ErrorStatus`, `Operation` | Callers can inspect and pattern-match values but cannot fabricate them |
-| Proposed algebraic input | `ByteRange` | Uses `pub(all)` when Reader lands so callers can construct labelled ranges |
+| Algebraic input | `ByteRange` | Uses `pub(all)` so callers can construct labelled ranges |
 | Extensible query object | `Capability` | Opaque effective-capability snapshot with getter methods so new capabilities can be added compatibly |
 
 `Operator` is logically immutable and shareable. `Lister` and `Writer` are
@@ -132,14 +132,14 @@ The core synchronous methods are:
 ```moonbit
 op.exists(path) -> Bool raise OpenDalError
 op.stat(path, version?, if_match?, if_none_match?) -> Metadata raise OpenDalError
-op.read(path) -> Bytes raise OpenDalError
+op.read(path, range?, version?, if_match?, if_none_match?) -> Bytes raise OpenDalError
 op.write(path, data : BytesView) -> Metadata raise OpenDalError
 op.create_dir(path) -> Unit raise OpenDalError
 op.delete(path, version?, recursive?) -> Unit raise OpenDalError
 ```
 
-Copy, rename, read options, and write options are not published until their
-complete Phase 3 slices are available.
+Copy, rename, and write options are not published until their complete Phase 3
+slices are available.
 
 Important guarantees and non-guarantees:
 
@@ -184,10 +184,10 @@ The first API does not coerce `Lister` into `Iter[Entry]`. MoonBit's ordinary
 iterator step does not naturally carry checked I/O errors, and hiding errors in
 an iterator would weaken the contract.
 
-## Proposed Reader
+## Reader
 
-The Phase 3 Reader will follow OpenDAL's random-access Reader rather than the
-cursor-bearing C `StdReader` adapter:
+The Reader follows OpenDAL's random-access Reader rather than the cursor-bearing
+C `StdReader` adapter:
 
 ```moonbit
 let reader = op.open_reader(path, if_match="etag")
@@ -281,8 +281,9 @@ unsupported options according to the operation and service. The MoonBit layer
 must not claim a stricter universal policy unless it implements and documents
 one.
 
-Reader, Writer, copy, rename, suffix-read, and append capability accessors are
-added only with their callable MoonBit operations.
+Reader and suffix-read capability accessors are available. Writer, copy,
+rename, and append capability accessors are added only with their callable
+MoonBit operations.
 
 ## Retry policy
 

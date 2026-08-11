@@ -11,6 +11,7 @@ test "downstream consumer executes every published operator workflow" {
   assert_eq(info.scheme, "memory")
   assert_true(info.capability.can_stat())
   assert_true(info.capability.can_read())
+  ignore(info.capability.can_read_suffix())
   assert_true(info.capability.can_write())
   assert_true(info.capability.can_create_dir())
   assert_true(info.capability.can_delete())
@@ -29,6 +30,12 @@ test "downstream consumer executes every published operator workflow" {
   assert_true(operator.exists(path))
   assert_true(operator.stat(path).is_file())
   assert_eq(operator.read(path), b"downstream")
+  assert_eq(operator.read(path, range=Range(offset=4UL, length=6UL)), b"stream")
+  let reader = operator.open_reader(path)
+  assert_eq(reader.read(From(offset=4UL)), b"stream")
+  assert_eq(reader.read(Suffix(length=4UL)), b"ream")
+  reader.close()
+  reader.close()
 
   operator.write("consumer/nested/one.bin", b"one") |> ignore
   let entries = operator.list("consumer/", recursive=true)

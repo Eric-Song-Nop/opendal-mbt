@@ -12,6 +12,10 @@ pub type Capability
 priv type NativeLister
 
 ///|
+/// Native random-access reader storage finalized by the C stub.
+priv type NativeReader
+
+///|
 /// Temporary owned native entry snapshot.
 priv type NativeEntry
 
@@ -19,6 +23,13 @@ priv type NativeEntry
 /// Safe lister wrapper retaining the prefix used for error context.
 pub struct Lister {
   priv native : NativeLister
+  priv path : String
+}
+
+///|
+/// Safe random-access reader retaining the path used for error context.
+pub struct Reader {
+  priv native : NativeReader
   priv path : String
 }
 
@@ -64,11 +75,46 @@ extern "C" fn native_operator_stat(
 ) -> NativeResult = "moonbit_opendal_operator_stat"
 
 ///|
-#borrow(operator, path)
+#borrow(operator, path, version, if_match, if_none_match)
 extern "C" fn native_operator_read(
   operator : Operator,
   path : String,
+  range_kind : UInt,
+  range_offset : UInt64,
+  range_length : UInt64,
+  has_version : Bool,
+  version : String,
+  has_if_match : Bool,
+  if_match : String,
+  has_if_none_match : Bool,
+  if_none_match : String,
 ) -> NativeResult = "moonbit_opendal_operator_read"
+
+///|
+#borrow(operator, path, version, if_match, if_none_match)
+extern "C" fn native_operator_reader(
+  operator : Operator,
+  path : String,
+  has_version : Bool,
+  version : String,
+  has_if_match : Bool,
+  if_match : String,
+  has_if_none_match : Bool,
+  if_none_match : String,
+) -> NativeResult = "moonbit_opendal_operator_reader"
+
+///|
+#borrow(reader)
+extern "C" fn native_reader_read(
+  reader : NativeReader,
+  range_kind : UInt,
+  range_offset : UInt64,
+  range_length : UInt64,
+) -> NativeResult = "moonbit_opendal_reader_read"
+
+///|
+#borrow(reader)
+extern "C" fn native_reader_close(reader : NativeReader) -> Unit = "moonbit_opendal_reader_close"
 
 ///|
 #borrow(operator, path, data)
@@ -142,6 +188,10 @@ extern "C" fn native_result_take_operator(result : NativeResult) -> Operator = "
 ///|
 #borrow(result)
 extern "C" fn native_result_take_lister(result : NativeResult) -> NativeLister = "moonbit_opendal_result_take_lister"
+
+///|
+#borrow(result)
+extern "C" fn native_result_take_reader(result : NativeResult) -> NativeReader = "moonbit_opendal_result_take_reader"
 
 ///|
 #borrow(result)
