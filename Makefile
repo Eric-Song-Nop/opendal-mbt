@@ -73,6 +73,7 @@ packaged-consumer:
 	fi
 
 native-artifact-test:
+	python3 scripts/test-distribution-profiles.py
 	python3 scripts/test-package-native-artifact.py
 	node --check scripts/prepare-test-native-cache.js
 	node --test scripts/test-native-resolver.js
