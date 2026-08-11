@@ -50,6 +50,7 @@ pub(crate) const RANGE_SUFFIX: u32 = 3;
 pub(crate) const FEATURE_BASE: u64 = 1 << 0;
 pub(crate) const FEATURE_WHOLE_OBJECT: u64 = 1 << 1;
 pub(crate) const FEATURE_LISTING: u64 = 1 << 2;
+pub(crate) const FEATURE_RANDOM_READER: u64 = 1 << 3;
 
 pub(crate) const CAP_STAT: u64 = 1 << 0;
 pub(crate) const CAP_READ: u64 = 1 << 1;
@@ -68,6 +69,10 @@ pub(crate) const CAP_LIST_RECURSIVE: u64 = 1 << 12;
 pub(crate) const READ_VERSION_PRESENT: u64 = 1 << 0;
 pub(crate) const READ_IF_MATCH_PRESENT: u64 = 1 << 1;
 pub(crate) const READ_IF_NONE_MATCH_PRESENT: u64 = 1 << 2;
+
+pub(crate) const READER_VERSION_PRESENT: u64 = 1 << 0;
+pub(crate) const READER_IF_MATCH_PRESENT: u64 = 1 << 1;
+pub(crate) const READER_IF_NONE_MATCH_PRESENT: u64 = 1 << 2;
 
 pub(crate) const WRITE_APPEND: u64 = 1 << 0;
 pub(crate) const WRITE_CONTENT_TYPE_PRESENT: u64 = 1 << 0;
@@ -323,7 +328,12 @@ pub(crate) enum ListerStateV1 {
 
 #[repr(C)]
 pub(crate) struct ReaderV1 {
-    _private: [u8; 0],
+    pub(crate) state: std::sync::RwLock<ReaderStateV1>,
+}
+
+pub(crate) enum ReaderStateV1 {
+    Open(opendal::blocking::Reader),
+    Closed,
 }
 
 #[repr(C)]

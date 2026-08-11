@@ -1,6 +1,6 @@
 # OpenDAL MoonBit C ABI
 
-Status: ABI v1.0 design draft implemented for the BASE and WHOLE_OBJECT groups
+Status: ABI v1.0 implemented for BASE, WHOLE_OBJECT, LISTING, and RANDOM_READER
 
 The executable header is `native/include/opendal_mbt.h`. It is the canonical
 source for exact field order, numeric constants, and function signatures. This
