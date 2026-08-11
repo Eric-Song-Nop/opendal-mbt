@@ -50,9 +50,6 @@ jobs:
           - os: macos-15
             rust_target: aarch64-apple-darwin
             macos_deployment_target: "11.0"
-          - os: macos-15-intel
-            rust_target: x86_64-apple-darwin
-            macos_deployment_target: "11.0"
           - os: ubuntu-22.04-arm
             rust_target: aarch64-unknown-linux-gnu
             macos_deployment_target: ""

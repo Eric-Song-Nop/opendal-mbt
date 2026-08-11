@@ -62,13 +62,12 @@ install the S3 HTTP transport.
 ## Supported host matrix
 
 The immutable `local` v0.1 release remains available on its original two
-hosts. The `standard` profile expands the next release to four target-native
+hosts. The `standard` profile expands the next release to three target-native
 builders:
 
 | Host | Release target | Compatibility floor | Profile |
 | --- | --- | --- | --- |
 | Apple silicon macOS | `aarch64-apple-darwin` | macOS 11.0 | `local`, `standard` |
-| Intel macOS | `x86_64-apple-darwin` | macOS 11.0 | `standard` |
 | arm64 Linux | `aarch64-unknown-linux-gnu` | glibc 2.35 | `standard` |
 | x86-64 Linux | `x86_64-unknown-linux-gnu` | glibc 2.35 | `local`, `standard` |
 
@@ -76,8 +75,17 @@ Every `standard` archive is built and linked on a GitHub-hosted runner with
 the same architecture; no cross-compiled archive is presented as target-native
 validation. The module and package remain native-only. Unsupported hosts fail
 before downloading with a message listing the selected profile's matrix.
-Windows and musl require separately built and tested artifacts; the installer
-never guesses that one target is compatible with another.
+On Linux arm64, Rust reports the unwind dependency as `-lgcc_s`, while the
+MoonBit native linker cannot discover the unversioned development symlink.
+The resolver therefore replaces only that flag with a verified, versioned
+`libgcc_s.so.1` already supplied by the glibc host. This requires neither a C
+compiler nor a development package and fails before linking when the runtime
+is absent.
+The current MoonBit CLI installer does not provide an Intel macOS toolchain,
+so a Rust-only build on that host is not sufficient evidence for publishing a
+MoonBit artifact. Intel macOS, Windows, and musl require separately built and
+tested toolchain paths; the installer never guesses that one target is
+compatible with another.
 
 ## Published artifact
 
