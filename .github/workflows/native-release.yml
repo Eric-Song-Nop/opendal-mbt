@@ -23,7 +23,9 @@ on:
       - scripts/test-distribution-profiles.py
       - scripts/package-native-artifact.py
       - scripts/prepare-test-native-cache.js
+      - scripts/render-registry-consumer.py
       - scripts/test-package-native-artifact.py
+      - scripts/test-render-registry-consumer.py
       - scripts/test-version-metadata.py
   push:
     tags:
@@ -72,6 +74,7 @@ jobs:
         run: |
           python3 scripts/test-distribution-profiles.py
           python3 scripts/test-package-native-artifact.py
+          python3 scripts/test-render-registry-consumer.py
           python3 scripts/test-version-metadata.py
           python3 scripts/check-version-metadata.py
       - name: Build release static library
@@ -187,10 +190,11 @@ jobs:
         run: |
           set -euo pipefail
           consumer=target/published-consumer
-          mkdir -p "$consumer"
-          cp integration/consumer/moon.mod "$consumer/moon.mod"
-          cp integration/consumer/moon.pkg "$consumer/moon.pkg"
-          cp integration/consumer/consumer_test.mbt "$consumer/consumer_test.mbt"
+          release_version=${GITHUB_REF_NAME#v}
+          python3 scripts/render-registry-consumer.py \
+            --repo-root . \
+            --output-dir "$consumer" \
+            --version "$release_version"
           cd "$consumer"
           for attempt in 1 2 3 4 5; do
             if moon update && moon test --target native \

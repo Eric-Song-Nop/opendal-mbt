@@ -42,7 +42,8 @@ that profile's committed table. It then:
 
 1. uploads the archives, checksums, and manifests to the GitHub release;
 2. publishes the source package to mooncakes.io;
-3. resolves that registry package in a fresh consumer;
+3. renders the tag version into a fresh registry consumer and resolves that
+   exact package version;
 4. downloads the just-published native asset through `build.js`; and
 5. runs the acceptance suite for every service promised by the selected
    profile.
@@ -52,6 +53,7 @@ replaces its assets with the same verified bytes. Never change an existing
 release asset without also changing its pinned digest and artifact revision.
 
 `make version-contract` keeps `moon.mod`, the native Rust crate and lockfile,
-and the versioned dependency in `integration/consumer/moon.mod` aligned. This
-prevents a new tag from publishing one package version while the final registry
-acceptance job silently resolves an older release.
+and the versioned dependency in `integration/consumer/moon.mod` aligned. The
+tag job additionally renders its verified tag version into a temporary copy of
+that consumer, so the final registry acceptance job cannot silently resolve an
+older release even when the repository fixture is stale.

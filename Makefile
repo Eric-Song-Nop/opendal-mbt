@@ -88,6 +88,7 @@ packaged-consumer:
 
 version-contract:
 	python3 scripts/test-version-metadata.py
+	python3 scripts/test-render-registry-consumer.py
 	python3 scripts/check-version-metadata.py
 
 native-artifact-test:
