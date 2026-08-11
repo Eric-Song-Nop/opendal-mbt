@@ -1,9 +1,9 @@
 name = "eric-song-nop/opendal-consumer"
 
-version = "0.1.0"
+version = "0.2.0"
 
 preferred_target = "native"
 
 import {
-  "Eric-Song-Nop/opendal@0.1.0",
+  "Eric-Song-Nop/opendal@0.2.0",
 }
