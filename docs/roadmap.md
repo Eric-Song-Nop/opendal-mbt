@@ -438,8 +438,8 @@ Land Phase 5A as reviewable vertical slices:
   negotiate the prefix they understand.
 - [x] Rust, C, MoonBit, debug/release, lifecycle, and sanitizer gates cover the
   source slice.
-- [x] The pinned candidate artifacts and clean packaged consumers repeat the
-  Phase 5A gates on all three advertised hosts.
+- [x] Source/native tests cover the Phase 5A semantics, while every pinned
+  candidate passes release-build, identity, and clean packaged-consumer gates.
 - [ ] The `v0.2.0` tag workflow and fresh registry consumers must repeat the
   release gates after publication.
 
@@ -606,8 +606,8 @@ first retry/timeout slice.
 - [x] Stateful resources become terminal after unsafe failures or
   cancellation; retry makes no exactly-once write promise.
 - [x] Default operators retain `v0.1.0` no-implicit-retry behavior.
-- [x] Repeat the end-to-end and clean-consumer gates with the candidate bytes
-  recorded by the `v0.2.0` pins.
+- [x] Source/native end-to-end tests cover the Phase 5C semantics, while every
+  pinned candidate passes release identity and clean packaged-consumer gates.
 - [ ] Reproduce those pins and run fresh registry consumers from the `v0.2.0`
   tag; broader deterministic network fault injection remains a hardening item
   rather than a release-surface expansion.
@@ -656,8 +656,8 @@ reports finish or abort success.
   deterministic; the resource can outlive its originating Operator.
 - [x] Memory reports unsupported Copier capability honestly, while S3 runs
   batch delete and Copier against MinIO.
-- [x] Repeat the lifecycle and clean-consumer gates with the candidate bytes
-  recorded by the `v0.2.0` pins.
+- [x] Source/native and MinIO tests cover the Phase 5D lifecycle, while every
+  pinned candidate passes release identity and clean packaged-consumer gates.
 - [ ] Reproduce those pins and run fresh registry consumers from the `v0.2.0`
   tag. Recursive and cross-backend copying remain out of scope.
 
@@ -698,8 +698,9 @@ Operator first and then obtain its async view.
 - [x] Memory integration covers async range reads, stable stream EOF, writer
   finish, and idempotent successful abort.
 - [x] The synchronous facade and ABI prefix remain backward compatible.
-- [x] Repeat async runtime, cancellation, and packaged-consumer tests with the
-  candidate bytes recorded for every advertised host.
+- [x] Source/native tests cover async runtime and cancellation semantics, while
+  every pinned candidate passes release identity and clean packaged-consumer
+  gates.
 - [ ] Reproduce those pins and run fresh registry consumers from the `v0.2.0`
   tag; expand the async surface only in later independent slices.
 
