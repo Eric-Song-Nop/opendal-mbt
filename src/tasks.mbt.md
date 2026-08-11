@@ -1,8 +1,9 @@
 # Common storage tasks
 
-These recipes use the synchronous API shipped in `0.1.0`. Unless a recipe is
-specifically about filesystem behavior, it uses `memory` so the example is
-hermetic.
+The blocking core recipes also apply to the published `0.1.0` local profile.
+Recipes for S3, presign, layers, batch/Copier, and async target the current
+Phase 5 source candidate and require a standard native build until that profile
+is released. Examples use `memory` or `fs` when behavior can be hermetic.
 
 ## Write and read a complete object
 
@@ -238,9 +239,30 @@ test "tasks: directories and recursive delete" {
 }
 ```
 
-The binding has no batch-delete API. Delete multiple independent paths with
-ordinary MoonBit control flow and decide explicitly how partial failure should
-be handled.
+Use `delete_many` when OpenDAL should drive a set through its high-level
+deleter. The binding validates and copies all paths before starting; an empty
+batch succeeds.
+
+```mbt check
+///|
+test "tasks: all-or-error batch delete" {
+  let operator = @opendal.Operator::new("memory")
+  operator.write("batch/one.bin", b"one") |> ignore
+  operator.write("batch/two.bin", b"two") |> ignore
+
+  operator.delete_many([
+    "batch/one.bin", "batch/missing.bin", "batch/one.bin", "batch/two.bin",
+  ])
+  assert_false(operator.exists("batch/one.bin"))
+  assert_false(operator.exists("batch/two.bin"))
+  operator.delete_many([])
+}
+```
+
+`delete_many` returns `Unit`: success covers the complete request, while an
+error may follow partial remote effects. It does not promise atomicity,
+ordering, uniqueness, or per-path outcomes. `Capability::delete_max_size()` is
+an optional backend hint, not a universal binding batch size.
 
 ## Copy and rename
 
@@ -271,6 +293,152 @@ test "tasks: filesystem copy and rename" {
 The memory service currently reports `can_copy() == false` and
 `can_rename() == false`. Check capabilities before writing portable code.
 
+Use a `Copier` when a backend exposes incremental progress for one object. The
+source and destination are paths on the same Operator:
+
+```mbt check
+///|
+test "tasks: managed same-Operator Copier" {
+  guard @env.current_dir() is Some(cwd) else {
+    fail("current working directory is unavailable")
+  }
+  let root = "\{cwd}/target/opendal-doc-copier-\{@env.now()}"
+  let operator = @opendal.Operator::new("fs", config={ "root": root })
+  operator.write("source.bin", b"copy through a managed resource") |> ignore
+
+  let copier = operator.open_copier("source.bin", "destination.bin")
+  for ;; {
+    match copier.next() {
+      Some(delta) => ignore(delta)
+      None => break
+    }
+  }
+  copier.finish() |> ignore
+  let metadata = operator.stat("destination.bin")
+  assert_true(metadata.is_file())
+  assert_eq(
+    operator.read("destination.bin"),
+    b"copy through a managed resource",
+  )
+  operator.delete_many(["source.bin", "destination.bin"])
+}
+```
+
+`None` is stable until `finish` consumes the retained destination metadata.
+`abort` is explicit and idempotent after a successful abort, but it cannot
+roll back remote effects already visible. A `Copier` can outlive the Operator
+that opened it. It is not recursive and cannot copy between two operators or
+services; memory reports it as `Unsupported` instead of emulating it.
+
+## Create presigned HTTP requests
+
+The standard S3 profile can return owned request snapshots for read, write,
+and stat. Generating a request performs no object I/O; the application chooses
+an HTTP client and sends the method, URI, and every header exactly.
+
+```mbt check
+///|
+test "tasks: create an owned presigned read request" {
+  let operator = @opendal.Operator::s3(
+    "example-bucket",
+    region="us-east-1",
+    endpoint="http://127.0.0.1:9000",
+    auth=@opendal.S3Auth::unsigned(),
+  )
+  let request = operator.presign_read(
+    "manual/object.bin",
+    expires_in_seconds=60UL,
+    range=Range(offset=0UL, length=16UL),
+  )
+
+  assert_eq(request.method, "GET")
+  assert_true(request.uri.length() > 0)
+}
+```
+
+`PresignedHeader.value` is `Bytes`, not assumed UTF-8. Duplicate header names
+remain meaningful and must not be collapsed accidentally. Signed URLs and
+headers can contain credentials: do not print, snapshot, or attach them to
+ordinary error reports. Expiry must be positive. Check
+`can_presign_read()`, `can_presign_write()`, or `can_presign_stat()` before
+using a portable operator.
+
+## Add explicit operational layers
+
+Layer methods return new Operators and leave the original untouched. No layer
+is installed by default. Compose the supported policies as timeout, retry,
+then the outermost concurrency limit:
+
+```mbt check
+///|
+test "tasks: compose immutable operational layers" {
+  let base = @opendal.Operator::new("memory")
+  base.write("layers/value.bin", b"value") |> ignore
+
+  let tuned = base
+    .with_timeout(operation_timeout_millis=5000UL, io_timeout_millis=2000UL)
+    .with_retry(
+      max_retries=2U,
+      min_delay_millis=10UL,
+      max_delay_millis=100UL,
+      jitter=false,
+    )
+    .with_concurrency_limit(operation_limit=8U, http_request_limit=4U)
+
+  assert_eq(tuned.read("layers/value.bin"), b"value")
+  assert_eq(base.info().scheme, tuned.info().scheme)
+}
+```
+
+Duplicate layers and reverse composition raise `InvalidArgument`.
+`max_retries` counts attempts after the initial request. Retry is opt-in and
+does not promise exactly-once stateful writes or appends after an uncertain
+remote commit. Operation permits remain held for body-style resource
+lifetimes; the optional HTTP permit remains held until a response body drops.
+
+## Use the initial async facade
+
+`Operator::as_async()` shares the configured operator. Call async methods
+directly from an async context—there is no `await` keyword:
+
+```mbt check
+///|
+async test "tasks: async writer and bounded reader" {
+  let operator = @opendal.Operator::new("memory")
+  let async_operator = operator.as_async()
+  let writer = async_operator.open_writer(
+    "async/value.bin",
+    content_type="application/octet-stream",
+  )
+  writer.write(b"first-")
+  writer.write(b"second")
+  let metadata = writer.finish()
+  assert_eq(metadata.content_length, 12UL)
+
+  let stream = async_operator.open_read_stream("async/value.bin", chunk_size=5)
+  let collected : Array[Byte] = []
+  for ;; {
+    match stream.next() {
+      Some(chunk) => {
+        assert_true(chunk.length() <= 5)
+        for byte in chunk {
+          collected.push(byte)
+        }
+      }
+      None => break
+    }
+  }
+  assert_eq(Bytes::from_array(collected), b"first-second")
+  stream.close()
+}
+```
+
+The first async slice includes whole/ranged read, bounded read streams, and
+chunked writers with explicit `finish`/`abort`. Streams and writers allow one
+in-flight operation. Cancellation of a stateful operation makes the resource
+terminal when cursor or commit progress may be unknown; remote effects are not
+rolled back. `AsyncReadStream::close` is synchronous and idempotent.
+
 ## Handle typed errors
 
 `OpenDalError` exposes a stable kind, retry-status classification, operation,
@@ -296,19 +464,23 @@ test "tasks: inspect a typed error" {
 ```
 
 Temporary or persistent classification alone does not make an operation safe
-to retry. The current binding does not install a retry layer.
+to retry. The binding never installs a retry layer implicitly; callers choose
+`with_retry` and accept its replay contract explicitly.
 
 ## Tasks from the Node.js guide that are not available
 
 The following upstream recipes cannot yet be translated faithfully:
 
-- async/Promise operations, callback integration, and cancellation;
-- Node stream adapters and a sequential large-object reader;
-- presigned read, write, and stat requests;
-- batch deletion;
-- recursive copier/task APIs;
-- layers for retry, timeout, tracing, metrics, and concurrency limits;
-- recipes that require cloud/network services not present in the `local`
-  profile.
+- async stat, list/lister, delete, copy/Copier, presign, and public task-handle
+  APIs beyond the first async slice;
+- callback adapters or Node stream compatibility;
+- presigned delete and other methods beyond read/write/stat;
+- ordered per-path batch results or transactional batch rollback;
+- recursive or cross-Operator/cross-service Copier tasks;
+- logging, tracing, metrics, custom retry observers, and other callback layers;
+- recipes requiring services beyond `memory`, `fs`, and `s3`;
+- recipes requiring Intel macOS, Windows, or musl release artifacts.
 
-They are intentional roadmap gaps, not hidden or undocumented APIs.
+They are deliberate scope boundaries, not hidden APIs. The published `0.1.0`
+local profile also lacks all source-only Phase 5 methods until a standard
+release is pinned and published.
