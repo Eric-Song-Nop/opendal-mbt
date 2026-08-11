@@ -171,6 +171,7 @@ pub struct Timestamp {
 pub struct Writer {
   // private fields
 }
+pub fn Writer::abort(Self) -> Unit raise OpenDalError
 pub fn Writer::finish(Self) -> Metadata raise OpenDalError
 pub fn Writer::write(Self, BytesView) -> Unit raise OpenDalError
 

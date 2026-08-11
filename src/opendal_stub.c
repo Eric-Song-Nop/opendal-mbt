@@ -163,6 +163,18 @@ static opendal_mbt_status_t load_writer_api(opendal_mbt_api_v1_t *api) {
   return OPENDAL_MBT_STATUS_OK;
 }
 
+static opendal_mbt_status_t load_writer_abort_api(opendal_mbt_api_v1_t *api) {
+  opendal_mbt_status_t status = load_writer_api(api);
+  if (status != OPENDAL_MBT_STATUS_OK) {
+    return status;
+  }
+  if ((api->feature_bits & OPENDAL_MBT_FEATURE_WRITER_ABORT) == 0 ||
+      !API_HAS(api, writer_abort)) {
+    return OPENDAL_MBT_STATUS_ABI_MISMATCH;
+  }
+  return OPENDAL_MBT_STATUS_OK;
+}
+
 static void result_set_local_error(moonbit_opendal_result_t *result,
                                    opendal_mbt_error_kind_t kind,
                                    const char *kind_name,
@@ -1639,6 +1651,26 @@ moonbit_opendal_writer_close(moonbit_opendal_writer_t *writer) {
                                     &result->error);
   if (result->status == OPENDAL_MBT_STATUS_OK &&
       (result->metadata == NULL || result->error != NULL)) {
+    result->status = OPENDAL_MBT_STATUS_ABI_MISMATCH;
+  }
+  return result;
+}
+
+MOONBIT_FFI_EXPORT moonbit_opendal_result_t *moonbit_opendal_writer_abort(
+    moonbit_opendal_writer_t *writer) {
+  moonbit_opendal_result_t *result = result_new();
+  opendal_mbt_api_v1_t api;
+  result->status = load_writer_abort_api(&api);
+  if (result->status != OPENDAL_MBT_STATUS_OK) {
+    return result;
+  }
+  if (writer == NULL || writer->writer == NULL) {
+    result_set_local_error(result, OPENDAL_MBT_ERROR_RESOURCE_CLOSED,
+                           "ResourceClosed", "writer is closed");
+    return result;
+  }
+  result->status = api.writer_abort(writer->writer, &result->error);
+  if (result->status == OPENDAL_MBT_STATUS_OK && result->error != NULL) {
     result->status = OPENDAL_MBT_STATUS_ABI_MISMATCH;
   }
   return result;
