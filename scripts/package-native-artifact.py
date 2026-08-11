@@ -143,6 +143,32 @@ def native_static_libraries(filename: Path) -> list[str]:
     return flags
 
 
+def require_target_link_flags(target: dict[str, Any], flags: list[str]) -> None:
+    required_frameworks = target.get("required_frameworks", [])
+    if not isinstance(required_frameworks, list) or any(
+        not isinstance(framework, str) or not framework
+        for framework in required_frameworks
+    ):
+        raise ArtifactError("required_frameworks must contain framework names")
+    if len(set(required_frameworks)) != len(required_frameworks):
+        raise ArtifactError("required_frameworks must not contain duplicates")
+    available_frameworks = {
+        flags[index + 1]
+        for index, flag in enumerate(flags[:-1])
+        if flag == "-framework"
+    }
+    missing = [
+        framework
+        for framework in required_frameworks
+        if framework not in available_frameworks
+    ]
+    if missing:
+        raise ArtifactError(
+            "rustc native-static-libs is missing required frameworks: "
+            + ", ".join(missing)
+        )
+
+
 def load_profile(
     repo_root: Path,
     service_profile: str,
@@ -203,6 +229,8 @@ def load_profile(
     ]
     if len(floors) != 1:
         raise ArtifactError(f"{rust_target} must declare one compatibility floor")
+    if "required_frameworks" in target and "minimum_macos_version" not in target:
+        raise ArtifactError("only a macOS target may require system frameworks")
     return profile, target
 
 
@@ -230,6 +258,8 @@ def manifest_for(
             rust_target,
         ]
     )
+    system_link_flags = native_static_libraries(native_libs_log)
+    require_target_link_flags(target, system_link_flags)
     manifest = {
         "schema_version": 1,
         "artifact": artifact,
@@ -246,7 +276,7 @@ def manifest_for(
         "static_library": STATIC_LIBRARY_PATH,
         "static_library_size": library.stat().st_size,
         "static_library_sha256": sha256_file(library),
-        "system_link_flags": native_static_libraries(native_libs_log),
+        "system_link_flags": system_link_flags,
     }
     for key in ("cargo_features", "runtime_initialization"):
         if key in profile:

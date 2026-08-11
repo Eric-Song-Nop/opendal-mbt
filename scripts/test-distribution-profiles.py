@@ -52,6 +52,10 @@ class DistributionProfilesTest(unittest.TestCase):
         self.assertEqual(profile["rust_features"], STANDARD_FEATURES)
         self.assertEqual(profile["cargo_features"], ["profile-standard"])
         self.assertEqual(profile["runtime_initialization"], "install_default")
+        self.assertEqual(
+            profile["targets"]["aarch64-apple-darwin"]["required_frameworks"],
+            ["Security", "CoreFoundation"],
+        )
 
         table = read_json("native/artifacts-standard.json")
         self.assertEqual(table["schema_version"], 1)
