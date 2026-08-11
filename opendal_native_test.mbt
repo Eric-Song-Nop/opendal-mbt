@@ -92,6 +92,83 @@ test "native memory: read conditions cross the ABI" {
 }
 
 ///|
+test "native memory: chunked writer commits slices and is terminal" {
+  let operator = @opendal.Operator::new("memory")
+  let writer = operator.open_writer(
+    "writer/chunked.bin",
+    content_type="application/octet-stream",
+  )
+  let first_storage = b"__chunked-__"
+  let first : BytesView = first_storage[2:10]
+  let second_storage = b"__writer__"
+  let second : BytesView = second_storage[2:8]
+  writer.write(first)
+  writer.write(second)
+  let metadata = writer.finish()
+  assert_true(metadata.is_file())
+  assert_eq(metadata.content_length, 14UL)
+  assert_eq(metadata.content_type, Some("application/octet-stream"))
+  assert_eq(operator.read("writer/chunked.bin"), b"chunked-writer")
+  try writer.finish() catch {
+    OpenDalError(info) => {
+      assert_true(info.kind is ResourceClosed)
+      assert_true(info.operation is Write)
+      assert_eq(info.path, Some("writer/chunked.bin"))
+    }
+  } noraise {
+    _ => fail("expected repeated finish to raise")
+  }
+  try writer.write(b"late") catch {
+    OpenDalError(info) => {
+      assert_true(info.kind is ResourceClosed)
+      assert_true(info.operation is Write)
+      assert_eq(info.path, Some("writer/chunked.bin"))
+    }
+  } noraise {
+    _ => fail("expected write after finish to raise")
+  }
+}
+
+///|
+test "native memory: write metadata and conditions cross the ABI" {
+  let operator = @opendal.Operator::new("memory")
+  let metadata = operator.write(
+    "writer/options.bin",
+    b"value",
+    content_type="text/plain",
+    content_disposition="inline",
+    content_encoding="identity",
+    cache_control="max-age=60",
+  )
+  assert_eq(metadata.content_type, Some("text/plain"))
+  assert_eq(metadata.content_disposition, Some("inline"))
+  assert_eq(metadata.content_encoding, Some("identity"))
+  assert_eq(metadata.cache_control, Some("max-age=60"))
+  try
+    operator.write("writer/options.bin", b"other", if_match="not-an-etag")
+  catch {
+    OpenDalError(info) => {
+      assert_true(info.kind is Unsupported)
+      assert_true(info.operation is Write)
+      assert_eq(info.path, Some("writer/options.bin"))
+    }
+  } noraise {
+    _ => fail("expected unsupported write condition to raise")
+  }
+  try
+    operator.open_writer("writer/options.bin", if_none_match="not-an-etag")
+  catch {
+    OpenDalError(info) => {
+      assert_true(info.kind is Unsupported)
+      assert_true(info.operation is Write)
+      assert_eq(info.path, Some("writer/options.bin"))
+    }
+  } noraise {
+    _ => fail("expected unsupported Writer condition to raise")
+  }
+}
+
+///|
 test "native memory: StringView and BytesView use only the selected slice" {
   let operator = @opendal.Operator::new("memory")
   let path_storage = "__slice.bin__"
@@ -251,6 +328,23 @@ test "native fs: a random reader survives its creating operator scope" {
   }
   assert_eq(reader.read(Range(offset=11UL, length=6UL)), b"reader")
   reader.close()
+}
+
+///|
+test "native fs: chunked writer supports explicit append" {
+  guard @env.current_dir() is Some(cwd) else {
+    fail("current working directory is unavailable")
+  }
+  let root = "\{cwd}/target/opendal-mbt-fs-writer-\{@env.now()}"
+  let operator = @opendal.Operator::new("fs", config={ "root": root })
+  assert_true(operator.info().capability.can_write_append())
+  operator.write("append.bin", b"base") |> ignore
+  let writer = operator.open_writer("append.bin", append=true)
+  writer.write(b"-tail")
+  let metadata = writer.finish()
+  assert_eq(metadata.content_length, 9UL)
+  assert_eq(operator.read("append.bin"), b"base-tail")
+  operator.delete("append.bin")
 }
 
 ///|

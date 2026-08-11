@@ -454,9 +454,9 @@ exceptions cannot be converted into normal errors.
 | `open_reader` | `operator_reader` |
 | `Reader::read` | `reader_read` + buffer length/copy/free |
 | `Reader::close` | `reader_close` |
-| proposed `open_writer` | `operator_writer` |
-| proposed `Writer::write` | `writer_write` |
-| proposed `Writer::finish` | `writer_close` + metadata view/free |
+| `open_writer` | `operator_writer` |
+| `Writer::write` | `writer_write` |
+| `Writer::finish` | `writer_close` + metadata view/free |
 
 Materializing `list` over the native lister is not an emulation of a storage
 operation; it is the eager consumption form of the same listing primitive.

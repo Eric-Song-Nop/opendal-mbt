@@ -1,14 +1,14 @@
 # Public API Semantics
 
-Status: Phase 3 in progress; Reader and read options are implemented
+Status: Phase 3 in progress; Reader, Writer, and operation options are implemented
 
 This document defines the intended MoonBit-facing behavior of the synchronous
 OpenDAL binding. It deliberately avoids fixing the native ABI or implementation
 layout; those are Phase 1 concerns and must implement this contract.
 
-This document includes implemented Reader semantics and forward-looking Writer,
-copy, and rename semantics. Proposed sections remain unpublished until their
-complete MoonBit, C, and Rust slices land. The generated
+This document includes implemented Reader and Writer semantics plus
+forward-looking copy and rename semantics. Proposed operations remain
+unpublished until their complete MoonBit, C, and Rust slices land. The generated
 `pkg.generated.mbti` is the authoritative current public surface.
 
 ## Design stance
@@ -34,7 +34,7 @@ It is not a transliteration of either Rust or OCaml:
 
 | Category | Types | Contract |
 |---|---|---|
-| Native resources | `Operator`, `Lister`, `Reader`, and proposed `Writer` | Opaque and impossible for callers to fabricate |
+| Native resources | `Operator`, `Lister`, `Reader`, and `Writer` | Opaque and impossible for callers to fabricate |
 | Read-only snapshots | `Metadata`, `Entry`, `ErrorInfo`, `OperatorInfo`, `Timestamp` | Fields are readable but values are produced by the binding |
 | Read-only algebraic outputs | `EntryMode`, `ErrorKind`, `ErrorStatus`, `Operation` | Callers can inspect and pattern-match values but cannot fabricate them |
 | Algebraic input | `ByteRange` | Uses `pub(all)` so callers can construct labelled ranges |
@@ -133,13 +133,13 @@ The core synchronous methods are:
 op.exists(path) -> Bool raise OpenDalError
 op.stat(path, version?, if_match?, if_none_match?) -> Metadata raise OpenDalError
 op.read(path, range?, version?, if_match?, if_none_match?) -> Bytes raise OpenDalError
-op.write(path, data : BytesView) -> Metadata raise OpenDalError
+op.write(path, data : BytesView, append?, content_type?, content_disposition?, content_encoding?, cache_control?, if_match?, if_none_match?) -> Metadata raise OpenDalError
 op.create_dir(path) -> Unit raise OpenDalError
 op.delete(path, version?, recursive?) -> Unit raise OpenDalError
 ```
 
-Copy, rename, and write options are not published until their complete Phase 3
-slices are available.
+Copy and rename are not published until their complete Phase 3 slices are
+available.
 
 Important guarantees and non-guarantees:
 
@@ -219,7 +219,7 @@ The same checked-allocation rule applies to native output strings and
 materialized entry arrays. The wrapper releases any partially converted native
 snapshots before raising `BufferTooLarge`.
 
-## Proposed Writer
+## Writer
 
 ```moonbit
 let writer = op.open_writer(path, content_type="application/octet-stream")
@@ -281,9 +281,9 @@ unsupported options according to the operation and service. The MoonBit layer
 must not claim a stricter universal policy unless it implements and documents
 one.
 
-Reader and suffix-read capability accessors are available. Writer, copy,
-rename, and append capability accessors are added only with their callable
-MoonBit operations.
+Reader, Writer, suffix-read, and append capability accessors are available.
+Copy and rename capability accessors are added only with their callable MoonBit
+operations.
 
 ## Retry policy
 

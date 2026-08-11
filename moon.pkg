@@ -18,6 +18,7 @@ options(
     "native_ffi.mbt": [ "native" ],
     "operator.mbt": [ "native" ],
     "reader.mbt": [ "native" ],
+    "writer.mbt": [ "native" ],
     "listing.mbt": [ "native" ],
     "metadata.mbt": [ "native" ],
     "capability.mbt": [ "native" ],

@@ -99,6 +99,27 @@ test "README listing" {
 }
 ```
 
+## Chunked writes
+
+An opened Writer accepts complete chunks and reports success only after an
+explicit finish. Dropping an unfinished Writer does not finish it implicitly.
+
+```mbt check
+///|
+test "README chunked writer" {
+  let operator = @opendal.Operator::new("memory")
+  let writer = operator.open_writer(
+    "upload.bin",
+    content_type="application/octet-stream",
+  )
+  writer.write(b"hello ")
+  writer.write(b"from MoonBit")
+  let metadata = writer.finish()
+  assert_eq(metadata.content_length, 18UL)
+  assert_eq(operator.read("upload.bin"), b"hello from MoonBit")
+}
+```
+
 ## Checked errors
 
 Storage failures use OpenDalError rather than stringly typed Result values.
@@ -121,5 +142,5 @@ test "README checked errors" {
 ```
 
 The generated pkg.generated.mbti file is the authoritative public surface.
-Writer, copy, rename, and write options will be added only when their complete
-MoonBit, C, and Rust vertical slices are implemented.
+Copy and rename will be added only when their complete MoonBit, C, and Rust
+vertical slices are implemented.

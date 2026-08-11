@@ -13,6 +13,7 @@ test "downstream consumer executes every published operator workflow" {
   assert_true(info.capability.can_read())
   ignore(info.capability.can_read_suffix())
   assert_true(info.capability.can_write())
+  ignore(info.capability.can_write_append())
   assert_true(info.capability.can_create_dir())
   assert_true(info.capability.can_delete())
   assert_true(info.capability.can_list())
@@ -36,6 +37,16 @@ test "downstream consumer executes every published operator workflow" {
   assert_eq(reader.read(Suffix(length=4UL)), b"ream")
   reader.close()
   reader.close()
+
+  let writer = operator.open_writer(
+    "consumer/chunked.bin",
+    content_type="application/octet-stream",
+  )
+  writer.write(b"chunked-")
+  writer.write(b"consumer")
+  let chunked = writer.finish()
+  assert_eq(chunked.content_length, 16UL)
+  assert_eq(operator.read("consumer/chunked.bin"), b"chunked-consumer")
 
   operator.write("consumer/nested/one.bin", b"one") |> ignore
   let entries = operator.list("consumer/", recursive=true)

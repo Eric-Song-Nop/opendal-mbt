@@ -148,9 +148,47 @@ pub fn Operator::write(
   self : Operator,
   path : StringView,
   data : BytesView,
+  append? : Bool = false,
+  content_type? : StringView,
+  content_disposition? : StringView,
+  content_encoding? : StringView,
+  cache_control? : StringView,
+  if_match? : StringView,
+  if_none_match? : StringView,
 ) -> Metadata raise OpenDalError {
   let path = path.to_owned()
-  let result = native_operator_write(self, path, data.to_owned())
+  let (has_content_type, content_type) = normalize_optional_text(content_type)
+  let (has_content_disposition, content_disposition) = normalize_optional_text(
+    content_disposition,
+  )
+  let (has_content_encoding, content_encoding) = normalize_optional_text(
+    content_encoding,
+  )
+  let (has_cache_control, cache_control) = normalize_optional_text(
+    cache_control,
+  )
+  let (has_if_match, if_match) = normalize_optional_text(if_match)
+  let (has_if_none_match, if_none_match) = normalize_optional_text(
+    if_none_match,
+  )
+  let result = native_operator_write(
+    self,
+    path,
+    data.to_owned(),
+    append,
+    has_content_type,
+    content_type,
+    has_content_disposition,
+    content_disposition,
+    has_content_encoding,
+    content_encoding,
+    has_cache_control,
+    cache_control,
+    has_if_match,
+    if_match,
+    has_if_none_match,
+    if_none_match,
+  )
   if native_result_status(result) != 0U {
     raise error_from_native_result(result, Write, Some(path), None)
   }
