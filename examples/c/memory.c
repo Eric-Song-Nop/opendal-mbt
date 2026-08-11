@@ -369,6 +369,9 @@ int main(void) {
   static const uint8_t object_path[] = "examples/roundtrip.bin";
   static const uint8_t aborted_path[] = "examples/aborted.bin";
   static const uint8_t missing_path[] = "examples/missing.bin";
+  static const uint8_t batch_one_path[] = "examples/batch-one.bin";
+  static const uint8_t batch_two_path[] = "examples/batch-two.bin";
+  static const uint8_t copied_path[] = "examples/copied.bin";
   static const uint8_t payload[] = {
       UINT8_C(0x4f), UINT8_C(0x70), UINT8_C(0x65), UINT8_C(0x6e),
       UINT8_C(0x44), UINT8_C(0x41), UINT8_C(0x4c), UINT8_C(0x00),
@@ -382,6 +385,12 @@ int main(void) {
       bytes_view(missing_path, (uint64_t)(sizeof(missing_path) - 1));
   const opendal_mbt_bytes_view_v1_t discarded_path =
       bytes_view(aborted_path, (uint64_t)(sizeof(aborted_path) - 1));
+  const opendal_mbt_bytes_view_v1_t batch_one =
+      bytes_view(batch_one_path, (uint64_t)(sizeof(batch_one_path) - 1));
+  const opendal_mbt_bytes_view_v1_t batch_two =
+      bytes_view(batch_two_path, (uint64_t)(sizeof(batch_two_path) - 1));
+  const opendal_mbt_bytes_view_v1_t copy_destination =
+      bytes_view(copied_path, (uint64_t)(sizeof(copied_path) - 1));
   const opendal_mbt_bytes_view_v1_t data =
       bytes_view(payload, (uint64_t)sizeof(payload));
   const uint64_t required_features = OPENDAL_MBT_FEATURE_BASE |
@@ -390,7 +399,9 @@ int main(void) {
                                      OPENDAL_MBT_FEATURE_CHUNKED_WRITER |
                                      OPENDAL_MBT_FEATURE_WRITER_ABORT |
                                      OPENDAL_MBT_FEATURE_LAYERS |
-                                     OPENDAL_MBT_FEATURE_CONCURRENCY_LIMIT;
+                                     OPENDAL_MBT_FEATURE_CONCURRENCY_LIMIT |
+                                     OPENDAL_MBT_FEATURE_BATCH_DELETE |
+                                     OPENDAL_MBT_FEATURE_COPIER;
   opendal_mbt_api_v1_t api;
   opendal_mbt_operator_v1_t *operator_ = NULL;
   opendal_mbt_operator_v1_t *base_operator = NULL;
@@ -401,7 +412,9 @@ int main(void) {
   opendal_mbt_buffer_v1_t *buffer = NULL;
   opendal_mbt_read_stream_v1_t *read_stream = NULL;
   opendal_mbt_writer_v1_t *writer = NULL;
+  opendal_mbt_copier_v1_t *copier = NULL;
   opendal_mbt_error_v1_t *error = NULL;
+  opendal_mbt_bytes_view_v1_t batch_paths[4];
   opendal_mbt_read_stream_options_v1_t stream_options;
   uint8_t *roundtrip = NULL;
   uint64_t roundtrip_len = 0;
@@ -427,8 +440,7 @@ int main(void) {
   }
   if ((api.feature_bits & required_features) != required_features) {
     (void)fprintf(stderr,
-                  "opendal_mbt_get_api: required operation/lifecycle/layer "
-                  "groups unavailable, "
+                  "opendal_mbt_get_api: required features unavailable, "
                   "got 0x%016"
                   PRIx64 "\n",
                   api.feature_bits);
@@ -473,6 +485,12 @@ int main(void) {
   REQUIRE_API_FIELD(operator_with_timeout);
   REQUIRE_API_FIELD(operator_with_retry);
   REQUIRE_API_FIELD(operator_with_concurrency_limit);
+  REQUIRE_API_FIELD(operator_delete_many);
+  REQUIRE_API_FIELD(operator_copier);
+  REQUIRE_API_FIELD(copier_next);
+  REQUIRE_API_FIELD(copier_finish);
+  REQUIRE_API_FIELD(copier_abort);
+  REQUIRE_API_FIELD(copier_free);
 #undef REQUIRE_API_FIELD
 
   api_ready = 1;
@@ -696,6 +714,70 @@ int main(void) {
     goto cleanup;
   }
 
+  status = api.operator_write(operator_, &batch_one, &data, NULL, &metadata,
+                              &error);
+  if (!expect_ok(&api, "operator_write(batch-one)", status, &error) ||
+      metadata == NULL) {
+    goto cleanup;
+  }
+  api.metadata_free(metadata);
+  metadata = NULL;
+  status = api.operator_write(operator_, &batch_two, &data, NULL, &metadata,
+                              &error);
+  if (!expect_ok(&api, "operator_write(batch-two)", status, &error) ||
+      metadata == NULL) {
+    goto cleanup;
+  }
+  api.metadata_free(metadata);
+  metadata = NULL;
+
+  /* Batch deletion is one all-or-error operation; duplicate and missing
+   * paths are accepted and no per-path result is synthesized by the ABI. */
+  batch_paths[0] = batch_one;
+  batch_paths[1] = batch_one;
+  batch_paths[2] = absent_path;
+  batch_paths[3] = batch_two;
+  status = api.operator_delete_many(operator_, batch_paths,
+                                    (uint64_t)(sizeof(batch_paths) /
+                                               sizeof(batch_paths[0])),
+                                    &error);
+  if (!expect_ok(&api, "operator_delete_many", status, &error)) {
+    goto cleanup;
+  }
+  status = api.operator_read(operator_, &batch_one, NULL,
+                             (uint64_t)sizeof(payload), &buffer, &error);
+  if (buffer != NULL) {
+    (void)fputs("operator_delete_many: deleted path remained readable\n",
+                stderr);
+    api.buffer_free(buffer);
+    buffer = NULL;
+    goto cleanup;
+  }
+  if (!expect_error(&api, "operator_read(batch-one, expected)", status,
+                    &error)) {
+    goto cleanup;
+  }
+
+  /* The memory backend intentionally does not implement incremental Copier.
+   * Exercise the constructor's atomic error output and owned error path. */
+  status = api.operator_copier(operator_, &path, &copy_destination, &copier,
+                               &error);
+  if (copier != NULL) {
+    (void)fputs("operator_copier(memory): ERROR path returned a copier\n",
+                stderr);
+    api.copier_free(copier);
+    copier = NULL;
+    if (error != NULL) {
+      (void)print_and_free_error(&api, "operator_copier(memory)", &error);
+    }
+    goto cleanup;
+  }
+  if (!expect_error(&api, "operator_copier(memory, expected)", status,
+                    &error)) {
+    goto cleanup;
+  }
+  api.copier_free(NULL);
+
   (void)fprintf(stdout,
                 "binary roundtrip OK: %" PRIu64
                 " bytes, including embedded NUL and non-UTF-8 bytes\n",
@@ -719,6 +801,9 @@ cleanup:
     }
     if (writer != NULL) {
       api.writer_free(writer);
+    }
+    if (copier != NULL) {
+      api.copier_free(copier);
     }
     if (operator_info != NULL) {
       api.operator_info_free(operator_info);
