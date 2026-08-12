@@ -20,6 +20,7 @@ from typing import Any
 
 STATIC_LIBRARY = "libopendal_mbt_native.a"
 STATIC_LIBRARY_PATH = f"lib/{STATIC_LIBRARY}"
+CANDIDATE_URL_ORIGIN = "https://candidate.invalid"
 
 
 class ArtifactError(Exception):
@@ -294,6 +295,37 @@ def verify_pinned_artifact(table_file: Path, result: dict[str, Any]) -> None:
         raise ArtifactError("pinned artifact URL does not match the archive name")
 
 
+def write_candidate_artifact_table(
+    table_file: Path,
+    result: dict[str, Any],
+) -> Path:
+    table = read_json(table_file)
+    if table.get("schema_version") != 1 or not isinstance(table.get("artifacts"), dict):
+        raise ArtifactError("unsupported pinned artifact table")
+    manifest = read_json(Path(result["manifest"]))
+    host_key = manifest.get("host_key")
+    if not isinstance(host_key, str) or not host_key:
+        raise ArtifactError("candidate artifact manifest has no host_key")
+    table["artifacts"][host_key] = {
+        **{key: value for key, value in manifest.items() if key != "schema_version"},
+        "archive_name": result["archive_name"],
+        "archive_size": result["archive_size"],
+        "archive_sha256": result["archive_sha256"],
+        "url": f"{CANDIDATE_URL_ORIGIN}/{result['archive_name']}",
+    }
+
+    manifest_file = Path(result["manifest"])
+    candidate_file = manifest_file.with_name(
+        f"{manifest_file.name.removesuffix('.manifest.json')}"
+        ".candidate-artifacts.json"
+    )
+    candidate_file.write_text(
+        json.dumps(table, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return candidate_file
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", type=Path, default=Path.cwd())
@@ -301,7 +333,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--native-static-libs-log", type=Path, required=True)
     parser.add_argument("--rust-target", required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--verify-pinned", type=Path)
+    validation = parser.add_mutually_exclusive_group()
+    validation.add_argument("--verify-pinned", type=Path)
+    validation.add_argument(
+        "--candidate-table",
+        type=Path,
+        help="published table to overlay with the artifact built by this run",
+    )
     return parser.parse_args()
 
 
@@ -342,6 +380,11 @@ def main() -> int:
         result = run(args)
         if args.verify_pinned is not None:
             verify_pinned_artifact(args.verify_pinned.resolve(), result)
+        elif args.candidate_table is not None:
+            candidate_table = write_candidate_artifact_table(
+                args.candidate_table.resolve(), result
+            )
+            result["candidate_artifact_table"] = str(candidate_table)
     except (ArtifactError, OSError) as error:
         print(f"package-native-artifact: {error}", file=sys.stderr)
         return 1

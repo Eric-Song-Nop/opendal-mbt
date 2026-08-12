@@ -3,8 +3,17 @@
 set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+artifact_table=
+if [ "$#" -eq 3 ] && [ "$1" = "--artifact-table" ]; then
+  if [ ! -f "$2" ]; then
+    echo "candidate artifact table does not exist: $2" >&2
+    exit 2
+  fi
+  artifact_table=$(CDPATH= cd -- "$(dirname -- "$2")" && pwd)/$(basename -- "$2")
+  shift 2
+fi
 if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
-  echo "usage: check-packaged-consumer.sh <native-artifact.tar.gz>" >&2
+  echo "usage: check-packaged-consumer.sh [--artifact-table <json>] <native-artifact.tar.gz>" >&2
   exit 2
 fi
 artifact=$(CDPATH= cd -- "$(dirname -- "$1")" && pwd)/$(basename -- "$1")
@@ -28,6 +37,9 @@ package_archive=$1
 stage_dir="$work_dir/stage"
 mkdir "$stage_dir" "$stage_dir/integration" "$stage_dir/integration/consumer"
 unzip -q "$package_archive" -d "$stage_dir"
+if [ -n "$artifact_table" ]; then
+  cp "$artifact_table" "$stage_dir/native/artifacts.json"
+fi
 cp "$repo_root/integration/consumer/moon.mod" \
   "$stage_dir/integration/consumer/moon.mod"
 cp "$repo_root/integration/consumer/moon.pkg" \
