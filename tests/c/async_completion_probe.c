@@ -1,5 +1,8 @@
 /* Staticlib-host regression probe for the async completion pipe contract. */
 
+/* Expose sigaction under strict C11 builds on glibc. */
+#define _POSIX_C_SOURCE 200809L
+
 #include "../../native/include/opendal_mbt.h"
 
 #include <errno.h>
