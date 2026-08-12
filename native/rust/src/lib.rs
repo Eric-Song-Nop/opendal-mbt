@@ -16,9 +16,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 #[cfg(unix)]
-use std::io::Write;
-#[cfg(unix)]
-use std::os::fd::{BorrowedFd, OwnedFd};
+use std::os::fd::{AsRawFd, BorrowedFd, OwnedFd};
 
 use abi::*;
 use futures_util::{FutureExt, TryStreamExt};
@@ -683,6 +681,23 @@ struct CompletionSignal(OwnedFd);
 #[cfg(not(unix))]
 struct CompletionSignal;
 
+#[cfg(unix)]
+fn write_completion_byte(raw_fd: i32) -> Option<i32> {
+    let byte = [1_u8];
+    loop {
+        // SAFETY: CompletionSignal owns a live write descriptor and the byte
+        // remains readable for the duration of this one-byte syscall.
+        let written = unsafe { libc::write(raw_fd, byte.as_ptr().cast(), byte.len()) };
+        if written != -1 {
+            return None;
+        }
+        let error = std::io::Error::last_os_error().raw_os_error();
+        if error != Some(libc::EINTR) {
+            return error;
+        }
+    }
+}
+
 impl CompletionSignal {
     #[cfg(unix)]
     fn duplicate(raw_fd: i32) -> CallResult<Self> {
@@ -692,13 +707,70 @@ impl CompletionSignal {
         // SAFETY: the caller promises a live descriptor for this synchronous
         // call. try_clone_to_owned duplicates it before the borrowed value ends.
         let borrowed = unsafe { BorrowedFd::borrow_raw(raw_fd) };
-        borrowed.try_clone_to_owned().map(Self).map_err(|error| {
+        let owned = borrowed.try_clone_to_owned().map_err(|error| {
             binding_error(
                 ERROR_UNEXPECTED,
                 "Unexpected",
                 format!("could not duplicate async completion fd: {error}"),
             )
-        })
+        })?;
+        // A caller that violates the fresh/empty contract must still not block
+        // a worker or the synchronous cancellation path on a full pipe. dup(2)
+        // shares status flags with the caller, so validate O_NONBLOCK instead
+        // of changing it.
+        let flags = unsafe { libc::fcntl(owned.as_raw_fd(), libc::F_GETFL) };
+        if flags == -1 {
+            return Err(binding_error(
+                ERROR_UNEXPECTED,
+                "Unexpected",
+                format!(
+                    "could not inspect async completion fd: {}",
+                    std::io::Error::last_os_error()
+                ),
+            ));
+        }
+        if flags & libc::O_NONBLOCK == 0 {
+            return Err(invalid_argument("async completion fd must be nonblocking"));
+        }
+        if flags & libc::O_ACCMODE == libc::O_RDONLY {
+            return Err(invalid_argument("async completion fd must be writable"));
+        }
+        let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+        if unsafe { libc::fstat(owned.as_raw_fd(), stat.as_mut_ptr()) } == -1 {
+            return Err(binding_error(
+                ERROR_UNEXPECTED,
+                "Unexpected",
+                format!(
+                    "could not inspect async completion fd type: {}",
+                    std::io::Error::last_os_error()
+                ),
+            ));
+        }
+        // SAFETY: fstat initialized the complete value on its successful path.
+        let stat = unsafe { stat.assume_init() };
+        if stat.st_mode & libc::S_IFMT != libc::S_IFIFO {
+            return Err(invalid_argument("async completion fd must be a pipe"));
+        }
+        #[cfg(target_vendor = "apple")]
+        {
+            // Darwin may deliver a pipe's SIGPIPE to another unmasked thread,
+            // so a thread-local signal mask cannot contain it reliably. This
+            // pipe is contractually dedicated to one task; F_SETNOSIGPIPE is
+            // therefore safe even though dup(2) shares the setting with the
+            // caller's endpoint until that endpoint is closed.
+            const F_SETNOSIGPIPE: libc::c_int = 73;
+            if unsafe { libc::fcntl(owned.as_raw_fd(), F_SETNOSIGPIPE, 1) } == -1 {
+                return Err(binding_error(
+                    ERROR_UNEXPECTED,
+                    "Unexpected",
+                    format!(
+                        "could not suppress SIGPIPE on async completion fd: {}",
+                        std::io::Error::last_os_error()
+                    ),
+                ));
+            }
+        }
+        Ok(Self(owned))
     }
 
     #[cfg(not(unix))]
@@ -710,10 +782,60 @@ impl CompletionSignal {
         ))
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, target_vendor = "apple"))]
     fn notify(self) {
-        let mut pipe = std::fs::File::from(self.0);
-        let _ = pipe.write_all(&[1]);
+        // F_SETNOSIGPIPE was installed while validating this dedicated pipe.
+        // O_NONBLOCK guarantees this best-effort readiness write cannot wait.
+        let _ = write_completion_byte(self.0.as_raw_fd());
+    }
+
+    #[cfg(all(unix, target_os = "linux"))]
+    fn notify(self) {
+        // POSIX write(2) can raise SIGPIPE before returning EPIPE. A Rust
+        // staticlib cannot assume the foreign process ignored that signal, so
+        // contain it on this thread and preserve the caller's previous mask
+        // and any signal that was already pending.
+        unsafe {
+            let mut blocked = std::mem::zeroed::<libc::sigset_t>();
+            if libc::sigemptyset(&mut blocked) != 0
+                || libc::sigaddset(&mut blocked, libc::SIGPIPE) != 0
+            {
+                return;
+            }
+
+            let mut previous = std::mem::zeroed::<libc::sigset_t>();
+            if libc::pthread_sigmask(libc::SIG_BLOCK, &blocked, &mut previous) != 0 {
+                return;
+            }
+
+            let mut pending = std::mem::zeroed::<libc::sigset_t>();
+            let pending_before = if libc::sigpending(&mut pending) == 0 {
+                libc::sigismember(&pending, libc::SIGPIPE) == 1
+            } else {
+                let _ = libc::pthread_sigmask(libc::SIG_SETMASK, &previous, ptr::null_mut());
+                return;
+            };
+
+            let write_error = write_completion_byte(self.0.as_raw_fd());
+
+            if write_error == Some(libc::EPIPE) && !pending_before {
+                // A zero timeout consumes only the signal generated by this
+                // write, if it is still pending. Unlike sigwait, this cannot
+                // hang if a foreign thread concurrently changes disposition.
+                let timeout = libc::timespec {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                };
+                let _ = libc::sigtimedwait(&blocked, ptr::null_mut(), &timeout);
+            }
+
+            let _ = libc::pthread_sigmask(libc::SIG_SETMASK, &previous, ptr::null_mut());
+        }
+    }
+
+    #[cfg(all(unix, not(any(target_vendor = "apple", target_os = "linux"))))]
+    fn notify(self) {
+        compile_error!("async completion signaling is supported only on macOS and Linux");
     }
 
     #[cfg(not(unix))]
@@ -5825,7 +5947,7 @@ mod tests {
     #[cfg(unix)]
     use std::os::fd::AsRawFd;
     #[cfg(unix)]
-    use std::os::unix::net::UnixStream;
+    use std::os::fd::FromRawFd;
 
     fn bytes(value: &[u8]) -> BytesViewV1 {
         BytesViewV1 {
@@ -9426,8 +9548,8 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn async_launch_pair() -> (UnixStream, AsyncLaunch) {
-        let (reader, writer) = UnixStream::pair().expect("test completion pair is available");
+    fn async_launch_pair() -> (std::fs::File, AsyncLaunch) {
+        let (reader, writer) = test_completion_pipe(true);
         let launch = AsyncLaunch::prepare(writer.as_raw_fd())
             .unwrap_or_else(|_| panic!("test completion fd can be duplicated"));
         drop(writer);
@@ -9435,12 +9557,86 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn read_one_completion(reader: &mut UnixStream) {
+    fn test_completion_pipe(nonblocking: bool) -> (std::fs::File, std::fs::File) {
+        let mut fds = [-1; 2];
+        // SAFETY: fds points to storage for the two descriptors returned by pipe(2).
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        if nonblocking {
+            // SAFETY: fds[1] is the live write end returned above.
+            let flags = unsafe { libc::fcntl(fds[1], libc::F_GETFL) };
+            assert_ne!(flags, -1);
+            // SAFETY: the live write descriptor accepts updated status flags.
+            assert_ne!(
+                unsafe { libc::fcntl(fds[1], libc::F_SETFL, flags | libc::O_NONBLOCK) },
+                -1,
+            );
+        }
+        // SAFETY: each raw descriptor is newly owned and moved into exactly one File.
+        unsafe {
+            (
+                std::fs::File::from_raw_fd(fds[0]),
+                std::fs::File::from_raw_fd(fds[1]),
+            )
+        }
+    }
+
+    #[cfg(unix)]
+    fn read_one_completion(reader: &mut std::fs::File) {
         let mut byte = [0; 1];
         reader
             .read_exact(&mut byte)
             .expect("one completion byte is readable");
         assert_eq!(byte, [1]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn async_completion_rejects_a_blocking_descriptor() {
+        let (_reader, writer) = test_completion_pipe(false);
+        let failure = match CompletionSignal::duplicate(writer.as_raw_fd()) {
+            Ok(_) => panic!("a blocking completion descriptor must be rejected"),
+            Err(failure) => failure,
+        };
+        assert!(matches!(
+            failure,
+            CallFailure::Error(error) if error.kind == ERROR_INVALID_ARGUMENT
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn async_completion_ignores_epipe_without_blocking() {
+        let (reader, writer) = test_completion_pipe(true);
+        let signal = CompletionSignal::duplicate(writer.as_raw_fd())
+            .unwrap_or_else(|_| panic!("nonblocking pipe can be duplicated"));
+        drop(reader);
+        drop(writer);
+        signal.notify();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn async_completion_returns_without_blocking_when_pipe_is_full() {
+        let (reader, writer) = test_completion_pipe(true);
+        let signal = CompletionSignal::duplicate(writer.as_raw_fd())
+            .unwrap_or_else(|_| panic!("nonblocking pipe can be duplicated"));
+        let bytes = [0_u8; 4096];
+        loop {
+            // SAFETY: the byte slice and live write descriptor are valid for this call.
+            let written =
+                unsafe { libc::write(writer.as_raw_fd(), bytes.as_ptr().cast(), bytes.len()) };
+            if written >= 0 {
+                continue;
+            }
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::EAGAIN),
+            );
+            break;
+        }
+        signal.notify();
+        drop(reader);
+        drop(writer);
     }
 
     #[cfg(unix)]

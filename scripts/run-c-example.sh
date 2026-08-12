@@ -41,3 +41,10 @@ archive_path="$repository_root/target/$profile_name/libopendal_mbt_native.a"
 make -C "$repository_root/examples/c" run \
   OPENDAL_MBT_LIB="$archive_path" \
   OPENDAL_MBT_NATIVE_LIBS="$native_libraries"
+
+completion_probe="$(mktemp "${TMPDIR:-/tmp}/opendal-mbt-completion.XXXXXX")"
+trap 'rm -f "$completion_probe"' EXIT
+${CC:-cc} -std=c11 -O2 -Wall -Wextra -Werror -Wpedantic \
+  "$repository_root/tests/c/async_completion_probe.c" \
+  "$archive_path" $native_libraries -o "$completion_probe"
+"$completion_probe"

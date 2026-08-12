@@ -70,6 +70,8 @@ abi-smoke:
 		-x c++ -fsyntax-only tests/c/abi_header_smoke.c
 	$${CC:-cc} -std=c11 -Wall -Wextra -Werror -Wpedantic \
 		-fsyntax-only tests/c/library_info_probe.c
+	$${CC:-cc} -std=c11 -Wall -Wextra -Werror -Wpedantic \
+		-fsyntax-only tests/c/async_completion_probe.c
 	$(MAKE) -C examples/c syntax
 
 c-example:
