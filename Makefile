@@ -5,6 +5,8 @@ NATIVE_SERVICE_PROFILE ?= standard
 MOON_WARN_LIST ?= -68+73
 NATIVE_ARTIFACT ?=
 NATIVE_ARTIFACT_TABLE ?=
+WASM_RUST_TARGET := $(CURDIR)/target/wasm32-unknown-unknown/release/opendal_mbt_wasm_bridge.wasm
+WASM_MOON_TARGET := $(CURDIR)/_build/wasm/release/build/eric-song-nop/opendal-wasm-canary/opendal-wasm-canary.wasm
 
 ifeq ($(RUST_PROFILE),debug)
 CARGO_PROFILE_FLAG :=
@@ -29,22 +31,43 @@ MOON_NATIVE_LIB := $(NATIVE_LIB_DIR)/libopendal_mbt_native.a
 MOON_TEST_FLAGS := --target native --frozen --warn-list '$(MOON_WARN_LIST)' --deny-warn
 
 
-.PHONY: native rust-test moon-deps moon-check moon-test coverage abi-smoke c-example \
+.PHONY: native rust-test rust-lint moon-deps moon-check moon-test coverage abi-smoke c-example \
 	api-contract interface-contract package-contract packaged-consumer check \
-	test-profile native-artifact-test version-contract asan
+	test-profile native-artifact-test version-contract asan wasm-rust wasm-moon \
+	wasm-canary wasm-interface-contract
 
 native:
-	cargo build --workspace --locked $(CARGO_SERVICE_FLAGS) $(CARGO_PROFILE_FLAG)
+	cargo build --package opendal-mbt-native --locked $(CARGO_SERVICE_FLAGS) \
+		$(CARGO_PROFILE_FLAG)
+
+wasm-rust:
+	CARGO_PROFILE_RELEASE_PANIC=abort cargo build --locked \
+		--package opendal-mbt-wasm-bridge \
+		--target wasm32-unknown-unknown --release
+
+wasm-moon:
+	OPENDAL_MBT_SKIP_NATIVE=1 moon build --target wasm --release --frozen \
+		integration/wasm
+
+wasm-canary: wasm-rust wasm-moon
+	node wasm/canary/run.mjs "$(WASM_RUST_TARGET)" "$(WASM_MOON_TARGET)"
 
 rust-test:
-	cargo test --workspace --all-targets --locked $(CARGO_SERVICE_FLAGS) \
+	cargo test --package opendal-mbt-native --all-targets --locked \
+		$(CARGO_SERVICE_FLAGS) \
 		$(CARGO_PROFILE_FLAG)
+
+rust-lint:
+	cargo clippy --package opendal-mbt-native --all-targets --all-features \
+		--locked -- -D warnings
+	cargo clippy --package opendal-mbt-wasm-bridge --all-targets --locked -- \
+		-D warnings
 
 moon-deps:
 	moon update
 	# Dependency resolution is target-independent. Using wasm here avoids
 	# requiring an as-yet-unpublished native artifact during release PRs.
-	moon check --target wasm
+	OPENDAL_MBT_SKIP_NATIVE=1 moon check --target wasm
 
 moon-check:
 	moon check --target native --frozen --warn-list '$(MOON_WARN_LIST)' --deny-warn
@@ -84,6 +107,9 @@ interface-contract:
 	moon info --target native --frozen src/operator.mbt
 	git diff --exit-code -- src/pkg.generated.mbti
 
+wasm-interface-contract:
+	sh scripts/check-wasm-api.sh
+
 package-contract:
 	sh scripts/check-package.sh
 
@@ -108,10 +134,10 @@ native-artifact-test:
 	node --check scripts/prepare-test-native-cache.js
 	node --test scripts/test-native-resolver.js
 
-check: api-contract interface-contract package-contract native-artifact-test \
-	version-contract
+check: api-contract interface-contract wasm-interface-contract package-contract \
+	native-artifact-test version-contract
 	cargo fmt --all -- --check
-	cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+	$(MAKE) rust-lint
 	$(MAKE) moon-check
 	$(MAKE) abi-smoke
 

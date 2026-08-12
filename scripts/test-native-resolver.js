@@ -16,6 +16,7 @@ const {
   loadArtifacts,
   loadDistributionProfile,
   loadSelectedArtifacts,
+  makeEmptyBuildOutput,
   makeBuildOutput,
   makeSourceBuildOutput,
   parseMaintainerLinkFlags,
@@ -23,6 +24,7 @@ const {
   resolveLocalOverride,
   selectArtifact,
   sha256File,
+  shouldResolveNativeArtifact,
 } = require('../build.js');
 
 async function fixture(serviceProfile = 'local') {
@@ -334,6 +336,36 @@ test('link configuration uses the exact archive path and target flags', () => {
       },
     ],
   });
+});
+
+test('native artifact resolution remains enabled when the prebuild target is unavailable', () => {
+  assert.equal(shouldResolveNativeArtifact({ env: {} }), true);
+  assert.equal(
+    shouldResolveNativeArtifact({ env: { OPENDAL_MBT_SKIP_NATIVE: '' } }),
+    true,
+  );
+  assert.equal(
+    shouldResolveNativeArtifact({ env: { OPENDAL_MBT_SKIP_NATIVE: '0' } }),
+    true,
+  );
+});
+
+test('explicit non-native entry points can bypass native artifact resolution', () => {
+  assert.equal(
+    shouldResolveNativeArtifact({ env: { OPENDAL_MBT_SKIP_NATIVE: '1' } }),
+    false,
+  );
+  assert.deepEqual(makeEmptyBuildOutput(), { vars: {}, link_configs: [] });
+});
+
+test('native artifact opt-out rejects ambiguous values', () => {
+  assert.throws(
+    () =>
+      shouldResolveNativeArtifact({
+        env: { OPENDAL_MBT_SKIP_NATIVE: 'true' },
+      }),
+    /OPENDAL_MBT_SKIP_NATIVE must be 0 or 1/,
+  );
 });
 
 test('unpinned Linux arm64 override resolves the versioned GCC runtime', async () => {

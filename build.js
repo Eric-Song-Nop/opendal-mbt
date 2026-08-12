@@ -14,6 +14,7 @@ const DOWNLOAD_ATTEMPTS = 3;
 const DOWNLOAD_IDLE_TIMEOUT_MS = 30_000;
 const LOCK_WAIT_TIMEOUT_MS = 120_000;
 const STALE_LOCK_AGE_MS = 15 * 60_000;
+const SKIP_NATIVE_ENV = 'OPENDAL_MBT_SKIP_NATIVE';
 const EXPECTED_ARCHIVE_ENTRIES = Object.freeze([
   'LICENSE',
   'lib',
@@ -746,6 +747,21 @@ function makeBuildOutput(staticLibrary, artifact, dependencies = {}) {
   };
 }
 
+function makeEmptyBuildOutput() {
+  return { vars: {}, link_configs: [] };
+}
+
+function shouldResolveNativeArtifact(input) {
+  const configured = input.env[SKIP_NATIVE_ENV];
+  if (configured === undefined || configured === '' || configured === '0') {
+    return true;
+  }
+  if (configured === '1') {
+    return false;
+  }
+  throw new Error(`${SKIP_NATIVE_ENV} must be 0 or 1`);
+}
+
 function makeSourceBuildOutput(staticLibrary, artifact, sourceProfile) {
   const target = sourceProfile.targets[artifact.rust_target];
   if (!target || target.host_key !== artifact.host_key) {
@@ -854,6 +870,13 @@ async function main() {
     throw new Error(`Node.js 18 or newer is required; found ${process.versions.node}`);
   }
   const input = await readBuildInput();
+  // Moon's current module prebuild input contains the environment and paths,
+  // but not the selected backend. Keep native builds backward compatible and
+  // let explicit non-native entry points bypass all native artifact handling.
+  if (!shouldResolveNativeArtifact(input)) {
+    process.stdout.write(`${JSON.stringify(makeEmptyBuildOutput())}\n`);
+    return;
+  }
   const selected = loadSelectedArtifacts();
   const hostKey = `${process.platform}-${process.arch}`;
   const fallbackArtifact = selected.artifacts[hostKey];
@@ -885,6 +908,7 @@ module.exports = {
   loadArtifacts,
   loadDistributionProfile,
   loadSelectedArtifacts,
+  makeEmptyBuildOutput,
   makeBuildOutput,
   makeSourceBuildOutput,
   parseMaintainerLinkFlags,
@@ -892,6 +916,7 @@ module.exports = {
   resolveLocalOverride,
   selectArtifact,
   sha256File,
+  shouldResolveNativeArtifact,
   validateInstalledArtifact,
 };
 

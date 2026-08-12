@@ -1040,6 +1040,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "opendal-mbt-wasm-bridge"
+version = "0.1.0"
+dependencies = [
+ "opendal",
+ "thiserror",
+]
+
+[[package]]
 name = "opendal-service-fs"
 version = "0.58.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

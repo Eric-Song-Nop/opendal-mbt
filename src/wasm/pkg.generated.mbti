@@ -1,0 +1,40 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "Eric-Song-Nop/opendal/wasm"
+
+import {
+  "moonbitlang/core/debug",
+}
+
+// Values
+pub fn bridge_features() -> UInt
+
+pub fn bridge_version() -> UInt
+
+pub fn live_handle_count() -> UInt
+
+// Errors
+pub suberror WasmError {
+  WasmError(Int, String)
+} derive(Eq, @debug.Debug)
+pub fn WasmError::code(Self) -> Int
+pub fn WasmError::is_not_found(Self) -> Bool
+pub fn WasmError::message(Self) -> String
+
+// Types and methods
+pub struct Metadata {
+  content_length : UInt64
+  is_file : Bool
+} derive(Eq, @debug.Debug)
+
+pub struct Operator {
+  // private fields
+}
+pub fn Operator::close(Self) -> Unit
+pub fn Operator::memory() -> Self raise WasmError
+pub fn Operator::read(Self, StringView) -> Bytes raise WasmError
+pub fn Operator::stat(Self, StringView) -> Metadata raise WasmError
+pub fn Operator::write(Self, StringView, BytesView) -> Unit raise WasmError
+
+// Type aliases
+
+// Traits

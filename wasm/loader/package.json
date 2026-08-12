@@ -1,0 +1,6 @@
+{
+  "name": "@opendal-mbt/wasm-loader-canary",
+  "private": true,
+  "type": "module",
+  "exports": "./index.mjs"
+}

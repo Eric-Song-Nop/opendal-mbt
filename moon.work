@@ -2,4 +2,5 @@ members = [
   ".",
   "./integration/consumer",
   "./integration/s3",
+  "./integration/wasm",
 ]

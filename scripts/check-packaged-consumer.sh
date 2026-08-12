@@ -117,7 +117,7 @@ if output=$(
   {
     # Materialize exact registry dependencies in this fresh consumer tree.
     # The caller has already refreshed the shared registry through moon-deps.
-    moon check --target wasm
+    OPENDAL_MBT_SKIP_NATIVE=1 moon check --target wasm
     moon test integration/consumer --target native --frozen \
       --warn-list '-68+73' --deny-warn
     moon test integration/consumer --target native --frozen --release \
