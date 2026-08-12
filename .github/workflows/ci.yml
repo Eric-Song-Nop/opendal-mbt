@@ -62,6 +62,22 @@ jobs:
         if: matrix.profile == 'release'
         run: make c-example RUST_PROFILE=release
 
+  wasm-canary:
+    name: MoonBit / OpenDAL Wasm canary
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust Wasm target
+        run: rustup target add wasm32-unknown-unknown
+      - name: Install MoonBit
+        run: |
+          curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash -s "$MOONBIT_VERSION"
+          echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
+      - name: Resolve MoonBit dependencies
+        run: make moon-deps
+      - name: Run the end-to-end Wasm memory canary
+        run: make wasm-canary
+
   coverage:
     name: Coverage and C/MoonBit ASan
     runs-on: ubuntu-24.04

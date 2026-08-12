@@ -1,0 +1,6 @@
+supported_targets = "wasm"
+
+import {
+  "moonbitlang/core/debug",
+  "moonbitlang/core/encoding/utf8",
+}

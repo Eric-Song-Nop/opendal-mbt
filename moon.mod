@@ -35,6 +35,8 @@ options(
     "native/rust",
     "native/distribution-profile.json",
     "native/distribution-profiles",
+    "wasm/rust-bridge",
+    "wasm/canary",
     "examples",
     "tests",
     "scripts",
