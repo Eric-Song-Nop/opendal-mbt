@@ -560,6 +560,11 @@ typedef struct opendal_mbt_api_v1 {
       const opendal_mbt_stat_options_v1_t *options,
       opendal_mbt_metadata_v1_t **out_metadata,
       opendal_mbt_error_v1_t **out_error);
+  /*
+   * Full/From read without a preliminary stat. Suffix requires
+   * OPENDAL_MBT_CAP_READ_SUFFIX. max_output_len bounds the returned buffer and
+   * binding-owned copies, not one backend-provided streaming buffer.
+   */
   opendal_mbt_status_t(OPENDAL_MBT_CALL *operator_read)(
       opendal_mbt_operator_v1_t *operator_,
       const opendal_mbt_bytes_view_v1_t *path,
@@ -616,6 +621,7 @@ typedef struct opendal_mbt_api_v1 {
       const opendal_mbt_reader_options_v1_t *options,
       opendal_mbt_reader_v1_t **out_reader,
       opendal_mbt_error_v1_t **out_error);
+  /* Suffix requires OPENDAL_MBT_CAP_READ_SUFFIX. */
   opendal_mbt_status_t(OPENDAL_MBT_CALL *reader_read)(
       opendal_mbt_reader_v1_t *reader,
       const opendal_mbt_byte_range_v1_t *range,
@@ -644,7 +650,8 @@ typedef struct opendal_mbt_api_v1 {
 
   /*
    * OPENDAL_MBT_FEATURE_READ_STREAM: operator_read_stream through
-   * read_stream_free. Appended in ABI v1.1.
+   * read_stream_free. Appended in ABI v1.1. Full/From open without a
+   * preliminary stat; Suffix requires OPENDAL_MBT_CAP_READ_SUFFIX.
    */
   opendal_mbt_status_t(OPENDAL_MBT_CALL *operator_read_stream)(
       opendal_mbt_operator_v1_t *operator_,
@@ -656,6 +663,8 @@ typedef struct opendal_mbt_api_v1 {
    * OK returns one non-NULL buffer. END returns NULL buffer and no error.
    * ERROR returns NULL buffer and an optional owned error. Stream errors are
    * terminal; END is stable. max_output_len must cover the configured chunk.
+   * chunk_size bounds this returned buffer and binding-owned copies; the
+   * cursor may retain one larger backend-provided buffer while splitting it.
    */
   opendal_mbt_status_t(OPENDAL_MBT_CALL *read_stream_next)(
       opendal_mbt_read_stream_v1_t *stream, uint64_t max_output_len,

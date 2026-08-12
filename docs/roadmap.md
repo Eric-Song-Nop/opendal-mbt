@@ -283,25 +283,27 @@ Status: included in the pinned but unpublished `v0.2.0` standard candidate.
 Delivered in the current tree:
 
 - `ReadStream` and `Operator::open_read_stream`, with owned chunks, a hard
-  per-call bound, stable EOF, idempotent close, ranges, versions, and read
-  conditions;
-- hard-bounded whole-object and ranged reads that reject oversized output
-  before copying it into MoonBit;
+  per-call returned-output/copy bound, stable EOF, idempotent close, ranges,
+  versions, and read conditions;
+- output-bounded whole-object and ranged reads that stream through OpenDAL and
+  reject oversized output before extending the binding result or copying it
+  into MoonBit;
 - `Writer::abort` with an explicit terminal state and idempotent successful
   abort;
 - append-only ABI v1.1 groups, C consumers, MoonBit runtime tests, and the
-  original random-access `Reader` contract unchanged.
+  original cursorless/concurrent random-access `Reader` lifecycle; suffix
+  reads are capability-gated to native backend support.
 
 ##### Goals
 
-- read arbitrarily large objects without materializing the whole object in one
-  Rust buffer or one MoonBit `Bytes` value;
-- make the per-call output limit a hard native allocation/copy bound;
+- read arbitrarily large objects without aggregating the whole object into one
+  binding-owned Rust output or one MoonBit `Bytes` value;
+- make the per-call output limit a hard binding-owned allocation/copy bound;
 - provide an explicit and reliable Writer abort path;
 - use OpenDAL's async reader/writer internally where necessary while preserving
   the current synchronous MoonBit facade;
-- preserve every released `Reader`, `Writer`, `Operator::read`, and
-  `Operator::write` behavior.
+- preserve released handle/lifecycle behavior while refusing stat-simulated
+  suffix ranges that cannot meet the same-request read contract.
 
 ##### 5A.1 Public-semantics design
 
@@ -337,8 +339,9 @@ The design freezes these read-stream rules before ABI work starts:
 - `chunk_size : Int`, fixed at open with a 1 MiB default;
 - valid minimum and maximum chunk sizes and their relationship to
   `max_output_bytes`, MoonBit array limits, `usize`, and `isize`;
-- preservation of `Full`, `From`, `Range`, and `Suffix`, plus `version`,
-  `if_match`, and `if_none_match` options;
+- preservation of `Full`, `From`, and `Range`, plus native-backend `Suffix`
+  when `can_read_suffix()` is true, and preservation of `version`, `if_match`,
+  and `if_none_match` on the same read request;
 - error-context mapping to the released `Operation` enum; adding enum variants
   can break exhaustive downstream matches, so reuse `Read`/`Write` unless a
   deliberate public compatibility change is reviewed;
@@ -350,8 +353,8 @@ The design freezes these read-stream rules before ABI work starts:
   concurrently;
 - the guarantee that the resource outlives the `Operator` from which it was
   opened;
-- no prefetch or concurrency default that can violate the configured memory
-  bound.
+- no prefetch or concurrency default that can violate the configured returned-
+  output/copy bound.
 
 The Writer design must add `abort` without weakening the existing contract:
 
@@ -383,7 +386,7 @@ Expected ABI work:
   released CHUNKED_WRITER guarantee;
 - bump the ABI minor version when the v1 table grows;
 - keep every feature group all-or-nothing and dependent on BASE;
-- return one Rust-owned bounded chunk per `next` call using the existing
+- return one Rust-owned output-bounded chunk per `next` call using the existing
   two-phase buffer-copy contract;
 - reuse the fallible process-wide Tokio runtime, but do not hold a Rust mutex
   across arbitrary MoonBit work;
@@ -392,11 +395,20 @@ Expected ABI work:
 - keep finalizers free of blocking network I/O and unable to surface false
   completion.
 
-The bounded read path must consume at most one configured chunk at a time. It
+The bounded read path must consume at most one OpenDAL buffer at a time. It
 must not collect an OpenDAL stream, flatten multiple buffers, or perform a
-whole-object blocking read before checking the limit. The same implementation
-strategy should be evaluated for `Operator::read` so that its documented
-`max_output_len` becomes a hard bound rather than only a post-read rejection.
+whole-object blocking read before checking the limit. `Operator::read` and
+Reader open-ended reads now follow that strategy, so `max_output_len` is a
+hard bound on binding-owned output and copy allocations rather than only a
+post-read rejection.
+
+OpenDAL 0.58 does not expose a maximum size for one raw streaming `Buffer`.
+ReadStream therefore leaves upstream chunking unset to avoid OpenDAL's hidden
+stat for `Full`/`From`, locally splits one raw buffer, and retains its shared
+remainder before polling again. The configured chunk size does not claim a
+hard bound on total backend/native memory. For the same no-stat reason, suffix
+ranges are exposed only when the base service supports them natively; the
+filesystem backend no longer inherits OpenDAL's stat-based suffix simulation.
 
 ##### 5A.3 Delivery slices
 
@@ -680,9 +692,11 @@ state so only one terminal result and one wake signal can win.
 
 Streams and writers admit one in-flight operation. Cancelling `next`, `write`,
 `finish`, or `abort` makes that stateful resource terminal when progress or
-commit status may be unknown. Bounded stream calls preserve backpressure by
-returning one owned chunk per operation. Whole-object async `read` still
-materializes one bounded `Bytes` value.
+commit status may be unknown. Bounded stream calls return one output-bounded
+owned chunk per operation and do not poll upstream while a locally split
+remainder is pending. Whole-object async `read` still materializes one
+output-bounded `Bytes` value. Neither guarantee bounds one raw buffer allocated
+inside OpenDAL or the backend.
 
 Async stat, list/lister, delete, copy/Copier, presign, and separate public task
 handles are not part of this first slice. Callers can configure an immutable
@@ -694,7 +708,9 @@ Operator first and then obtain its async view.
   an async executor thread on a Rust runtime call.
 - [x] Native task state enforces exactly-once completion/cancellation signaling
   and never calls back into MoonBit from a worker thread.
-- [x] Bounded streaming preserves backpressure and copied-input ownership.
+- [x] Bounded streaming preserves one-operation-at-a-time delivery, does not
+  poll upstream while a remainder is pending, and preserves copied-input
+  ownership.
 - [x] Memory integration covers async range reads, stable stream EOF, writer
   finish, and idempotent successful abort.
 - [x] The synchronous facade and ABI prefix remain backward compatible.
@@ -790,7 +806,7 @@ an existing immutable identity without an explicit recovery procedure.
   byte slice crosses the durable C ABI beyond its documented call lifetime.
 - Whole-object and ranged reads reject values that cannot fit in one MoonBit
   `Bytes`; callers use `ReadStream` or `AsyncReadStream` when they need a hard
-  per-chunk bound.
+  per-returned-chunk output/copy bound.
 - Each new optional ABI group is append-only, all-or-nothing, and dependent on
   BASE; unsupported groups leave their function pointers unset.
 - ABI feature availability and backend operation capability remain distinct:
@@ -837,7 +853,7 @@ A feature is not complete when the Rust method exists. Every slice includes:
 
 | Decision | State | Outcome |
 | --- | --- | --- |
-| Sequential read API and bounds | Resolved | `ReadStream`, fixed positive `chunk_size`, one owned bounded chunk, stable EOF |
+| Sequential read API and bounds | Resolved | `ReadStream`, fixed positive `chunk_size`, one owned output-bounded chunk, one possible larger upstream buffer, stable EOF |
 | Writer cleanup | Resolved | Explicit terminal `finish`/`abort`; successful repeated abort is idempotent; finalizers never commit |
 | ABI extension strategy | Resolved | Append-only v1 optional groups through ABI `1.7`, with older-prefix negotiation tests |
 | Standard profile selection | Resolved for `v0.2.0` | One pinned successor profile containing memory/fs/S3; no public runtime selector |

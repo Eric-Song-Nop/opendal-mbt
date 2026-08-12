@@ -473,6 +473,7 @@ test "native fs: blocking core works against an isolated filesystem root" {
   let info = operator.info()
   assert_eq(info.scheme, "fs")
   assert_true(info.capability.can_stat())
+  assert_false(info.capability.can_read_suffix())
   assert_true(info.capability.can_create_dir())
   assert_true(info.capability.can_delete())
   operator.create_dir("目录/nested/")
@@ -483,6 +484,11 @@ test "native fs: blocking core works against an isolated filesystem root" {
   let metadata = operator.stat("目录/nested/value.bin")
   assert_true(metadata.is_file())
   assert_eq(metadata.content_length, payload.length().to_uint64())
+  try operator.read("目录/nested/value.bin", range=Suffix(length=2UL)) catch {
+    OpenDalError(error) => assert_true(error.kind is Unsupported)
+  } noraise {
+    _ => fail("expected fs suffix read to require native support")
+  }
   operator.delete("目录/nested/missing.bin")
   operator.delete("目录/", recursive=true)
   assert_false(operator.exists("目录/nested/value.bin"))

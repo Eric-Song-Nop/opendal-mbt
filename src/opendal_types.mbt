@@ -9,6 +9,7 @@ pub enum EntryMode {
 ///|
 /// An independent byte range for whole-object or random-access reads.
 /// The `length` field is a byte count, not an end offset.
+/// `Suffix` requires the selected backend's native suffix capability.
 pub(all) enum ByteRange {
   Full
   From(offset~ : UInt64)

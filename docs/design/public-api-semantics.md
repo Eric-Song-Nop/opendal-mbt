@@ -273,14 +273,31 @@ Suffix(length~ : UInt64)
 
 The second `Range` value is a length, not an end offset. A short byte result
 means the requested range reached object end. Calls do not mutate a hidden
-cursor, so the same Reader can serve independent ranges.
+cursor, so the same Reader can serve independent ranges. `Full` and `From`
+are sent directly as read ranges without a preliminary `stat`; version and
+conditions therefore apply to the same read request instead of a racy
+stat-then-read pair. A backend can report `RangeNotSatisfied` for a `From`
+offset beyond EOF rather than returning an empty result.
+
+`Suffix` is available only when `Operator::info().capability.can_read_suffix()`
+is true. That bit means the selected backend supports suffix ranges natively;
+the binding deliberately does not use OpenDAL's stat-based suffix simulation.
+Using `Suffix` when the bit is false raises `Unsupported` for whole reads,
+Reader reads, and read streams.
 
 `close` is idempotent; later reads raise `ResourceClosed`. GC finalization is a
 leak-safety backstop, not the preferred way to release a Reader promptly.
 
 Every returned value must fit in one MoonBit `Bytes`. Requests or whole-object
-reads exceeding that representable length raise `BufferTooLarge`; callers read
-large objects with a `ReadStream` or in bounded independent ranges.
+reads exceeding that representable length raise `BufferTooLarge`; the binding
+checks each upstream buffer before extending its own output and never collects
+the complete OpenDAL stream first. Callers read large objects with a
+`ReadStream` or in bounded independent ranges.
+
+This is a hard bound on binding-owned output and copy allocations, not on all
+memory inside OpenDAL or a backend. OpenDAL 0.58 does not bound the size of one
+raw streaming buffer, so at most one such buffer can be live outside the
+binding's output limit.
 
 The same checked-allocation rule applies to native output strings and
 materialized entry arrays. The wrapper releases any partially converted native
@@ -325,10 +342,18 @@ preserve checked I/O errors.
 
 `chunk_size` is an `Int`, matching the length and allocation domain of MoonBit
 `Bytes`; remote object offsets and ranges remain `UInt64`. It is fixed when the
-stream is opened so every `next` has the same memory and backpressure bound.
-The default is 1 MiB. Values must be positive and no larger than the negotiated
-native output ceiling or `Int::MAX`; invalid values raise `InvalidArgument`
-before a native reader is retained.
+stream is opened, and every returned native buffer, ABI copy, and MoonBit
+`Bytes` is no larger than that bound. The default is 1 MiB. Values must be
+positive and no larger than the negotiated native output ceiling or
+`Int::MAX`; invalid values raise `InvalidArgument` before a native reader is
+retained.
+
+The binding leaves OpenDAL's upstream chunk option unset to avoid an implicit
+`stat` for open-ended ranges. It splits each raw buffer locally and does not
+poll upstream again while a remainder is pending. The pending buffer uses
+shared backing storage, so one backend-provided buffer can be larger than
+`chunk_size`; `chunk_size` is therefore a returned-output/copy bound, not a
+hard bound on total native or backend memory.
 
 The state machine is:
 
@@ -341,8 +366,13 @@ The state machine is:
   `Operator`;
 - calls on one handle serialize; distinct handles and ordinary `Reader` calls
   can proceed concurrently;
-- there is no implicit concurrency or prefetch, so opening a stream does not
-  weaken its one-chunk bound.
+- there is no implicit concurrency or prefetch, and the cursor retains at most
+  one upstream buffer while returning bounded chunks from it.
+
+Opening a stream constructs the cursor without a preliminary storage `stat`.
+For backends that open lazily, missing-object, condition, or range failures can
+therefore be reported by the first `next` rather than by
+`open_read_stream`.
 
 `Operator::open_read_stream` and `ReadStream::next` use `Operation::Read` for
 error context. The new lifecycle API does not extend the already public,
@@ -425,9 +455,10 @@ booleans default to `false`; omitted strings and limits are absent.
 
 Capability values are read-only snapshots. `OperatorInfo.capability` exposes
 only operations and options callable through the current MoonBit facade, while
-preserving the backend's answer for those features. OpenDAL 0.58 removed the
-older native/full split from its public `OperatorInfo`; this binding does not
-reconstruct it from raw internals.
+preserving the backend's answer for those features. The suffix-read bit is the
+intentional exception to OpenDAL's composed snapshot: it is true only when the
+base service supports suffix ranges natively, because the binding does not
+expose OpenDAL's stat-based simulation as a callable suffix feature.
 
 Capability getters are introspection. They do not imply that the binding can
 prevalidate every backend request, and OpenDAL may ignore, degrade, or reject
@@ -487,10 +518,12 @@ private pipe, and never call MoonBit from a foreign thread.
 An AsyncReadStream and AsyncWriter admit one in-flight operation. Cancelling
 `next`, `write`, `finish`, or `abort` makes that resource terminal because
 cursor or commit progress may be unknown; already-visible remote effects are
-not rolled back. Async stream calls return one owned chunk at a time, preserving
-the fixed bound and backpressure. Whole/ranged async `read` still materializes
-one bounded `Bytes` value. Async stat, list/lister, delete, copy/Copier,
-presign, and public task handles remain outside this first slice.
+not rolled back. Async stream calls return one output-bounded owned chunk at a
+time and do not poll upstream while a locally split remainder is pending. The
+same one-raw-buffer caveat as synchronous streams applies. Whole/ranged async
+`read` still materializes one output-bounded `Bytes` value. Async stat,
+list/lister, delete, copy/Copier, presign, and public task handles remain
+outside this first slice.
 
 ## Check semantics
 

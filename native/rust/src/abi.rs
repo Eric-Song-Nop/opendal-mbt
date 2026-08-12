@@ -375,6 +375,7 @@ pub(crate) struct OperatorV1 {
     pub(crate) async_inner: opendal::Operator,
     pub(crate) inner: opendal::blocking::Operator,
     pub(crate) layer_bits: u32,
+    pub(crate) read_with_suffix: bool,
 }
 
 #[repr(C)]
@@ -436,6 +437,7 @@ pub(crate) enum ListerStateV1 {
 #[repr(C)]
 pub(crate) struct ReaderV1 {
     pub(crate) state: std::sync::RwLock<ReaderStateV1>,
+    pub(crate) read_with_suffix: bool,
 }
 
 pub(crate) enum ReaderStateV1 {
@@ -449,8 +451,13 @@ pub(crate) struct ReadStreamV1 {
     pub(crate) chunk_size: u64,
 }
 
+pub(crate) struct ReadStreamCursorV1 {
+    pub(crate) iterator: Box<opendal::blocking::BufferIterator>,
+    pub(crate) pending: Option<opendal::Buffer>,
+}
+
 pub(crate) enum ReadStreamStateV1 {
-    Open(Box<opendal::blocking::BufferIterator>),
+    Open(ReadStreamCursorV1),
     End,
     Failed,
     Closed,
