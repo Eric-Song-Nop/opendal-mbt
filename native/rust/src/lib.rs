@@ -2492,7 +2492,7 @@ async fn run_async_whole_read(
         let mut stream = reader.into_stream(range).await.map_err(opendal_error)?;
         let mut output = Vec::new();
         while let Some(buffer) = stream.try_next().await.map_err(opendal_error)? {
-            append_whole_read_chunk(&mut output, buffer, plan.output_limit)?;
+            append_bounded_read_chunk(&mut output, buffer, plan.output_limit, "read result")?;
         }
         Ok::<_, CallFailure>(Box::new(BufferV1 { bytes: output }))
     }
@@ -2503,22 +2503,23 @@ async fn run_async_whole_read(
     }
 }
 
-fn append_whole_read_chunk(
+fn append_bounded_read_chunk(
     output: &mut Vec<u8>,
     buffer: opendal::Buffer,
     output_limit: u64,
+    subject: &str,
 ) -> CallResult<()> {
     let current_length = u64::try_from(output.len())
-        .map_err(|_| buffer_too_large("read result length is not representable"))?;
+        .map_err(|_| buffer_too_large(format!("{subject} length is not representable")))?;
     let chunk_length = u64::try_from(buffer.len())
-        .map_err(|_| buffer_too_large("read result length is not representable"))?;
+        .map_err(|_| buffer_too_large(format!("{subject} length is not representable")))?;
     let next_length = current_length
         .checked_add(chunk_length)
-        .ok_or_else(|| buffer_too_large("read result length is not representable"))?;
+        .ok_or_else(|| buffer_too_large(format!("{subject} length is not representable")))?;
     if next_length > output_limit {
-        return Err(buffer_too_large(
-            "read result exceeds the negotiated output limit",
-        ));
+        return Err(buffer_too_large(format!(
+            "{subject} exceeds the negotiated output limit"
+        )));
     }
 
     let required = usize::try_from(next_length)
@@ -2539,6 +2540,35 @@ fn append_whole_read_chunk(
     }
     debug_assert_eq!(output.len(), required);
     Ok(())
+}
+
+fn read_open_ended_bounded(
+    reader: &opendal::blocking::Reader,
+    range: BytesRange,
+    output_limit: u64,
+) -> CallResult<Box<BufferV1>> {
+    // Reader::read collects the complete BufferStream before returning. Walk
+    // the streaming form instead so the binding checks every upstream Buffer
+    // before extending its own output allocation.
+    let iterator = reader.clone().into_iterator(range).map_err(opendal_error)?;
+    collect_bounded_read_chunks(iterator, output_limit, "reader result")
+}
+
+fn collect_bounded_read_chunks(
+    buffers: impl IntoIterator<Item = opendal::Result<opendal::Buffer>>,
+    output_limit: u64,
+    subject: &str,
+) -> CallResult<Box<BufferV1>> {
+    let mut output = Vec::new();
+    for buffer in buffers {
+        append_bounded_read_chunk(
+            &mut output,
+            buffer.map_err(opendal_error)?,
+            output_limit,
+            subject,
+        )?;
+    }
+    Ok(Box::new(BufferV1 { bytes: output }))
 }
 
 fn metadata_output_view(metadata: &Metadata, header: StructHeaderV1) -> CallResult<MetadataViewV1> {
@@ -3549,7 +3579,7 @@ unsafe extern "C" fn operator_read(
                 let buffer = buffer.map_err(opendal_error)?;
                 #[cfg(test)]
                 observe_whole_read_chunk(operator, u64::try_from(buffer.len()).unwrap_or(u64::MAX));
-                append_whole_read_chunk(&mut output, buffer, plan.output_limit)?;
+                append_bounded_read_chunk(&mut output, buffer, plan.output_limit, "read result")?;
             }
             Ok(Box::new(BufferV1 { bytes: output }))
         })();
@@ -4032,8 +4062,12 @@ unsafe extern "C" fn reader_read(
                 TEST_READER_READ_PANIC => panic!("injected reader panic"),
                 _ => {}
             }
-            let buffer = inner.read(range).map_err(opendal_error)?;
-            checked_read_buffer(buffer, negotiated_limit, "reader result")
+            if matches!(range, BytesRange::Range { size: None, .. }) {
+                read_open_ended_bounded(inner, range, negotiated_limit)
+            } else {
+                let buffer = inner.read(range).map_err(opendal_error)?;
+                checked_read_buffer(buffer, negotiated_limit, "reader result")
+            }
         })();
         match result {
             Ok(buffer) => {
@@ -8552,6 +8586,44 @@ mod tests {
     }
 
     #[test]
+    fn bounded_read_collection_checks_before_copy_and_stops_early() {
+        let mut output = vec![0x11, 0x22];
+        let original = output.clone();
+        let failure = append_bounded_read_chunk(
+            &mut output,
+            opendal::Buffer::from(vec![0x33, 0x44]),
+            3,
+            "reader result",
+        )
+        .expect_err("the chunk would exceed the output limit");
+        assert!(matches!(
+            failure,
+            CallFailure::Error(error) if error.kind == ERROR_BUFFER_TOO_LARGE
+        ));
+        assert_eq!(output, original, "an oversized chunk must not be copied");
+
+        let yielded = std::cell::Cell::new(0_u8);
+        let buffers = std::iter::from_fn(|| {
+            let index = yielded.get();
+            yielded.set(index + 1);
+            match index {
+                0 => Some(Ok(opendal::Buffer::from(vec![0xA5; 3]))),
+                1 => Some(Ok(opendal::Buffer::from(vec![0x5A; 2]))),
+                _ => panic!("collection must stop after observing the overflow chunk"),
+            }
+        });
+        let failure = match collect_bounded_read_chunks(buffers, 4, "reader result") {
+            Ok(_) => panic!("the second buffer must cross the output limit"),
+            Err(failure) => failure,
+        };
+        assert!(matches!(
+            failure,
+            CallFailure::Error(error) if error.kind == ERROR_BUFFER_TOO_LARGE
+        ));
+        assert_eq!(yielded.get(), 2);
+    }
+
+    #[test]
     fn random_reader_ranges_are_independent_concurrent_and_outlive_operator() {
         let api = api();
         let (operator, info) = memory_operator(&api);
@@ -8582,6 +8654,31 @@ mod tests {
             b"789",
         );
 
+        let read = api.reader_read.expect("RANDOM_READER read is installed");
+        for (range, limit) in [
+            (byte_range(RANGE_FULL, 0, 0), 9),
+            (byte_range(RANGE_FULL, 0, 0), 0),
+            (byte_range(RANGE_FROM, 3, 0), 6),
+        ] {
+            let mut buffer = NonNull::<BufferV1>::dangling().as_ptr();
+            let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+            // SAFETY: all carriers and output slots are live for this call.
+            assert_eq!(
+                unsafe { read(reader, &range, limit, &mut buffer, &mut error) },
+                STATUS_ERROR,
+            );
+            assert!(buffer.is_null());
+            assert_eq!(take_error_kind(&api, error), ERROR_BUFFER_TOO_LARGE);
+        }
+        assert_eq!(
+            read_reader_bytes(&api, reader, &byte_range(RANGE_FULL, 0, 0), 10),
+            b"0123456789",
+        );
+        assert_eq!(
+            read_reader_bytes(&api, reader, &byte_range(RANGE_FROM, 10, 0), 0),
+            b"",
+        );
+
         // Shared reader calls take read locks, so independent ranges can execute together.
         let reader_ref = unsafe { &*reader };
         let (left, right) = std::thread::scope(|scope| {
@@ -8609,7 +8706,6 @@ mod tests {
         assert_eq!(left, b"01234");
         assert_eq!(right, b"56789");
 
-        let read = api.reader_read.expect("RANDOM_READER read is installed");
         let oversized = byte_range(RANGE_OFFSET_LENGTH, 0, 6);
         let mut buffer = NonNull::<BufferV1>::dangling().as_ptr();
         let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
