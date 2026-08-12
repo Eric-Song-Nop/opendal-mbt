@@ -69,10 +69,14 @@ jobs:
             target/native-release/native-static-libs.log
           actual_target=$(rustc -vV | sed -n 's/^host: //p')
           test "$actual_target" = '${{ matrix.rust_target }}'
-      - name: Package release artifact
+      - name: Package native artifact
         shell: bash
         run: |
           set -euo pipefail
+          artifact_table_args=(--candidate-table native/artifacts.json)
+          if [[ "$GITHUB_EVENT_NAME" == "push" && "$GITHUB_REF" == refs/tags/v* ]]; then
+            artifact_table_args=(--verify-pinned native/artifacts.json)
+          fi
           python3 scripts/package-native-artifact.py \
             --repo-root . \
             --library target/release/libopendal_mbt_native.a \
@@ -80,7 +84,7 @@ jobs:
               target/native-release/native-static-libs.log \
             --rust-target '${{ matrix.rust_target }}' \
             --output-dir target/native-dist \
-            --verify-pinned native/artifacts.json | \
+            "${artifact_table_args[@]}" | \
             tee target/native-release/package-result.json
       - name: Test clean packaged Moon consumer
         shell: bash
@@ -88,7 +92,15 @@ jobs:
           set -euo pipefail
           archive=$(find target/native-dist -name '*.tar.gz' -type f)
           test -n "$archive"
-          make packaged-consumer NATIVE_ARTIFACT="$archive"
+          candidate_table=""
+          if [[ "$GITHUB_EVENT_NAME" != "push" || "$GITHUB_REF" != refs/tags/v* ]]; then
+            candidate_table=$(find target/native-dist \
+              -name '*.candidate-artifacts.json' -type f)
+            test -n "$candidate_table"
+          fi
+          make packaged-consumer \
+            NATIVE_ARTIFACT="$archive" \
+            NATIVE_ARTIFACT_TABLE="$candidate_table"
       - uses: actions/upload-artifact@v4
         with:
           name: native-${{ matrix.rust_target }}

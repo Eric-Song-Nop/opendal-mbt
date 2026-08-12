@@ -79,6 +79,7 @@ opendal = { version = "=0.58.1", default-features = false, features = ["blocking
         output: Path,
         target: str = "aarch64-apple-darwin",
         pinned: Path | None = None,
+        candidate_table: Path | None = None,
     ) -> subprocess.CompletedProcess[str]:
         command = [
                 sys.executable,
@@ -96,6 +97,8 @@ opendal = { version = "=0.58.1", default-features = false, features = ["blocking
             ]
         if pinned is not None:
             command.extend(["--verify-pinned", str(pinned)])
+        if candidate_table is not None:
+            command.extend(["--candidate-table", str(candidate_table)])
         return subprocess.run(
             command,
             check=False,
@@ -133,6 +136,39 @@ opendal = { version = "=0.58.1", default-features = false, features = ["blocking
             manifest["static_library_sha256"],
             hashlib.sha256(self.library.read_bytes()).hexdigest(),
         )
+
+    def test_candidate_table_updates_only_the_built_host(self) -> None:
+        published = {
+            "schema_version": 1,
+            "artifacts": {
+                "linux-x64": {"artifact": "published-linux"},
+            },
+        }
+        table = self.root / "artifacts.json"
+        table.write_text(json.dumps(published), encoding="utf-8")
+
+        packaged = self.invoke(
+            self.root / "candidate",
+            candidate_table=table,
+        )
+        self.assertEqual(packaged.returncode, 0, packaged.stderr)
+        result = json.loads(packaged.stdout)
+        candidate = json.loads(
+            Path(result["candidate_artifact_table"]).read_text(encoding="utf-8")
+        )
+        record = candidate["artifacts"]["darwin-arm64"]
+        manifest = json.loads(Path(result["manifest"]).read_text(encoding="utf-8"))
+
+        self.assertEqual(candidate["artifacts"]["linux-x64"], {"artifact": "published-linux"})
+        self.assertEqual(record["abi_version"], manifest["abi_version"])
+        self.assertEqual(record["archive_name"], result["archive_name"])
+        self.assertEqual(record["archive_size"], result["archive_size"])
+        self.assertEqual(record["archive_sha256"], result["archive_sha256"])
+        self.assertEqual(
+            record["url"],
+            f"https://candidate.invalid/{result['archive_name']}",
+        )
+        self.assertEqual(json.loads(table.read_text(encoding="utf-8")), published)
 
     def test_unknown_target_is_rejected(self) -> None:
         result = self.invoke(self.root / "output", "x86_64-unknown-linux-gnu")
