@@ -1,5 +1,5 @@
 ///|
-/// A bounded sequential cursor over one object or byte range.
+/// An output-bounded sequential cursor over one object or byte range.
 ///
 /// Each successful `next` returns an owned chunk no larger than the
 /// `chunk_size` selected when the stream was opened. `None` is a stable
@@ -13,8 +13,10 @@ pub struct ReadStream {
 /// Open a bounded sequential read stream.
 ///
 /// `chunk_size` is fixed for the lifetime of the stream and defaults to one
-/// MiB. It must be positive and fit the native output ceiling. The returned
-/// stream owns its cursor and may outlive this Operator.
+/// MiB. It bounds each returned `Bytes` value and binding copy, not a raw
+/// backend buffer. It must be positive and fit the native output ceiling. The
+/// returned stream owns its cursor and may outlive this Operator. Suffix ranges
+/// require `self.info().capability.can_read_suffix()`.
 pub fn Operator::open_read_stream(
   self : Operator,
   path : StringView,

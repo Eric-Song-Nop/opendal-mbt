@@ -29,7 +29,8 @@ test "tasks: whole-object write and read" {
 ```
 
 The whole-object read must fit in one MoonBit `Bytes` value. Use a `ReadStream`
-when the object should be consumed with a fixed per-chunk memory bound.
+when the object should be consumed with a fixed per-returned-chunk output and
+copy bound.
 
 ## Read byte ranges
 
@@ -50,13 +51,17 @@ test "tasks: independent byte ranges" {
 }
 ```
 
-`Range(offset, length)` uses a byte count, not an end offset.
+`Range(offset, length)` uses a byte count, not an end offset. `Suffix` requires
+`operator.info().capability.can_read_suffix()`; the binding does not simulate
+it with a preliminary metadata request.
 
 ## Read sequentially in bounded chunks
 
 `open_read_stream` owns a sequential cursor. Its `chunk_size` is fixed when the
 stream opens, and every returned chunk is an owned `Bytes` value no larger than
-that bound.
+that bound. OpenDAL or the backend can still supply one larger raw buffer,
+which the binding splits locally without polling upstream again until the
+remainder is delivered.
 
 ```mbt check
 ///|
@@ -83,7 +88,8 @@ test "tasks: bounded sequential read" {
 
 `None` remains stable until close. Closing is idempotent; a read error is
 terminal. `range`, `version`, `if_match`, and `if_none_match` use the same
-semantics as whole-object reads.
+semantics as whole-object reads. Some backends open lazily, so missing-object,
+condition, or range errors can first appear from `next`.
 
 ## Reuse a random-access reader
 
@@ -105,7 +111,8 @@ test "tasks: random-access reader" {
 ```
 
 Each `Reader::read` still materializes its selected range into `Bytes`. This is
-random access, not the Node.js binding's stream interface.
+random access, not the Node.js binding's stream interface. As with whole reads,
+`Suffix` requires the originating Operator's native suffix capability.
 
 ## Write in chunks
 

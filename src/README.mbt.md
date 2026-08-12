@@ -25,7 +25,7 @@ the tag workflow publishes `0.2.0`.
 
 The current source facade implements:
 
-- whole, ranged, random-access, and hard-bounded sequential reads;
+- whole, ranged, random-access, and output-bounded sequential reads;
 - whole and chunked writes with explicit `finish` or `abort`;
 - metadata, existence, directories, listing, delete, copy, and rename;
 - typed S3 construction with default-chain, static/session, unsigned, and
@@ -147,6 +147,10 @@ async test "README: async memory round trip" {
   not fabricate ordered per-path results or promise atomicity.
 - `Copier` copies one object between two paths on the same Operator. It is not
   recursive and cannot bridge two operators or services.
+- `ReadStream.chunk_size` hard-bounds each returned value and binding copy, but
+  OpenDAL or a backend may provide and retain one larger raw buffer internally.
+- Suffix ranges require `capability.can_read_suffix()`; the binding does not
+  emulate suffix reads with a preliminary `stat`.
 - The first async slice covers read, bounded read streams, and chunked writers;
   async stat/list/delete/copy/presign and public task handles remain later
   work.

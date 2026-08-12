@@ -56,6 +56,7 @@ pub fn Operator::open_reader(
 ///|
 /// Read one independent range into an owned `Bytes` value.
 /// Ordinary read errors leave the Reader open for another range.
+/// Suffix ranges require the originating Operator's suffix capability.
 pub fn Reader::read(
   self : Reader,
   range : ByteRange,

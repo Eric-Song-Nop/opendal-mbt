@@ -161,8 +161,17 @@ ABI v1.1 appends, in order:
 Rust `usize`, no larger than `MAX_OUTPUT_BYTES`, and no larger than the
 caller's negotiated output ceiling. The C stub passes the MoonBit `Int` only
 after checking that it is positive and widening it to `uint64_t`. The Rust
-reader is constructed with exactly that chunk size, concurrency one, and
-prefetch zero.
+reader uses concurrency one, prefetch zero, and no OpenDAL upstream chunk
+setting. Leaving that setting absent prevents OpenDAL from resolving
+`Full`/`From` through a preliminary `stat`. The bridge instead splits each raw
+buffer locally, retains any remainder, and does not poll upstream again until
+that remainder has been delivered.
+
+`Full` and `From` are passed to the read request unchanged, so version and
+conditions apply to the same request. `SUFFIX` is accepted only when the base
+service reports native suffix-read capability. The binding clears
+`OPENDAL_MBT_CAP_READ_SUFFIX` and returns `Unsupported` rather than using
+OpenDAL's stat-based suffix simulation when that native capability is absent.
 
 `read_stream_next` returns the existing transport statuses: `OK` with exactly
 one non-NULL buffer, `END` with a NULL buffer and no error, or `ERROR` with a
@@ -171,11 +180,12 @@ buffer is no larger than the stream's fixed chunk size and the per-call
 `max_output_len`; a violation is treated as a terminal binding failure rather
 than copied across the boundary.
 
-The stream state is `Open(BufferIterator)`, `End`, `Failed`, or `Closed`.
-`next` serializes one upstream iterator step, treats an upstream error as
-terminal, and returns stable `END` after EOF. `read_stream_close` is a NULL-safe
-idempotent transition to `Closed`; `read_stream_free` only drops state. Neither
-operation performs MoonBit callbacks or commits remote effects.
+The stream state is `Open(BufferIterator, pending Buffer?)`, `End`, `Failed`,
+or `Closed`. `next` consumes a pending remainder before taking another
+upstream iterator step, treats an upstream error as terminal, and returns
+stable `END` after EOF. `read_stream_close` is a NULL-safe idempotent transition
+to `Closed`; `read_stream_free` only drops state. Neither operation performs
+MoonBit callbacks or commits remote effects.
 
 The Writer implementation changes internally from OpenDAL's blocking Writer to
 its async Writer so v1.1 can call `abort`. This does not reinterpret any v1.0
@@ -288,10 +298,10 @@ through the wrong typed function returns an error.
 Async read streams and Writers allow one in-flight operation. Cancelling an
 unclaimed stream/Writer result, or cancelling an in-flight stateful operation,
 makes that resource terminal because cursor or commit progress may be unknown.
-Async stream chunks retain the fixed bound and one-step backpressure of the
-synchronous stream. `async_read_stream_close` is synchronous, idempotent, and
-performs no I/O. Async resource/task frees only release owned state; they never
-invent successful finish or abort outcomes.
+Async stream chunks retain the fixed returned-output/copy bound and pending-
+remainder behavior of the synchronous stream. `async_read_stream_close` is
+synchronous, idempotent, and performs no I/O. Async resource/task frees only
+release owned state; they never invent successful finish or abort outcomes.
 
 Version meaning:
 
@@ -572,7 +582,15 @@ The MoonBit C stub passes its maximum representable `Bytes` length as
 `max_output_len` to read calls. The current native runtime uses `int32_t` array
 lengths and `moonbit_make_bytes(int32_t, ...)`, so v1 advertises and enforces no
 more than `INT32_MAX` output bytes. The stub checks the returned length again
-before allocation.
+before allocation. Whole reads stream through OpenDAL and reject an oversized
+upstream buffer before extending the binding-owned result; read streams return
+and copy at most the configured `chunk_size` per call.
+
+Those limits are hard bounds on binding-owned native outputs and ABI/MoonBit
+copies, not on all storage-runtime memory. OpenDAL 0.58 does not bound one raw
+streaming `Buffer`; a cursor can temporarily retain one larger shared backing
+buffer while returning locally split chunks. During handoff, the bounded
+native snapshot and bounded MoonBit `Bytes` can also coexist.
 
 The same representability rule applies to output strings, entry arrays, and
 materialized lists. If an individual output or collection cannot be allocated
@@ -662,10 +680,11 @@ Materializing `list` over the native lister is not an emulation of a storage
 operation; it is the eager consumption form of the same listing primitive.
 Optional-argument normalization, `Metadata::is_file`/`is_dir`, and
 Capability getters are pure MoonBit operations. The C ABI retains OpenDAL
-0.58.1's complete effective composed capability snapshot. The public MoonBit
-surface exposes getters only for operations and options currently callable
-through the facade, so a true public capability always has a corresponding
-MoonBit operation.
+0.58.1's effective composed capability snapshot except for suffix reads: it
+clears that bit unless the base service supports suffix ranges natively. The
+public MoonBit surface exposes getters only for operations and options
+currently callable through the facade, so a true public capability always has
+a corresponding MoonBit operation.
 
 ## Resource states
 

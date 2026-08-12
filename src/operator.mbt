@@ -111,6 +111,7 @@ pub fn Operator::stat(
 
 ///|
 /// Read a path or byte range into one owned Bytes value.
+/// Suffix ranges require `self.info().capability.can_read_suffix()`.
 pub fn Operator::read(
   self : Operator,
   path : StringView,

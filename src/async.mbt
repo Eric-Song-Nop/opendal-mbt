@@ -8,7 +8,7 @@ pub struct AsyncOperator {
 }
 
 ///|
-/// A bounded asynchronous cursor over one object or byte range.
+/// An output-bounded asynchronous cursor over one object or byte range.
 ///
 /// A stream admits one operation at a time. Cancelling an in-flight `next`
 /// makes the stream terminal, because the cursor position may have advanced.
@@ -96,7 +96,8 @@ async fn await_native_result(
 ///|
 /// Read one path or byte range into an owned Bytes value without blocking the
 /// MoonBit scheduler. Cancellation requests native cancellation; storage side
-/// effects already performed by the backend are not rolled back.
+/// effects already performed by the backend are not rolled back. Suffix ranges
+/// require the underlying Operator's native suffix capability.
 pub async fn AsyncOperator::read(
   self : AsyncOperator,
   path : StringView,
@@ -144,7 +145,9 @@ pub async fn AsyncOperator::read(
 }
 
 ///|
-/// Open a bounded asynchronous sequential read stream.
+/// Open an output-bounded asynchronous sequential read stream.
+/// `chunk_size` bounds each returned value and binding copy, not a raw backend
+/// buffer. Suffix ranges require the underlying Operator's native capability.
 pub async fn AsyncOperator::open_read_stream(
   self : AsyncOperator,
   path : StringView,

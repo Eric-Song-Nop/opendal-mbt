@@ -33,7 +33,6 @@ use tokio::runtime::Runtime;
 use tokio::task::AbortHandle;
 
 const MAX_OUTPUT_BYTES: u64 = i32::MAX as u64;
-const WHOLE_READ_CHUNK_BYTES: usize = 1024 * 1024;
 const BINDING_VERSION: &str = env!("CARGO_PKG_VERSION");
 const OPENDAL_VERSION: &str = "0.58.1";
 #[cfg(feature = "profile-standard")]
@@ -461,8 +460,13 @@ impl AsyncTaskShared {
     }
 }
 
+struct AsyncReadStreamCursor {
+    stream: Box<opendal::BufferStream>,
+    pending: Option<opendal::Buffer>,
+}
+
 enum AsyncReadStreamState {
-    Open(Box<opendal::BufferStream>),
+    Open(AsyncReadStreamCursor),
     Busy(Option<AbortHandle>),
     End,
     Failed,
@@ -479,9 +483,9 @@ impl AsyncReadStreamCore {
         let mut state = self.lock_state();
         let previous = std::mem::replace(&mut *state, AsyncReadStreamState::Failed);
         match previous {
-            AsyncReadStreamState::Open(stream) => {
+            AsyncReadStreamState::Open(cursor) => {
                 *state = AsyncReadStreamState::Busy(None);
-                Ok(AsyncReadStreamStart::Stream(stream))
+                Ok(AsyncReadStreamStart::Cursor(cursor))
             }
             AsyncReadStreamState::End => {
                 *state = AsyncReadStreamState::End;
@@ -515,11 +519,11 @@ impl AsyncReadStreamCore {
         }
     }
 
-    fn complete_next(&self, stream: Box<opendal::BufferStream>, next: AsyncReadStreamNext) {
+    fn complete_next(&self, cursor: AsyncReadStreamCursor, next: AsyncReadStreamNext) {
         let mut state = self.lock_state();
         if matches!(*state, AsyncReadStreamState::Busy(_)) {
             *state = match next {
-                AsyncReadStreamNext::Chunk => AsyncReadStreamState::Open(stream),
+                AsyncReadStreamNext::Chunk => AsyncReadStreamState::Open(cursor),
                 AsyncReadStreamNext::End => AsyncReadStreamState::End,
                 AsyncReadStreamNext::Failed => AsyncReadStreamState::Failed,
             };
@@ -572,7 +576,7 @@ enum AsyncReadStreamNext {
 }
 
 enum AsyncReadStreamStart {
-    Stream(Box<opendal::BufferStream>),
+    Cursor(AsyncReadStreamCursor),
     End,
 }
 
@@ -938,6 +942,10 @@ fn buffer_too_large(message: impl Into<String>) -> CallFailure {
     binding_error(ERROR_BUFFER_TOO_LARGE, "BufferTooLarge", message)
 }
 
+fn unsupported(message: impl Into<String>) -> CallFailure {
+    binding_error(ERROR_UNSUPPORTED, "Unsupported", message)
+}
+
 fn opendal_error_snapshot(error: opendal::Error) -> ErrorV1 {
     let kind = error.kind();
     let code = match kind {
@@ -1252,7 +1260,7 @@ unsafe fn parse_read_stream_options(
             "read stream chunk_size must be between 1 and {MAX_OUTPUT_BYTES}"
         )));
     }
-    let chunk_size = checked_len(input.chunk_size).map_err(|_| {
+    let _ = checked_len(input.chunk_size).map_err(|_| {
         invalid_argument("read stream chunk_size is not representable on this platform")
     })?;
     Ok(ParsedReadStreamOptions {
@@ -1288,7 +1296,10 @@ unsafe fn parse_read_stream_options(
                 )?
             },
             concurrent: 1,
-            chunk: Some(chunk_size),
+            // OpenDAL resolves open-ended and suffix ranges through stat when
+            // chunk is set. Keep the upstream stream native and re-chunk its
+            // Buffers locally so read conditions stay on the same request.
+            chunk: None,
             prefetch: 0,
             ..ReaderOptions::default()
         },
@@ -2329,17 +2340,20 @@ fn checked_read_buffer(
     }))
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum WholeReadRangePlan {
-    Bounded(BytesRange),
-    Suffix { size: u64 },
-    OpenEnded { offset: u64, probe_size: u64 },
+fn split_read_stream_buffer(
+    mut buffer: opendal::Buffer,
+    chunk_size: u64,
+) -> CallResult<(opendal::Buffer, Option<opendal::Buffer>)> {
+    let chunk_size = usize::try_from(chunk_size)
+        .map_err(|_| buffer_too_large("read stream chunk size is not representable"))?;
+    let chunk = buffer.split_to(buffer.len().min(chunk_size));
+    let pending = (!buffer.is_empty()).then_some(buffer);
+    Ok((chunk, pending))
 }
 
 struct WholeReadPlan {
     reader_options: ReaderOptions,
-    stat_options: StatOptions,
-    range: WholeReadRangePlan,
+    range: BytesRange,
     output_limit: u64,
 }
 
@@ -2356,17 +2370,15 @@ fn whole_read_plan(options: ReadOptions, max_output_len: u64) -> CallResult<Whol
         ..
     } = options;
 
-    let range = match range {
+    match range {
         BytesRange::Range {
-            offset,
-            size: Some(size),
+            size: Some(size), ..
         } => {
             if size > output_limit {
                 return Err(buffer_too_large(
                     "read result exceeds the negotiated output limit",
                 ));
             }
-            WholeReadRangePlan::Bounded(BytesRange::new(offset, Some(size)))
         }
         BytesRange::Suffix { size } => {
             if size > output_limit {
@@ -2374,26 +2386,11 @@ fn whole_read_plan(options: ReadOptions, max_output_len: u64) -> CallResult<Whol
                     "read result exceeds the negotiated output limit",
                 ));
             }
-            WholeReadRangePlan::Suffix { size }
         }
-        BytesRange::Range { offset, size: None } => {
-            // Reading one byte beyond the negotiated limit distinguishes an exact
-            // fit from an oversized Full/From result without materializing the
-            // rest of the object. Clamp at the u64 address-space boundary so a
-            // valid open-ended range near u64::MAX cannot overflow when bounded.
-            let probe_size = output_limit
-                .checked_add(1)
-                .expect("MAX_OUTPUT_BYTES leaves room for the overflow probe")
-                .min(u64::MAX - offset);
-            WholeReadRangePlan::OpenEnded { offset, probe_size }
-        }
-    };
+        BytesRange::Range { size: None, .. } => {}
+    }
 
     Ok(WholeReadPlan {
-        stat_options: StatOptions {
-            version: version.clone(),
-            ..StatOptions::default()
-        },
         reader_options: ReaderOptions {
             version,
             if_match,
@@ -2402,7 +2399,7 @@ fn whole_read_plan(options: ReadOptions, max_output_len: u64) -> CallResult<Whol
             if_unmodified_since,
             content_length_hint,
             concurrent: 1,
-            chunk: Some(WHOLE_READ_CHUNK_BYTES),
+            chunk: None,
             gap: None,
             prefetch: 0,
         },
@@ -2411,71 +2408,13 @@ fn whole_read_plan(options: ReadOptions, max_output_len: u64) -> CallResult<Whol
     })
 }
 
-fn resolve_whole_read_range(
-    operator: &opendal::blocking::Operator,
-    path: &str,
-    plan: &WholeReadPlan,
-) -> CallResult<BytesRange> {
-    let (offset, requested_size) = match plan.range {
-        WholeReadRangePlan::Bounded(range) => return Ok(range),
-        WholeReadRangePlan::Suffix { size } => (None, size),
-        WholeReadRangePlan::OpenEnded { offset, probe_size } => (Some(offset), probe_size),
-    };
-    let metadata = operator
-        .stat_options(path, plan.stat_options.clone())
-        .map_err(opendal_error)?;
-    if metadata.is_dir() {
-        return Err(opendal_error(
-            opendal::Error::new(ErrorKind::IsADirectory, "read path is a directory")
-                .with_operation("Operator::read"),
+fn ensure_suffix_is_native(range: BytesRange, native_suffix: bool) -> CallResult<()> {
+    if range.is_suffix() && !native_suffix {
+        return Err(unsupported(
+            "suffix reads require native backend range support",
         ));
     }
-    let content_length = metadata.content_length();
-    match offset {
-        Some(offset) => {
-            let start = offset.min(content_length);
-            let size = content_length.saturating_sub(start).min(requested_size);
-            Ok(BytesRange::new(start, Some(size)))
-        }
-        None => {
-            let size = content_length.min(requested_size);
-            Ok(BytesRange::new(content_length - size, Some(size)))
-        }
-    }
-}
-
-async fn resolve_whole_read_range_async(
-    operator: &opendal::Operator,
-    path: &str,
-    plan: &WholeReadPlan,
-) -> CallResult<BytesRange> {
-    let (offset, requested_size) = match plan.range {
-        WholeReadRangePlan::Bounded(range) => return Ok(range),
-        WholeReadRangePlan::Suffix { size } => (None, size),
-        WholeReadRangePlan::OpenEnded { offset, probe_size } => (Some(offset), probe_size),
-    };
-    let metadata = operator
-        .stat_options(path, plan.stat_options.clone())
-        .await
-        .map_err(opendal_error)?;
-    if metadata.is_dir() {
-        return Err(opendal_error(
-            opendal::Error::new(ErrorKind::IsADirectory, "read path is a directory")
-                .with_operation("Operator::read"),
-        ));
-    }
-    let content_length = metadata.content_length();
-    match offset {
-        Some(offset) => {
-            let start = offset.min(content_length);
-            let size = content_length.saturating_sub(start).min(requested_size);
-            Ok(BytesRange::new(start, Some(size)))
-        }
-        None => {
-            let size = content_length.min(requested_size);
-            Ok(BytesRange::new(content_length - size, Some(size)))
-        }
-    }
+    Ok(())
 }
 
 async fn run_async_whole_read(
@@ -2484,12 +2423,14 @@ async fn run_async_whole_read(
     plan: WholeReadPlan,
 ) -> AsyncOutcome {
     let result = async {
-        let range = resolve_whole_read_range_async(&operator, &path, &plan).await?;
         let reader = operator
             .reader_options(&path, plan.reader_options)
             .await
             .map_err(opendal_error)?;
-        let mut stream = reader.into_stream(range).await.map_err(opendal_error)?;
+        let mut stream = reader
+            .into_stream(plan.range)
+            .await
+            .map_err(opendal_error)?;
         let mut output = Vec::new();
         while let Some(buffer) = stream.try_next().await.map_err(opendal_error)? {
             append_bounded_read_chunk(&mut output, buffer, plan.output_limit, "read result")?;
@@ -2952,6 +2893,10 @@ fn operator_handles_with_layers(
     async_operator: opendal::Operator,
     layer_bits: u32,
 ) -> CallResult<(Box<OperatorV1>, Box<OperatorInfoV1>)> {
+    let native_suffix = async_operator
+        .base_service()
+        .capability_dyn()
+        .read_with_suffix;
     let operator =
         opendal::blocking::Operator::new(async_operator.clone()).map_err(construction_error)?;
     let info = operator.info();
@@ -2965,17 +2910,22 @@ fn operator_handles_with_layers(
             ));
         }
     }
+    let mut capability = capability_view(info.capability());
+    if !native_suffix {
+        capability.words[0] &= !CAP_READ_SUFFIX;
+    }
     let info = OperatorInfoV1 {
         scheme,
         root,
         name,
-        capability: capability_view(info.capability()),
+        capability,
     };
     Ok((
         Box::new(OperatorV1 {
             async_inner: async_operator,
             inner: operator,
             layer_bits,
+            read_with_suffix: native_suffix,
         }),
         Box::new(info),
     ))
@@ -3568,12 +3518,12 @@ unsafe extern "C" fn operator_read(
             let path = unsafe { read_text(path, "path")? };
             let options = unsafe { parse_read_options(options)? };
             let plan = whole_read_plan(options, max_output_len)?;
-            let range = resolve_whole_read_range(&operator.inner, &path, &plan)?;
+            ensure_suffix_is_native(plan.range, operator.read_with_suffix)?;
             let reader = operator
                 .inner
                 .reader_options(&path, plan.reader_options)
                 .map_err(opendal_error)?;
-            let iterator = reader.into_iterator(range).map_err(opendal_error)?;
+            let iterator = reader.into_iterator(plan.range).map_err(opendal_error)?;
             let mut output = Vec::new();
             for buffer in iterator {
                 let buffer = buffer.map_err(opendal_error)?;
@@ -3975,6 +3925,7 @@ unsafe extern "C" fn operator_reader(
                 .map_err(opendal_error)?;
             Ok(Box::new(ReaderV1 {
                 state: std::sync::RwLock::new(ReaderStateV1::Open(reader)),
+                read_with_suffix: operator.read_with_suffix,
             }))
         })();
         match result {
@@ -4013,6 +3964,7 @@ unsafe extern "C" fn reader_read(
             // SAFETY: the range is required, copied, and validated before use.
             let range = unsafe { parse_range(read_required(range)?)? };
             let negotiated_limit = max_output_len.min(MAX_OUTPUT_BYTES);
+            ensure_suffix_is_native(range, reader.read_with_suffix)?;
             match range {
                 BytesRange::Range {
                     size: Some(size), ..
@@ -4133,13 +4085,17 @@ unsafe extern "C" fn operator_read_stream(
             let operator = unsafe { borrow_required(operator.cast_const())? };
             let path = unsafe { read_text(path, "path")? };
             let parsed = unsafe { parse_read_stream_options(options)? };
+            ensure_suffix_is_native(parsed.range, operator.read_with_suffix)?;
             let reader = operator
                 .inner
                 .reader_options(&path, parsed.reader)
                 .map_err(opendal_error)?;
             let iterator = reader.into_iterator(parsed.range).map_err(opendal_error)?;
             Ok(Box::new(ReadStreamV1 {
-                state: Mutex::new(ReadStreamStateV1::Open(Box::new(iterator))),
+                state: Mutex::new(ReadStreamStateV1::Open(ReadStreamCursorV1 {
+                    iterator: Box::new(iterator),
+                    pending: None,
+                })),
                 chunk_size: parsed.chunk_size,
             }))
         })();
@@ -4183,8 +4139,8 @@ unsafe extern "C" fn read_stream_next(
             }
         };
         let current = std::mem::replace(&mut *state, ReadStreamStateV1::Failed);
-        let mut iterator = match current {
-            ReadStreamStateV1::Open(iterator) => iterator,
+        let mut cursor = match current {
+            ReadStreamStateV1::Open(cursor) => cursor,
             ReadStreamStateV1::End => {
                 *state = ReadStreamStateV1::End;
                 return STATUS_END;
@@ -4203,13 +4159,27 @@ unsafe extern "C" fn read_stream_next(
                 };
             }
         };
-        let step = catch_unwind(AssertUnwindSafe(|| iterator.next()));
+        let step = catch_unwind(AssertUnwindSafe(
+            || -> CallResult<Option<opendal::Buffer>> {
+                let buffer = match cursor.pending.take() {
+                    Some(buffer) => buffer,
+                    None => match cursor.iterator.next() {
+                        Some(Ok(buffer)) => buffer,
+                        Some(Err(error)) => return Err(opendal_error(error)),
+                        None => return Ok(None),
+                    },
+                };
+                let (chunk, pending) = split_read_stream_buffer(buffer, stream.chunk_size)?;
+                cursor.pending = pending;
+                Ok(Some(chunk))
+            },
+        ));
         match step {
-            Ok(Some(Ok(buffer))) => {
+            Ok(Ok(Some(buffer))) => {
                 let limit = max_output_len.min(stream.chunk_size);
                 match checked_read_buffer(buffer, limit, "read stream chunk") {
                     Ok(buffer) => {
-                        *state = ReadStreamStateV1::Open(iterator);
+                        *state = ReadStreamStateV1::Open(cursor);
                         // SAFETY: the output slot was validated above.
                         unsafe { out_buffer.write(Box::into_raw(buffer)) };
                         STATUS_OK
@@ -4217,8 +4187,8 @@ unsafe extern "C" fn read_stream_next(
                     Err(failure) => unsafe { finish_failure(failure, out_error) },
                 }
             }
-            Ok(Some(Err(error))) => unsafe { finish_failure(opendal_error(error), out_error) },
-            Ok(None) => {
+            Ok(Err(failure)) => unsafe { finish_failure(failure, out_error) },
+            Ok(Ok(None)) => {
                 *state = ReadStreamStateV1::End;
                 STATUS_END
             }
@@ -5146,10 +5116,11 @@ unsafe extern "C" fn async_operator_read_start(
         let result = (|| -> CallResult<Box<AsyncTaskV1>> {
             // SAFETY: the handle and borrowed carriers are copied synchronously.
             let operator = unsafe { borrow_required(operator.cast_const())? };
-            let operator = operator.async_inner.clone();
             let path = unsafe { read_text(path, "path")? };
             let options = unsafe { parse_read_options(options)? };
             let plan = whole_read_plan(options, max_output_len)?;
+            ensure_suffix_is_native(plan.range, operator.read_with_suffix)?;
+            let operator = operator.async_inner.clone();
             let launch = AsyncLaunch::prepare(completion_fd)?;
             let (task, _) = launch.spawn(
                 AsyncResultKind::Buffer,
@@ -5189,9 +5160,10 @@ unsafe extern "C" fn async_operator_read_stream_start(
         let result = (|| -> CallResult<Box<AsyncTaskV1>> {
             // SAFETY: the handle and borrowed carriers are copied synchronously.
             let operator = unsafe { borrow_required(operator.cast_const())? };
-            let operator = operator.async_inner.clone();
             let path = unsafe { read_text(path, "path")? };
             let parsed = unsafe { parse_read_stream_options(options)? };
+            ensure_suffix_is_native(parsed.range, operator.read_with_suffix)?;
+            let operator = operator.async_inner.clone();
             let launch = AsyncLaunch::prepare(completion_fd)?;
             let future = async move {
                 let result = async {
@@ -5204,7 +5176,10 @@ unsafe extern "C" fn async_operator_read_stream_start(
                         .await
                         .map_err(opendal_error)?;
                     let core = Arc::new(AsyncReadStreamCore {
-                        state: Mutex::new(AsyncReadStreamState::Open(Box::new(stream))),
+                        state: Mutex::new(AsyncReadStreamState::Open(AsyncReadStreamCursor {
+                            stream: Box::new(stream),
+                            pending: None,
+                        })),
                         chunk_size: parsed.chunk_size,
                     });
                     Ok::<_, CallFailure>(Box::new(AsyncReadStreamV1 { core }))
@@ -5262,42 +5237,47 @@ unsafe extern "C" fn async_read_stream_next_start(
                     });
                     Ok(task)
                 }
-                AsyncReadStreamStart::Stream(mut native_stream) => {
+                AsyncReadStreamStart::Cursor(mut cursor) => {
                     let worker_core = core.clone();
                     let future = async move {
-                        match native_stream.try_next().await {
+                        let next = match cursor.pending.take() {
+                            Some(buffer) => Ok(Some(buffer)),
+                            None => cursor.stream.try_next().await,
+                        };
+                        match next {
                             Ok(Some(buffer)) => {
-                                match checked_read_buffer(
-                                    buffer,
-                                    max_output_len.min(worker_core.chunk_size),
-                                    "async read stream chunk",
-                                ) {
+                                let bounded =
+                                    split_read_stream_buffer(buffer, worker_core.chunk_size)
+                                        .and_then(|(chunk, pending)| {
+                                            cursor.pending = pending;
+                                            checked_read_buffer(
+                                                chunk,
+                                                max_output_len.min(worker_core.chunk_size),
+                                                "async read stream chunk",
+                                            )
+                                        });
+                                match bounded {
                                     Ok(buffer) => {
-                                        worker_core.complete_next(
-                                            native_stream,
-                                            AsyncReadStreamNext::Chunk,
-                                        );
+                                        worker_core
+                                            .complete_next(cursor, AsyncReadStreamNext::Chunk);
                                         AsyncOutcome::success(
                                             AsyncResultKind::Buffer,
                                             AsyncPayload::Buffer(buffer),
                                         )
                                     }
                                     Err(failure) => {
-                                        worker_core.complete_next(
-                                            native_stream,
-                                            AsyncReadStreamNext::Failed,
-                                        );
+                                        worker_core
+                                            .complete_next(cursor, AsyncReadStreamNext::Failed);
                                         AsyncOutcome::failure(AsyncResultKind::Buffer, failure)
                                     }
                                 }
                             }
                             Ok(None) => {
-                                worker_core.complete_next(native_stream, AsyncReadStreamNext::End);
+                                worker_core.complete_next(cursor, AsyncReadStreamNext::End);
                                 AsyncOutcome::end(AsyncResultKind::Buffer)
                             }
                             Err(error) => {
-                                worker_core
-                                    .complete_next(native_stream, AsyncReadStreamNext::Failed);
+                                worker_core.complete_next(cursor, AsyncReadStreamNext::Failed);
                                 AsyncOutcome::failure(AsyncResultKind::Buffer, opendal_error(error))
                             }
                         }
@@ -5975,6 +5955,9 @@ mod tests {
     use super::*;
     use std::mem::MaybeUninit;
     use std::ptr::NonNull;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use opendal::raw;
 
     #[cfg(unix)]
     use std::io::Read;
@@ -5982,6 +5965,182 @@ mod tests {
     use std::os::fd::AsRawFd;
     #[cfg(unix)]
     use std::os::fd::FromRawFd;
+
+    #[derive(Clone)]
+    struct NoStatReader {
+        content: Arc<Vec<u8>>,
+    }
+
+    impl NoStatReader {
+        fn buffer_for_range(&self, range: BytesRange) -> opendal::Result<opendal::Buffer> {
+            let (offset, size) = match range {
+                BytesRange::Range { offset, size } => (offset, size),
+                BytesRange::Suffix { .. } => {
+                    return Err(opendal::Error::new(
+                        ErrorKind::Unsupported,
+                        "test service does not support suffix reads",
+                    ));
+                }
+            };
+            let start = usize::try_from(offset)
+                .unwrap_or(usize::MAX)
+                .min(self.content.len());
+            let end = match size {
+                Some(size) => start
+                    .saturating_add(usize::try_from(size).unwrap_or(usize::MAX))
+                    .min(self.content.len()),
+                None => self.content.len(),
+            };
+            Ok(opendal::Buffer::from(self.content[start..end].to_vec()))
+        }
+    }
+
+    impl raw::oio::Read for NoStatReader {
+        async fn open(
+            &self,
+            range: BytesRange,
+        ) -> opendal::Result<(raw::RpRead, Box<dyn raw::oio::ReadStreamDyn>)> {
+            let buffer = self.buffer_for_range(range)?;
+            Ok((raw::RpRead::default(), Box::new(buffer)))
+        }
+
+        async fn read(&self, range: BytesRange) -> opendal::Result<(raw::RpRead, opendal::Buffer)> {
+            Ok((raw::RpRead::default(), self.buffer_for_range(range)?))
+        }
+    }
+
+    #[derive(Debug)]
+    struct ObservedReadOptions {
+        version: Option<String>,
+        if_match: Option<String>,
+        if_none_match: Option<String>,
+    }
+
+    type ObservedReads = Arc<Mutex<Vec<ObservedReadOptions>>>;
+
+    #[derive(Debug)]
+    struct NoStatService {
+        content: Arc<Vec<u8>>,
+        stat_calls: Arc<AtomicUsize>,
+        read_options: ObservedReads,
+    }
+
+    impl NoStatService {
+        fn unsupported(operation: &'static str) -> opendal::Error {
+            opendal::Error::new(ErrorKind::Unsupported, "operation is not supported")
+                .with_operation(operation)
+        }
+    }
+
+    impl raw::Service for NoStatService {
+        type Reader = NoStatReader;
+        type Writer = ();
+        type Lister = ();
+        type Deleter = ();
+        type Copier = ();
+
+        fn info(&self) -> raw::ServiceInfo {
+            raw::ServiceInfo::with_scheme("no-stat")
+        }
+
+        fn capability(&self) -> Capability {
+            Capability {
+                read: true,
+                read_with_suffix: false,
+                ..Capability::default()
+            }
+        }
+
+        async fn create_dir(
+            &self,
+            _: &opendal::OperationContext,
+            _: &str,
+            _: raw::OpCreateDir,
+        ) -> opendal::Result<raw::RpCreateDir> {
+            Err(Self::unsupported("NoStatService::create_dir"))
+        }
+
+        async fn stat(
+            &self,
+            _: &opendal::OperationContext,
+            _: &str,
+            _: raw::OpStat,
+        ) -> opendal::Result<raw::RpStat> {
+            self.stat_calls.fetch_add(1, Ordering::Relaxed);
+            Err(Self::unsupported("NoStatService::stat"))
+        }
+
+        fn read(
+            &self,
+            _: &opendal::OperationContext,
+            _: &str,
+            args: raw::OpRead,
+        ) -> opendal::Result<Self::Reader> {
+            self.read_options
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(ObservedReadOptions {
+                    version: args.version().map(str::to_owned),
+                    if_match: args.if_match().map(str::to_owned),
+                    if_none_match: args.if_none_match().map(str::to_owned),
+                });
+            Ok(NoStatReader {
+                content: self.content.clone(),
+            })
+        }
+
+        fn write(
+            &self,
+            _: &opendal::OperationContext,
+            _: &str,
+            _: raw::OpWrite,
+        ) -> opendal::Result<Self::Writer> {
+            Err(Self::unsupported("NoStatService::write"))
+        }
+
+        fn delete(&self, _: &opendal::OperationContext) -> opendal::Result<Self::Deleter> {
+            Err(Self::unsupported("NoStatService::delete"))
+        }
+
+        fn list(
+            &self,
+            _: &opendal::OperationContext,
+            _: &str,
+            _: raw::OpList,
+        ) -> opendal::Result<Self::Lister> {
+            Err(Self::unsupported("NoStatService::list"))
+        }
+
+        fn copy(
+            &self,
+            _: &opendal::OperationContext,
+            _: &str,
+            _: &str,
+            _: raw::OpCopy,
+            _: raw::OpCopier,
+        ) -> opendal::Result<Self::Copier> {
+            Err(Self::unsupported("NoStatService::copy"))
+        }
+
+        async fn rename(
+            &self,
+            _: &opendal::OperationContext,
+            _: &str,
+            _: &str,
+            _: raw::OpRename,
+        ) -> opendal::Result<raw::RpRename> {
+            Err(Self::unsupported("NoStatService::rename"))
+        }
+
+        async fn presign(
+            &self,
+            _: &opendal::OperationContext,
+            _: &str,
+            _: raw::OpPresign,
+        ) -> opendal::Result<raw::RpPresign> {
+            Err(Self::unsupported("NoStatService::presign"))
+        }
+    }
 
     fn bytes(value: &[u8]) -> BytesViewV1 {
         BytesViewV1 {
@@ -6005,6 +6164,48 @@ mod tests {
             assert_eq!(opendal_mbt_get_api(pointer.cast()), STATUS_OK);
             api.assume_init()
         }
+    }
+
+    fn no_stat_operator(
+        content: &[u8],
+    ) -> (
+        *mut OperatorV1,
+        *mut OperatorInfoV1,
+        Arc<AtomicUsize>,
+        ObservedReads,
+    ) {
+        let stat_calls = Arc::new(AtomicUsize::new(0));
+        let read_options = Arc::new(Mutex::new(Vec::new()));
+        let service = Arc::new(NoStatService {
+            content: Arc::new(content.to_vec()),
+            stat_calls: stat_calls.clone(),
+            read_options: read_options.clone(),
+        }) as raw::Servicer;
+        let async_operator =
+            opendal::Operator::from_parts(opendal::OperationContext::default(), service)
+                .layer(opendal::layers::SimulateLayer::default());
+        assert!(async_operator.info().capability().read_with_suffix);
+        assert!(
+            !async_operator
+                .base_service()
+                .capability_dyn()
+                .read_with_suffix
+        );
+        let runtime = runtime().unwrap_or_else(|_| panic!("test runtime must initialize"));
+        let _guard = runtime.enter();
+        let (operator, info) =
+            operator_handles(async_operator).unwrap_or_else(|failure| match failure {
+                CallFailure::AbiMismatch => panic!("test operator construction hit ABI mismatch"),
+                CallFailure::Error(error) => {
+                    panic!("test operator construction failed: {}", error.message)
+                }
+            });
+        (
+            Box::into_raw(operator),
+            Box::into_raw(info),
+            stat_calls,
+            read_options,
+        )
     }
 
     #[cfg(feature = "profile-standard")]
@@ -7730,10 +7931,10 @@ mod tests {
     }
 
     #[test]
-    fn whole_read_uses_only_the_negotiated_overflow_probe() {
+    fn whole_read_stops_after_the_first_oversized_upstream_buffer() {
         let api = api();
         let (operator, info) = memory_operator(&api);
-        let payload = vec![0xA5; WHOLE_READ_CHUNK_BYTES * 2 + 17];
+        let payload = vec![0xA5; 2 * 1024 * 1024 + 17];
         write_memory_object(&api, operator, b"bounded/large.bin", &payload);
 
         install_whole_read_observer(operator);
@@ -7741,7 +7942,10 @@ mod tests {
             try_read_object(&api, operator, b"bounded/large.bin", ptr::null(), 7,),
             Err(ERROR_BUFFER_TOO_LARGE),
         );
-        assert_eq!(take_whole_read_observation(operator), 8);
+        assert_eq!(
+            take_whole_read_observation(operator),
+            u64::try_from(payload.len()).expect("test payload length fits u64"),
+        );
 
         // SAFETY: both constructor outputs remain uniquely owned by this test.
         unsafe {
@@ -7776,7 +7980,7 @@ mod tests {
             try_read_object(&api, operator, b"bounded/exact", ptr::null(), 0),
             Err(ERROR_BUFFER_TOO_LARGE),
         );
-        assert_eq!(take_whole_read_observation(operator), 1);
+        assert_eq!(take_whole_read_observation(operator), 8);
 
         // SAFETY: both constructor outputs remain uniquely owned by this test.
         unsafe {
@@ -7786,7 +7990,7 @@ mod tests {
     }
 
     #[test]
-    fn whole_read_preserves_ranges_and_preflights_known_lengths() {
+    fn whole_read_preserves_ranges_and_preflights_explicit_lengths() {
         let api = api();
         let (operator, info) = memory_operator(&api);
         write_memory_object(&api, operator, b"bounded/ranges", b"0123456789");
@@ -7839,7 +8043,7 @@ mod tests {
     }
 
     #[test]
-    fn whole_read_plan_preserves_conditions_and_forces_serial_backpressure() {
+    fn whole_read_plan_preserves_conditions_without_upstream_rechunking() {
         let options = ReadOptions {
             range: BytesRange::suffix(3),
             version: Some("version-1".to_owned()),
@@ -7853,15 +8057,186 @@ mod tests {
             Err(_) => panic!("valid bounded whole-read plan was rejected"),
         };
 
-        assert_eq!(plan.range, WholeReadRangePlan::Suffix { size: 3 });
+        assert_eq!(plan.range, BytesRange::suffix(3));
         assert_eq!(plan.output_limit, 3);
         assert_eq!(plan.reader_options.version.as_deref(), Some("version-1"));
         assert_eq!(plan.reader_options.if_match.as_deref(), Some("etag-1"));
         assert_eq!(plan.reader_options.if_none_match.as_deref(), Some("etag-2"));
         assert_eq!(plan.reader_options.content_length_hint, Some(10));
         assert_eq!(plan.reader_options.concurrent, 1);
-        assert_eq!(plan.reader_options.chunk, Some(WHOLE_READ_CHUNK_BYTES));
+        assert_eq!(plan.reader_options.chunk, None);
         assert_eq!(plan.reader_options.prefetch, 0);
+    }
+
+    #[test]
+    fn read_facades_avoid_stat_and_only_expose_native_suffix() {
+        let api = api();
+        let (operator, info, stat_calls, read_options) = no_stat_operator(b"0123456789");
+
+        // SAFETY: both immutable handles remain live for these capability checks.
+        unsafe {
+            let capabilities = (*info).capability.words[0];
+            assert_ne!(capabilities & CAP_READ, 0);
+            assert_eq!(capabilities & CAP_STAT, 0);
+            assert_eq!(capabilities & CAP_READ_SUFFIX, 0);
+        }
+
+        assert_eq!(read_object(&api, operator, b"object"), b"0123456789");
+        let mut from = whole_read_options(byte_range(RANGE_FROM, 3, 0));
+        from.present_bits =
+            READ_VERSION_PRESENT | READ_IF_MATCH_PRESENT | READ_IF_NONE_MATCH_PRESENT;
+        from.version = bytes(b"version-1");
+        from.if_match = bytes(b"etag-1");
+        from.if_none_match = bytes(b"etag-2");
+        assert_eq!(
+            try_read_object(&api, operator, b"object", &from, 7),
+            Ok(b"3456789".to_vec()),
+        );
+
+        // Exercise the async whole-read implementation without relying on the
+        // platform completion-pipe harness used by the public start function.
+        // SAFETY: the operator stays live while its Arc-backed async facet is cloned.
+        let async_operator = unsafe { (*operator).async_inner.clone() };
+        let async_plan = whole_read_plan(
+            ReadOptions {
+                range: BytesRange::new(4, None),
+                ..ReadOptions::default()
+            },
+            6,
+        )
+        .unwrap_or_else(|_| panic!("valid async whole-read plan was rejected"));
+        let outcome = runtime()
+            .unwrap_or_else(|_| panic!("test runtime must initialize"))
+            .block_on(run_async_whole_read(
+                async_operator,
+                "object".to_owned(),
+                async_plan,
+            ));
+        assert_eq!(outcome.status, STATUS_OK);
+        assert!(outcome.error.is_none());
+        match outcome.payload {
+            AsyncPayload::Buffer(buffer) => assert_eq!(buffer.bytes, b"456789"),
+            _ => panic!("async whole read returned the wrong payload kind"),
+        }
+
+        let reader = memory_reader(&api, operator, b"object", ptr::null());
+        assert_eq!(
+            read_reader_bytes(
+                &api,
+                reader,
+                &byte_range(RANGE_FROM, 6, 0),
+                MAX_OUTPUT_BYTES,
+            ),
+            b"6789",
+        );
+
+        let suffix = whole_read_options(byte_range(RANGE_SUFFIX, 0, 3));
+        assert_eq!(
+            try_read_object(&api, operator, b"object", &suffix, 3),
+            Err(ERROR_UNSUPPORTED),
+        );
+
+        let suffix_range = byte_range(RANGE_SUFFIX, 0, 3);
+        let mut buffer = NonNull::<BufferV1>::dangling().as_ptr();
+        let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the live reader and complete range carrier are valid for this call.
+        assert_eq!(
+            unsafe {
+                api.reader_read.expect("RANDOM_READER read is installed")(
+                    reader,
+                    &suffix_range,
+                    3,
+                    &mut buffer,
+                    &mut error,
+                )
+            },
+            STATUS_ERROR,
+        );
+        assert!(buffer.is_null());
+        assert_eq!(take_error_kind(&api, error), ERROR_UNSUPPORTED);
+
+        let stream = memory_read_stream(
+            &api,
+            operator,
+            b"object",
+            &read_stream_options(byte_range(RANGE_FULL, 0, 0), 3),
+        );
+        assert_eq!(
+            collect_read_stream(&api, stream),
+            [
+                b"012".to_vec(),
+                b"345".to_vec(),
+                b"678".to_vec(),
+                b"9".to_vec()
+            ],
+        );
+
+        let path = bytes(b"object");
+        let suffix_stream_options = read_stream_options(suffix_range, 3);
+        let mut suffix_stream = NonNull::<ReadStreamV1>::dangling().as_ptr();
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: all carriers and output slots remain live for this constructor call.
+        assert_eq!(
+            unsafe {
+                api.operator_read_stream
+                    .expect("READ_STREAM constructor is installed")(
+                    operator,
+                    &path,
+                    &suffix_stream_options,
+                    &mut suffix_stream,
+                    &mut error,
+                )
+            },
+            STATUS_ERROR,
+        );
+        assert!(suffix_stream.is_null());
+        assert_eq!(take_error_kind(&api, error), ERROR_UNSUPPORTED);
+        assert_eq!(stat_calls.load(Ordering::Relaxed), 0);
+        assert!(
+            read_options
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .iter()
+                .any(|options| {
+                    options.version.as_deref() == Some("version-1")
+                        && options.if_match.as_deref() == Some("etag-1")
+                        && options.if_none_match.as_deref() == Some("etag-2")
+                }),
+        );
+
+        // SAFETY: every successful constructor output remains uniquely owned here.
+        unsafe {
+            api.read_stream_free.expect("READ_STREAM free is installed")(stream);
+            api.reader_free.expect("RANDOM_READER free is installed")(reader);
+            api.operator_info_free.expect("BASE info free is installed")(info);
+            api.operator_free.expect("BASE operator free is installed")(operator);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn async_read_stream_rechunks_without_stat() {
+        let api = api();
+        let (operator, info, stat_calls, _) = no_stat_operator(b"0123456789");
+        let options = read_stream_options(byte_range(RANGE_FROM, 1, 0), 3);
+        let stream = await_async_read_stream_open(&api, operator, b"object", &options);
+
+        let mut chunks = Vec::new();
+        while let Some(chunk) = await_async_read_stream_next(&api, stream) {
+            chunks.push(chunk);
+        }
+        assert_eq!(chunks, [b"123".to_vec(), b"456".to_vec(), b"789".to_vec()],);
+        assert_eq!(stat_calls.load(Ordering::Relaxed), 0);
+
+        // SAFETY: every successful constructor output remains uniquely owned here.
+        unsafe {
+            api.async_read_stream_close
+                .expect("ASYNC stream close is installed")(stream);
+            api.async_read_stream_free
+                .expect("ASYNC stream free is installed")(stream);
+            api.operator_info_free.expect("BASE info free is installed")(info);
+            api.operator_free.expect("BASE operator free is installed")(operator);
+        }
     }
 
     #[test]
@@ -9674,6 +10049,117 @@ mod tests {
                 std::fs::File::from_raw_fd(fds[1]),
             )
         }
+    }
+
+    #[cfg(unix)]
+    fn await_async_read_stream_open(
+        api: &ApiV1,
+        operator: *mut OperatorV1,
+        path: &[u8],
+        options: &ReadStreamOptionsV1,
+    ) -> *mut AsyncReadStreamV1 {
+        let (mut completion, writer) = test_completion_pipe(true);
+        let path = bytes(path);
+        let mut task = NonNull::<AsyncTaskV1>::dangling().as_ptr();
+        let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the live operator, carriers, completion pipe, and outputs satisfy the ABI.
+        assert_eq!(
+            unsafe {
+                api.async_operator_read_stream_start
+                    .expect("ASYNC read-stream start is installed")(
+                    operator,
+                    &path,
+                    options,
+                    writer.as_raw_fd(),
+                    &mut task,
+                    &mut error,
+                )
+            },
+            STATUS_OK,
+        );
+        assert!(!task.is_null());
+        assert!(error.is_null());
+        drop(writer);
+        let mut readiness = [0; 1];
+        completion
+            .read_exact(&mut readiness)
+            .expect("async stream open publishes readiness");
+
+        let mut stream = NonNull::<AsyncReadStreamV1>::dangling().as_ptr();
+        // SAFETY: readiness means the live task has a terminal result to take.
+        assert_eq!(
+            unsafe {
+                api.async_task_take_read_stream
+                    .expect("ASYNC read-stream take is installed")(
+                    task, &mut stream, &mut error
+                )
+            },
+            STATUS_OK,
+        );
+        assert!(!stream.is_null());
+        assert!(error.is_null());
+        // SAFETY: the result has been taken and this test owns the task handle.
+        unsafe { api.async_task_free.expect("ASYNC task free is installed")(task) };
+        stream
+    }
+
+    #[cfg(unix)]
+    fn await_async_read_stream_next(
+        api: &ApiV1,
+        stream: *mut AsyncReadStreamV1,
+    ) -> Option<Vec<u8>> {
+        let (mut completion, writer) = test_completion_pipe(true);
+        let mut task = NonNull::<AsyncTaskV1>::dangling().as_ptr();
+        let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the live stream, dedicated completion pipe, and outputs satisfy the ABI.
+        assert_eq!(
+            unsafe {
+                api.async_read_stream_next_start
+                    .expect("ASYNC stream next start is installed")(
+                    stream,
+                    MAX_OUTPUT_BYTES,
+                    writer.as_raw_fd(),
+                    &mut task,
+                    &mut error,
+                )
+            },
+            STATUS_OK,
+        );
+        assert!(!task.is_null());
+        assert!(error.is_null());
+        drop(writer);
+        let mut readiness = [0; 1];
+        completion
+            .read_exact(&mut readiness)
+            .expect("async stream next publishes readiness");
+
+        let mut buffer = NonNull::<BufferV1>::dangling().as_ptr();
+        // SAFETY: readiness means the live task has a terminal result to take.
+        let status = unsafe {
+            api.async_task_take_buffer
+                .expect("ASYNC buffer take is installed")(task, &mut buffer, &mut error)
+        };
+        let result = match status {
+            STATUS_OK => {
+                assert!(!buffer.is_null());
+                assert!(error.is_null());
+                Some(take_buffer(api, buffer))
+            }
+            STATUS_END => {
+                assert!(buffer.is_null());
+                assert!(error.is_null());
+                None
+            }
+            STATUS_ERROR => {
+                assert!(buffer.is_null());
+                let kind = take_error_kind(api, error);
+                panic!("unexpected async read-stream error kind {kind}");
+            }
+            other => panic!("unexpected async read-stream transport status {other}"),
+        };
+        // SAFETY: the result has been taken and this test owns the task handle.
+        unsafe { api.async_task_free.expect("ASYNC task free is installed")(task) };
+        result
     }
 
     #[cfg(unix)]

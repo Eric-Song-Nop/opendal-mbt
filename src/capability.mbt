@@ -29,7 +29,8 @@ pub fn Capability::can_read(self : Capability) -> Bool {
 }
 
 ///|
-/// Return whether suffix ranges are supported for reads through this binding.
+/// Return whether the selected backend natively supports suffix ranges.
+/// The binding does not emulate suffix reads with a preliminary stat.
 pub fn Capability::can_read_suffix(self : Capability) -> Bool {
   self.has(8)
 }
