@@ -264,11 +264,19 @@ state; it never reports finish or abort success.
 
 ### ABI v1.7 async extension
 
-ABI v1.7 appends `OPENDAL_MBT_FEATURE_ASYNC` on POSIX native targets. A start
-function synchronously validates and copies all borrowed inputs, duplicates a
-writable pipe descriptor, and returns an owned native task. A Tokio worker
-publishes exactly one owned result before writing one readiness byte. It never
-calls MoonBit, retains a MoonBit value, or puts result data in the pipe.
+ABI v1.7 appends `OPENDAL_MBT_FEATURE_ASYNC` on the advertised macOS and Linux
+targets. A start function synchronously validates and copies all borrowed inputs and requires
+the writable end of a fresh, empty pipe dedicated to that task and already
+configured with `O_NONBLOCK`. A blocking or non-pipe descriptor is rejected.
+A start attempt may duplicate and configure the descriptor before a later
+validation step fails. After every attempt the caller must only close its
+original descriptor; it must not write through it, reuse it for another task,
+or change its shared file-status flags. On success the duplicate lives until
+the task is terminal. A Tokio worker publishes exactly one owned result before
+attempting one readiness-byte write. `EAGAIN` is ignored as a defensive
+nonblocking fallback, while `EPIPE` is contained without changing the foreign
+process's process-wide SIGPIPE disposition. It never calls MoonBit, retains a
+MoonBit value, or puts result data in the pipe.
 
 Completion, result-taking, and cancellation are linearized by the task state.
 Cancellation that wins publishes the terminal cancellation state, requests

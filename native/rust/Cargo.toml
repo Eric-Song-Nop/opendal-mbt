@@ -26,6 +26,7 @@ layers-timeout-retry = ["opendal/layers-retry", "opendal/layers-timeout"]
 
 [dependencies]
 futures-util = { version = "=0.3.34", default-features = false, features = ["async-await", "std"] }
+libc = "=0.2.189"
 opendal = { version = "=0.58.1", default-features = false }
 tokio = { version = "=1.52.0", features = ["rt-multi-thread", "fs"] }
 

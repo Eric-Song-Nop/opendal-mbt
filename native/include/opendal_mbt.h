@@ -808,14 +808,23 @@ typedef struct opendal_mbt_api_v1 {
 
   /*
    * OPENDAL_MBT_FEATURE_ASYNC: appended in ABI v1.7. This group is available
-   * on POSIX native targets and depends on BASE. `completion_fd` is a writable
-   * pipe descriptor. Every successful start duplicates that descriptor and
-   * copies all borrowed input before returning, so the caller may immediately
-   * close or reuse its inputs. Worker completion publishes one owned result
-   * before writing one byte. Cancellation that wins first publishes the
-   * terminal task state and writes that byte synchronously; the later worker
-   * does not write again. The byte is readiness only and carries no data.
-   * Workers never call the foreign runtime and never retain foreign values.
+   * on the advertised macOS and Linux targets and depends on BASE.
+   * `completion_fd` must be the
+   * writable end of a fresh, empty pipe dedicated to this task and already
+   * configured with O_NONBLOCK; a blocking or non-pipe descriptor is rejected.
+   * A start attempt may duplicate and configure the descriptor even if a
+   * later validation step fails. After every attempt the caller must only
+   * close its original descriptor: it must not write through it, reuse it for
+   * another task, or change its shared file-status flags. On success the
+   * duplicate lives until the task is terminal. All other borrowed inputs are
+   * copied and may be reused at once.
+   * Worker completion publishes one owned result before attempting to write
+   * one byte. EAGAIN is ignored as a nonblocking defensive fallback, and EPIPE
+   * is contained without changing the process-wide SIGPIPE disposition.
+   * Cancellation that wins first publishes the terminal task state and owns
+   * that write attempt; the later worker does not write again. The byte is
+   * readiness only and carries no data. Workers never call the foreign runtime
+   * and never retain foreign values.
    */
   opendal_mbt_status_t(OPENDAL_MBT_CALL *async_operator_read_start)(
       opendal_mbt_operator_v1_t *operator_,
