@@ -5,7 +5,12 @@ NATIVE_SERVICE_PROFILE ?= standard
 MOON_WARN_LIST ?= -68+73
 NATIVE_ARTIFACT ?=
 NATIVE_ARTIFACT_TABLE ?=
-WASM_RUST_TARGET := $(CURDIR)/target/wasm32-unknown-unknown/release/opendal_mbt_wasm_bridge.wasm
+WASM_BINDGEN_VERSION := 0.2.127
+WASM_RUST_RAW := $(CURDIR)/target/wasm32-unknown-unknown/release/opendal_mbt_wasm_bridge.wasm
+WASM_BINDGEN_DIR := $(CURDIR)/target/wasm-bindgen/release
+WASM_RUST_TARGET := $(WASM_BINDGEN_DIR)/opendal_mbt_wasm_bridge_bg.wasm
+WASM_RUST_GLUE_JS := $(WASM_BINDGEN_DIR)/opendal_mbt_wasm_bridge.js
+WASM_RUST_GLUE := $(WASM_BINDGEN_DIR)/opendal_mbt_wasm_bridge.mjs
 WASM_MOON_TARGET := $(CURDIR)/_build/wasm/release/build/eric-song-nop/opendal-wasm-canary/opendal-wasm-canary.wasm
 
 ifeq ($(RUST_PROFILE),debug)
@@ -41,16 +46,27 @@ native:
 		$(CARGO_PROFILE_FLAG)
 
 wasm-rust:
+	@actual_version="$$(wasm-bindgen --version 2>/dev/null || true)"; \
+		test "$$actual_version" = "wasm-bindgen $(WASM_BINDGEN_VERSION)" || { \
+			echo "wasm-bindgen $(WASM_BINDGEN_VERSION) is required; found '$$actual_version'" >&2; \
+			exit 1; \
+		}
 	CARGO_PROFILE_RELEASE_PANIC=abort cargo build --locked \
 		--package opendal-mbt-wasm-bridge \
 		--target wasm32-unknown-unknown --release
+	mkdir -p "$(WASM_BINDGEN_DIR)"
+	wasm-bindgen --target web --no-typescript \
+		--out-dir "$(WASM_BINDGEN_DIR)" \
+		--out-name opendal_mbt_wasm_bridge "$(WASM_RUST_RAW)"
+	mv "$(WASM_RUST_GLUE_JS)" "$(WASM_RUST_GLUE)"
 
 wasm-moon:
 	OPENDAL_MBT_SKIP_NATIVE=1 moon build --target wasm --release --frozen \
 		integration/wasm
 
 wasm-canary: wasm-rust wasm-moon
-	node wasm/canary/run.mjs "$(WASM_RUST_TARGET)" "$(WASM_MOON_TARGET)"
+	node wasm/canary/run.mjs "$(WASM_RUST_GLUE)" "$(WASM_RUST_TARGET)" \
+		"$(WASM_MOON_TARGET)"
 
 rust-test:
 	cargo test --package opendal-mbt-native --all-targets --locked \
