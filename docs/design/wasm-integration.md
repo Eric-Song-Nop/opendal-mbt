@@ -1,8 +1,11 @@
 # OpenDAL for MoonBit on WebAssembly
 
-Status: proposed
+Status: accepted direction; implementation in progress
 
-Last reviewed: 2026-08-12
+Last reviewed: 2026-08-13
+
+Detailed product, Mooncake distribution, runtime, and milestone plan:
+[`wasm-mooncake-delivery.md`](wasm-mooncake-delivery.md).
 
 ## Decision
 
@@ -260,6 +263,12 @@ Acceptance criteria:
 
 ## Delivery plan
 
+The milestone summary below establishes the integration sequence. The
+distribution-grade execution plan, including the interim Mooncake `moonx`
+bundler, browser async gate, artifact manifest, OPFS acceptance, upstream Moon
+requirements, and release definition, is maintained in
+[`wasm-mooncake-delivery.md`](wasm-mooncake-delivery.md).
+
 ### Milestone 0: Toolchain canary
 
 Goal: prove the smallest cross-language call before introducing OpenDAL.
@@ -425,18 +434,23 @@ Wasm adapter evolves independently.
 
 ## Immediate implementation backlog
 
-The first implementation PR after this design should remain intentionally
-small:
+The first implementation slice now exists as
+[draft PR #59](https://github.com/Eric-Song-Nop/opendal-mbt/pull/59). It adds
+the unpublished `/wasm` facade, a Rust/OpenDAL memory bridge, scalar-handle
+ABI, repository-owned loader, and downstream canary. The next backlog is:
 
-1. make `build.js` target-aware so non-native targets never resolve a host
-   native archive;
-2. add an unpublished `wasm` facade package and downstream fixture;
-3. add the Rust byte-echo canary and repository-owned loader;
-4. prove binary transfer, handle release, stale-handle rejection, and error
-   transfer;
-5. replace the canary internals with OpenDAL memory `read`/`write` only;
-6. record whether core-module composition or WIT gives the better package
-   boundary before expanding the public API.
+1. replace poll-once with a forced-pending task lifecycle driven by the browser
+   event loop;
+2. prove how MoonBit async code suspends and resumes in an ordinary browser
+   runtime;
+3. replace per-byte transfer with a bounded bulk-copy protocol;
+4. define and pin the independent Wasm artifact manifest;
+5. deliver a clean Mooncake consumer through the exact-version official
+   bundler without Rust, npm, or handwritten loader code;
+6. add OPFS only after the async, cancellation, teardown, and package gates
+   pass;
+7. evaluate WIT/component composition after the core-module product path is
+   usable, rather than placing it on the OPFS critical path.
 
 That sequence finds the decisive failures early. It also preserves the native
 package while making measurable progress toward the intended result: OpenDAL
