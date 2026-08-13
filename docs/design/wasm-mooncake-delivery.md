@@ -163,15 +163,17 @@ MoonBit application Wasm
   -> OpenDAL memory service
 ```
 
-The scalar ABI remains version `0x0001_0000`. Its current feature bitmap is
-`0x0000_001f`: memory service, poll-once synchronous canary, generation
-handles, binary buffers, and task ABI. In addition to the original synchronous
-round trip, the bridge now has generation-checked task and completion handles,
-per-completion OpenDAL errors, logical cancellation, and permanent instance
-teardown. The MoonBit facade exposes the experimental public
-`write_callback`, `read_callback`, and `stat_callback` methods. Each returns an
-`Operation` whose observable states are `Pending`, `Completed`, `Cancelled`,
-and `Closed`.
+The scalar ABI is version `0x0001_0001`. Its current feature bitmap is
+`0x0000_003f`: memory service, poll-once synchronous canary, generation
+handles, binary buffers, task ABI, and generic operator construction through
+the compiled OpenDAL service registry. In addition to the original
+synchronous round trip, the bridge now has generation-checked task and
+completion handles, per-completion OpenDAL errors, logical cancellation,
+per-operator service identity and capabilities, and permanent instance
+teardown. The MoonBit facade exposes backend-neutral `Operator::new(scheme,
+config)` plus the experimental public `write_callback`, `read_callback`, and
+`stat_callback` methods. Each callback returns an `Operation` whose observable
+states are `Pending`, `Completed`, `Cancelled`, and `Closed`.
 
 The repository has two acceptance commands with intentionally different
 claims:
@@ -389,8 +391,8 @@ rather than the bounded bulk-copy step shown above.
 
 ### Target bootstrap
 
-The current facade checks bridge ABI `0x0001_0000` and required feature bits
-`0x0000_001f` before creating an operator. The artifact-manifest and
+The current facade checks bridge ABI `0x0001_0001` and required feature bits
+`0x0000_003f` before creating an operator. The artifact-manifest and
 service-profile checks below remain product work.
 
 Before creating an operator, the facade and loader validate:

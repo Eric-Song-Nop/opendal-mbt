@@ -6,6 +6,8 @@ import {
 }
 
 // Values
+pub fn available_schemes() -> Array[String] raise WasmError
+
 pub fn bridge_features() -> UInt
 
 pub fn bridge_version() -> UInt
@@ -23,6 +25,27 @@ pub fn WasmError::is_not_found(Self) -> Bool
 pub fn WasmError::message(Self) -> String
 
 // Types and methods
+pub struct Capability {
+  // private fields
+} derive(Eq, @debug.Debug)
+pub fn Capability::can_copy(Self) -> Bool
+pub fn Capability::can_create_dir(Self) -> Bool
+pub fn Capability::can_delete(Self) -> Bool
+pub fn Capability::can_list(Self) -> Bool
+pub fn Capability::can_list_recursive(Self) -> Bool
+pub fn Capability::can_list_with_limit(Self) -> Bool
+pub fn Capability::can_list_with_start_after(Self) -> Bool
+pub fn Capability::can_presign_read(Self) -> Bool
+pub fn Capability::can_presign_stat(Self) -> Bool
+pub fn Capability::can_presign_write(Self) -> Bool
+pub fn Capability::can_read(Self) -> Bool
+pub fn Capability::can_read_suffix(Self) -> Bool
+pub fn Capability::can_rename(Self) -> Bool
+pub fn Capability::can_stat(Self) -> Bool
+pub fn Capability::can_write(Self) -> Bool
+pub fn Capability::can_write_append(Self) -> Bool
+pub fn Capability::delete_max_size(Self) -> Int?
+
 pub struct Metadata {
   content_length : UInt64
   is_file : Bool
@@ -46,13 +69,22 @@ pub struct Operator {
   // private fields
 }
 pub fn Operator::close(Self) -> Unit
+pub fn Operator::info(Self) -> OperatorInfo raise WasmError
 pub fn Operator::memory() -> Self raise WasmError
+pub fn Operator::new(StringView, config? : Map[String, String]) -> Self raise WasmError
 pub fn Operator::read(Self, StringView) -> Bytes raise WasmError
 pub fn Operator::read_callback(Self, StringView, (Result[Bytes, WasmError]) -> Unit) -> Operation raise WasmError
 pub fn Operator::stat(Self, StringView) -> Metadata raise WasmError
 pub fn Operator::stat_callback(Self, StringView, (Result[Metadata, WasmError]) -> Unit) -> Operation raise WasmError
 pub fn Operator::write(Self, StringView, BytesView) -> Unit raise WasmError
 pub fn Operator::write_callback(Self, StringView, BytesView, (Result[Unit, WasmError]) -> Unit) -> Operation raise WasmError
+
+pub struct OperatorInfo {
+  scheme : String
+  root : String
+  name : String
+  capability : Capability
+} derive(Eq, @debug.Debug)
 
 // Type aliases
 

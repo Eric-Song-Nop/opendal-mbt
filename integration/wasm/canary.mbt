@@ -20,6 +20,9 @@ const CANARY_WRONG_MISSING_ERROR = 5
 const CANARY_HANDLE_LEAK = 6
 
 ///|
+const CANARY_SERVICE_INFO_MISMATCH = 7
+
+///|
 const ASYNC_IDLE = 0
 
 ///|
@@ -147,7 +150,9 @@ pub fn canary_async_start() -> Int {
     return ASYNC_ERROR
   }
   async_baseline.val = @opendal.live_handle_count()
-  let operator = @opendal.Operator::memory() catch { _ => return ASYNC_ERROR }
+  let operator = @opendal.Operator::new("memory") catch {
+    _ => return ASYNC_ERROR
+  }
   async_operator.val = Some(operator)
   let payload = b"\x00\xffMoonBit-async\x80OpenDAL"
   async_stage.val = ASYNC_WRITE_PENDING
@@ -186,7 +191,9 @@ pub fn canary_pending_poll_count() -> UInt {
 pub fn canary_cancel_start() -> Int {
   cancel_callback_count.val = 0
   cancel_baseline.val = @opendal.live_handle_count()
-  let operator = @opendal.Operator::memory() catch { _ => return ASYNC_ERROR }
+  let operator = @opendal.Operator::new("memory") catch {
+    _ => return ASYNC_ERROR
+  }
   cancel_operator.val = Some(operator)
   let operation = operator.read_callback("canary/cancel.bin", _ => {
     cancel_callback_count.val = cancel_callback_count.val + 1
@@ -225,8 +232,30 @@ pub fn canary_cancel_is_clean() -> Int {
 
 ///|
 fn run_one_lifecycle() -> Int {
-  let operator = @opendal.Operator::memory() catch {
+  let schemes = @opendal.available_schemes() catch {
     _ => return CANARY_UNEXPECTED_ERROR
+  }
+  if schemes != ["memory"] {
+    return CANARY_SERVICE_INFO_MISMATCH
+  }
+  let operator = @opendal.Operator::new("memory", config={
+    "root": "generic-prefix",
+  }) catch {
+    _ => return CANARY_UNEXPECTED_ERROR
+  }
+  let info = operator.info() catch {
+    _ => {
+      operator.close()
+      return CANARY_UNEXPECTED_ERROR
+    }
+  }
+  if info.scheme != "memory" ||
+    info.root != "/generic-prefix/" ||
+    !info.capability.can_stat() ||
+    !info.capability.can_read() ||
+    !info.capability.can_write() {
+    operator.close()
+    return CANARY_SERVICE_INFO_MISMATCH
   }
   let payload = b"\x00\xffMoonBit\x80OpenDAL"
   operator.write("canary/binary.bin", payload) catch {

@@ -26,7 +26,35 @@ fn bridge_buffer_get(handle : UInt, index : UInt) -> Int = "opendal_mbt_bridge" 
 fn bridge_buffer_release(handle : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_buffer_release"
 
 ///|
-fn bridge_operator_new_memory() -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_operator_new_memory"
+fn bridge_registered_schemes() -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_registered_schemes"
+
+///|
+fn bridge_operator_builder_new(scheme : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_operator_builder_new"
+
+///|
+fn bridge_operator_builder_set(
+  builder : UInt,
+  key : UInt,
+  value : UInt,
+) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_operator_builder_set"
+
+///|
+fn bridge_operator_builder_build(builder : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_operator_builder_build"
+
+///|
+fn bridge_operator_builder_release(builder : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_operator_builder_release"
+
+///|
+fn bridge_operator_info_scheme(operator : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_operator_info_scheme"
+
+///|
+fn bridge_operator_info_root(operator : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_operator_info_root"
+
+///|
+fn bridge_operator_info_name(operator : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_operator_info_name"
+
+///|
+fn bridge_operator_info_capability_word(operator : UInt, word : UInt) -> UInt64 = "opendal_mbt_bridge" "opendal_mbt_wasm_operator_info_capability_word"
 
 ///|
 fn bridge_operator_write(operator : UInt, path : UInt, data : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_operator_write"

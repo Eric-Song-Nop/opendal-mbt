@@ -9,14 +9,15 @@ use std::future::Future;
 use std::pin::{Pin, pin};
 use std::task::{Context, Poll, Waker};
 
-use opendal::{ErrorKind, Metadata, Operator, services::Memory};
+use opendal::{ErrorKind, Metadata, Operator, OperatorRegistry, services::Memory};
 
-const ABI_VERSION: u32 = 0x0001_0000;
+const ABI_VERSION: u32 = 0x0001_0001;
 const FEATURE_MEMORY_SERVICE: u32 = 1 << 0;
 const FEATURE_POLL_ONCE_CANARY: u32 = 1 << 1;
 const FEATURE_GENERATION_HANDLES: u32 = 1 << 2;
 const FEATURE_BINARY_BUFFERS: u32 = 1 << 3;
 const FEATURE_TASK_ABI: u32 = 1 << 4;
+const FEATURE_GENERIC_OPERATOR: u32 = 1 << 5;
 const MAX_SLOTS: usize = u16::MAX as usize;
 const MAX_GENERATION: u16 = i16::MAX as u16;
 const MAX_BUFFER_LENGTH: usize = i32::MAX as usize;
@@ -32,6 +33,23 @@ const TASK_CONSUMED: u32 = 4;
 const COMPLETION_WRITE: u32 = 1;
 const COMPLETION_READ: u32 = 2;
 const COMPLETION_STAT: u32 = 3;
+
+const CAP_STAT: u64 = 1 << 0;
+const CAP_READ: u64 = 1 << 1;
+const CAP_WRITE: u64 = 1 << 2;
+const CAP_CREATE_DIR: u64 = 1 << 3;
+const CAP_DELETE: u64 = 1 << 4;
+const CAP_LIST: u64 = 1 << 5;
+const CAP_COPY: u64 = 1 << 6;
+const CAP_RENAME: u64 = 1 << 7;
+const CAP_READ_SUFFIX: u64 = 1 << 8;
+const CAP_WRITE_APPEND: u64 = 1 << 9;
+const CAP_LIST_LIMIT: u64 = 1 << 10;
+const CAP_LIST_START_AFTER: u64 = 1 << 11;
+const CAP_LIST_RECURSIVE: u64 = 1 << 12;
+const CAP_PRESIGN_STAT: u64 = 1 << 13;
+const CAP_PRESIGN_READ: u64 = 1 << 14;
+const CAP_PRESIGN_WRITE: u64 = 1 << 15;
 
 #[derive(Clone, Debug, thiserror::Error)]
 enum BridgeError {
@@ -107,6 +125,7 @@ impl From<opendal::Error> for BridgeError {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ResourceKind {
     Buffer,
+    OperatorBuilder,
     Operator,
     Metadata,
     Error,
@@ -118,6 +137,7 @@ impl ResourceKind {
     fn name(self) -> &'static str {
         match self {
             Self::Buffer => "buffer",
+            Self::OperatorBuilder => "operator builder",
             Self::Operator => "operator",
             Self::Metadata => "metadata",
             Self::Error => "error",
@@ -127,8 +147,15 @@ impl ResourceKind {
     }
 }
 
+#[derive(Clone)]
+struct OperatorBuilder {
+    scheme: String,
+    config: Vec<(String, String)>,
+}
+
 enum Resource {
     Buffer(Vec<u8>),
+    OperatorBuilder(OperatorBuilder),
     Operator(Operator),
     Metadata(Metadata),
     Error(BridgeError),
@@ -140,6 +167,7 @@ impl Resource {
     fn kind(&self) -> ResourceKind {
         match self {
             Self::Buffer(_) => ResourceKind::Buffer,
+            Self::OperatorBuilder(_) => ResourceKind::OperatorBuilder,
             Self::Operator(_) => ResourceKind::Operator,
             Self::Metadata(_) => ResourceKind::Metadata,
             Self::Error(_) => ResourceKind::Error,
@@ -264,6 +292,28 @@ impl Arena {
         match self.resource_mut(handle)? {
             Resource::Buffer(buffer) => Ok(buffer),
             resource => Err(wrong_resource_type(handle, ResourceKind::Buffer, resource)),
+        }
+    }
+
+    fn operator_builder(&self, handle: u32) -> Result<&OperatorBuilder, BridgeError> {
+        match self.resource(handle)? {
+            Resource::OperatorBuilder(builder) => Ok(builder),
+            resource => Err(wrong_resource_type(
+                handle,
+                ResourceKind::OperatorBuilder,
+                resource,
+            )),
+        }
+    }
+
+    fn operator_builder_mut(&mut self, handle: u32) -> Result<&mut OperatorBuilder, BridgeError> {
+        match self.resource_mut(handle)? {
+            Resource::OperatorBuilder(builder) => Ok(builder),
+            resource => Err(wrong_resource_type(
+                handle,
+                ResourceKind::OperatorBuilder,
+                resource,
+            )),
         }
     }
 
@@ -526,6 +576,58 @@ fn path_and_operator(
     })
 }
 
+fn owned_utf8_buffer(handle: u32) -> Result<String, BridgeError> {
+    STATE.with(|state| {
+        let state = state.borrow();
+        std::str::from_utf8(state.arena.buffer(handle)?)
+            .map(str::to_owned)
+            .map_err(|_| BridgeError::InvalidUtf8)
+    })
+}
+
+fn insert_buffer(buffer: impl Into<Vec<u8>>) -> Result<u32, BridgeError> {
+    insert_resource(Resource::Buffer(buffer.into()))
+}
+
+fn build_operator(builder: &OperatorBuilder) -> Result<Operator, BridgeError> {
+    opendal::init_default_registry();
+    Operator::via_iter(&builder.scheme, builder.config.clone()).map_err(BridgeError::from)
+}
+
+fn capability_word(operator: &Operator, word: u32) -> Result<u64, BridgeError> {
+    let capability = operator.info().capability();
+    match word {
+        0 => {
+            let mut value = 0;
+            value |= u64::from(capability.stat) * CAP_STAT;
+            value |= u64::from(capability.read) * CAP_READ;
+            value |= u64::from(capability.write) * CAP_WRITE;
+            value |= u64::from(capability.create_dir) * CAP_CREATE_DIR;
+            value |= u64::from(capability.delete) * CAP_DELETE;
+            value |= u64::from(capability.list) * CAP_LIST;
+            value |= u64::from(capability.copy) * CAP_COPY;
+            value |= u64::from(capability.rename) * CAP_RENAME;
+            value |= u64::from(capability.read_with_suffix) * CAP_READ_SUFFIX;
+            value |= u64::from(capability.write_can_append) * CAP_WRITE_APPEND;
+            value |= u64::from(capability.list_with_limit) * CAP_LIST_LIMIT;
+            value |= u64::from(capability.list_with_start_after) * CAP_LIST_START_AFTER;
+            value |= u64::from(capability.list_with_recursive) * CAP_LIST_RECURSIVE;
+            value |= u64::from(capability.presign_stat) * CAP_PRESIGN_STAT;
+            value |= u64::from(capability.presign_read) * CAP_PRESIGN_READ;
+            value |= u64::from(capability.presign_write) * CAP_PRESIGN_WRITE;
+            Ok(value)
+        }
+        1 => capability.delete_max_size.map_or(Ok(0), |value| {
+            u64::try_from(value).map_err(|_| BridgeError::LengthOverflow)
+        }),
+        2 | 3 => Ok(0),
+        _ => Err(BridgeError::IndexOutOfBounds {
+            index: word,
+            length: 4,
+        }),
+    }
+}
+
 fn insert_resource(resource: Resource) -> Result<u32, BridgeError> {
     STATE.with(|state| {
         let mut state = state.borrow_mut();
@@ -559,6 +661,7 @@ pub extern "C" fn opendal_mbt_wasm_feature_flags() -> u32 {
         | FEATURE_GENERATION_HANDLES
         | FEATURE_BINARY_BUFFERS
         | FEATURE_TASK_ABI
+        | FEATURE_GENERIC_OPERATOR
 }
 
 /// Returns how many forced-delay tasks reached an actual pending poll.
@@ -693,6 +796,117 @@ pub extern "C" fn opendal_mbt_wasm_operator_new_memory() -> u32 {
         .and_then(|operator| insert_resource(Resource::Operator(operator)));
     match result {
         Ok(handle) => handle,
+        Err(error) => {
+            record_error(error);
+            0
+        }
+    }
+}
+
+/// Returns the registered service schemes as a sorted newline-delimited buffer.
+#[unsafe(no_mangle)]
+pub extern "C" fn opendal_mbt_wasm_registered_schemes() -> u32 {
+    opendal::init_default_registry();
+    let mut schemes: Vec<_> = OperatorRegistry::get().schemes().into_iter().collect();
+    schemes.sort_unstable();
+    handle_or_record_error(insert_buffer(schemes.join("\n").into_bytes()))
+}
+
+/// Creates a generic operator builder from a UTF-8 service scheme.
+#[unsafe(no_mangle)]
+pub extern "C" fn opendal_mbt_wasm_operator_builder_new(scheme_handle: u32) -> u32 {
+    let result = owned_utf8_buffer(scheme_handle).and_then(|scheme| {
+        if scheme.is_empty() {
+            return Err(BridgeError::OpenDal {
+                message: "service scheme cannot be empty".to_owned(),
+            });
+        }
+        insert_resource(Resource::OperatorBuilder(OperatorBuilder {
+            scheme,
+            config: Vec::new(),
+        }))
+    });
+    handle_or_record_error(result)
+}
+
+/// Copies one UTF-8 configuration key/value into a generic operator builder.
+#[unsafe(no_mangle)]
+pub extern "C" fn opendal_mbt_wasm_operator_builder_set(
+    builder_handle: u32,
+    key_handle: u32,
+    value_handle: u32,
+) -> u32 {
+    let result = owned_utf8_buffer(key_handle).and_then(|key| {
+        let value = owned_utf8_buffer(value_handle)?;
+        STATE.with(|state| {
+            state
+                .borrow_mut()
+                .arena
+                .operator_builder_mut(builder_handle)?
+                .config
+                .push((key, value));
+            Ok(())
+        })
+    });
+    status(result)
+}
+
+/// Builds an operator through OpenDAL's compiled service registry.
+#[unsafe(no_mangle)]
+pub extern "C" fn opendal_mbt_wasm_operator_builder_build(builder_handle: u32) -> u32 {
+    let result = STATE.with(|state| {
+        Ok(state
+            .borrow()
+            .arena
+            .operator_builder(builder_handle)?
+            .clone())
+    });
+    handle_or_record_error(result.and_then(|builder| {
+        build_operator(&builder).and_then(|operator| insert_resource(Resource::Operator(operator)))
+    }))
+}
+
+/// Releases a generic operator builder.
+#[unsafe(no_mangle)]
+pub extern "C" fn opendal_mbt_wasm_operator_builder_release(handle: u32) -> u32 {
+    release_resource(handle, ResourceKind::OperatorBuilder)
+}
+
+fn operator_info_buffer(handle: u32, select: impl FnOnce(opendal::OperatorInfo) -> String) -> u32 {
+    let result = STATE.with(|state| {
+        let state = state.borrow();
+        Ok(select(state.arena.operator(handle)?.info()).into_bytes())
+    });
+    handle_or_record_error(result.and_then(insert_buffer))
+}
+
+/// Copies an operator's registered service scheme into an owned buffer.
+#[unsafe(no_mangle)]
+pub extern "C" fn opendal_mbt_wasm_operator_info_scheme(handle: u32) -> u32 {
+    operator_info_buffer(handle, |info| info.scheme().to_owned())
+}
+
+/// Copies an operator's normalized root into an owned buffer.
+#[unsafe(no_mangle)]
+pub extern "C" fn opendal_mbt_wasm_operator_info_root(handle: u32) -> u32 {
+    operator_info_buffer(handle, |info| info.root())
+}
+
+/// Copies an operator's namespace name into an owned buffer.
+#[unsafe(no_mangle)]
+pub extern "C" fn opendal_mbt_wasm_operator_info_name(handle: u32) -> u32 {
+    operator_info_buffer(handle, |info| info.name())
+}
+
+/// Returns one word of the portable capability snapshot.
+#[unsafe(no_mangle)]
+pub extern "C" fn opendal_mbt_wasm_operator_info_capability_word(handle: u32, word: u32) -> u64 {
+    let result = STATE.with(|state| {
+        let state = state.borrow();
+        capability_word(state.arena.operator(handle)?, word)
+    });
+    match result {
+        Ok(value) => value,
         Err(error) => {
             record_error(error);
             0
@@ -1215,6 +1429,85 @@ mod tests {
 
     fn insert_test_resource(resource: Resource) -> u32 {
         STATE.with(|state| state.borrow_mut().arena.insert(resource).unwrap())
+    }
+
+    fn insert_test_buffer(value: &[u8]) -> u32 {
+        insert_test_resource(Resource::Buffer(value.to_vec()))
+    }
+
+    fn take_test_buffer(handle: u32) -> Vec<u8> {
+        let value = STATE.with(|state| state.borrow().arena.buffer(handle).unwrap().to_vec());
+        assert_eq!(opendal_mbt_wasm_buffer_release(handle), STATUS_OK);
+        value
+    }
+
+    #[test]
+    fn generic_builder_constructs_registered_memory_service() {
+        reset_state();
+        let schemes = opendal_mbt_wasm_registered_schemes();
+        assert_ne!(schemes, 0);
+        assert_eq!(take_test_buffer(schemes), b"memory");
+
+        let scheme = insert_test_buffer(b"memory");
+        let builder = opendal_mbt_wasm_operator_builder_new(scheme);
+        assert_ne!(builder, 0);
+        assert_eq!(opendal_mbt_wasm_buffer_release(scheme), STATUS_OK);
+
+        let key = insert_test_buffer(b"root");
+        let value = insert_test_buffer(b"generic-prefix");
+        assert_eq!(
+            opendal_mbt_wasm_operator_builder_set(builder, key, value),
+            STATUS_OK
+        );
+        assert_eq!(opendal_mbt_wasm_buffer_release(key), STATUS_OK);
+        assert_eq!(opendal_mbt_wasm_buffer_release(value), STATUS_OK);
+
+        let operator = opendal_mbt_wasm_operator_builder_build(builder);
+        assert_ne!(operator, 0);
+        assert_eq!(
+            opendal_mbt_wasm_operator_builder_release(builder),
+            STATUS_OK
+        );
+        assert_eq!(
+            take_test_buffer(opendal_mbt_wasm_operator_info_scheme(operator)),
+            b"memory"
+        );
+        assert_eq!(
+            take_test_buffer(opendal_mbt_wasm_operator_info_root(operator)),
+            b"/generic-prefix/"
+        );
+        let capabilities = opendal_mbt_wasm_operator_info_capability_word(operator, 0);
+        assert_eq!(capabilities & (CAP_STAT | CAP_READ | CAP_WRITE), 7);
+        assert_eq!(opendal_mbt_wasm_operator_release(operator), STATUS_OK);
+        assert_eq!(opendal_mbt_wasm_live_handle_count(), 0);
+        reset_state();
+    }
+
+    #[test]
+    fn generic_builder_reports_an_unregistered_scheme_without_leaking() {
+        reset_state();
+        let scheme = insert_test_buffer(b"not-compiled-in");
+        let builder = opendal_mbt_wasm_operator_builder_new(scheme);
+        assert_ne!(builder, 0);
+        assert_eq!(opendal_mbt_wasm_buffer_release(scheme), STATUS_OK);
+
+        assert_eq!(opendal_mbt_wasm_operator_builder_build(builder), 0);
+        assert_eq!(opendal_mbt_wasm_last_error_code(), 8);
+        let error = opendal_mbt_wasm_last_error_take();
+        assert_ne!(error, 0);
+        let message = opendal_mbt_wasm_error_message(error);
+        assert!(
+            String::from_utf8(take_test_buffer(message))
+                .unwrap()
+                .contains("scheme is not registered")
+        );
+        assert_eq!(opendal_mbt_wasm_error_release(error), STATUS_OK);
+        assert_eq!(
+            opendal_mbt_wasm_operator_builder_release(builder),
+            STATUS_OK
+        );
+        assert_eq!(opendal_mbt_wasm_live_handle_count(), 0);
+        reset_state();
     }
 
     #[test]

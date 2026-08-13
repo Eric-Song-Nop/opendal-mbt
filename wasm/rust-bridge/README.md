@@ -3,8 +3,8 @@
 This crate is the Rust half of the OpenDAL/MoonBit WebAssembly proof. It builds
 as a core Wasm module and exposes a scalar-only resource/task ABI that a
 MoonBit Wasm module imports through the repository loader. Values cross the
-Rust boundary as `u32`/`i32` scalars and generation-checked handles; Rust
-pointers and language-owned objects never cross it.
+Rust boundary as fixed-width integer scalars and generation-checked handles;
+Rust pointers and language-owned objects never cross it.
 
 The bridge uses OpenDAL's always-available `memory` service and currently has
 two execution paths:
@@ -16,8 +16,10 @@ two execution paths:
   zero-delay timer so its first poll is observably `Pending` before it can
   become ready.
 
-The task path is exercised in real Chrome/Chromium, but this memory-only crate
-is still a canary rather than a released OPFS/S3 browser executor.
+The task path is exercised in real Chrome/Chromium. This artifact currently
+compiles only the deterministic memory fixture, but construction is routed
+through OpenDAL's generic service registry so other browser-compatible
+profiles do not require backend-specific facade APIs.
 
 ## Build
 
@@ -42,10 +44,10 @@ minimal dependency and feature set does not change native build profiles.
 
 ## ABI conventions
 
-- ABI version is `0x0001_0000` (major 1, minor 0).
-- Feature flags currently equal `0x0000_001f`: bit 0 memory service, bit 1
+- ABI version is `0x0001_0001` (major 1, minor 1).
+- Feature flags currently equal `0x0000_003f`: bit 0 memory service, bit 1
   poll-once canary, bit 2 generation handles, bit 3 binary buffers, and bit 4
-  task ABI.
+  task ABI, and bit 5 generic operator construction and service inspection.
 - Handles are positive signed 32-bit values as well as valid `u32` values; the
   generation field is 15 bits so MoonBit can carry them in an `Int` unchanged.
   A slot is permanently retired when that generation space is exhausted, so a

@@ -1,8 +1,8 @@
 ///|
-const EXPECTED_ABI_VERSION = 0x0001_0000U
+const EXPECTED_ABI_VERSION = 0x0001_0001U
 
 ///|
-const REQUIRED_FEATURE_FLAGS = 0x0000_001fU
+const REQUIRED_FEATURE_FLAGS = 0x0000_003fU
 
 ///|
 fn take_bridge_error(

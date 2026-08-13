@@ -45,8 +45,8 @@ MoonBit canary
 
 Rust and MoonBit keep separate memories. Paths, payloads, messages, metadata,
 errors, tasks, and completions are owned through positive, generation-checked
-integer handles. The Rust bridge ABI uses only Wasm `i32`; no pointer or
-language object enters Rust. The separate scheduler import carries a task
+integer handles. The Rust bridge ABI uses only fixed-width Wasm scalars; no
+pointer or language object enters Rust. The separate scheduler import carries a task
 handle and a MoonBit closure through MoonBit's Wasm closure FFI.
 [`loader/index.mjs`](loader/index.mjs) instantiates Rust first, supplies the
 bridge exports and callback host imports to MoonBit, and owns teardown.
@@ -124,8 +124,10 @@ the following shape:
 
 The experimental `Eric-Song-Nop/opendal/wasm` package currently exposes:
 
-- `Operator::memory`, synchronous `write`, `read`, and `stat`, and idempotent
-  `close`;
+- backend-neutral `Operator::new(scheme, config)`, `available_schemes`,
+  `OperatorInfo`, and `Capability`; `Operator::memory` remains a thin test
+  convenience;
+- synchronous `write`, `read`, and `stat`, and idempotent `close`;
 - `write_callback`, `read_callback`, and `stat_callback`, each returning an
   `Operation` with `Pending`, `Completed`, `Cancelled`, and `Closed` states;
 - idempotent `Operation::cancel` and `Operation::close`;
@@ -134,9 +136,10 @@ The experimental `Eric-Song-Nop/opendal/wasm` package currently exposes:
 - bridge version/features plus canary-only live-handle and forced-pending
   diagnostics.
 
-The bridge ABI remains version `0x0001_0000`. Its current feature bitmap is
-`0x0000_001f`: memory service, poll-once synchronous canary, generation
-handles, binary buffers, and task ABI.
+The bridge ABI is version `0x0001_0001`. Its current feature bitmap is
+`0x0000_003f`: memory service, poll-once synchronous canary, generation
+handles, binary buffers, task ABI, and generic operator construction through
+the compiled OpenDAL service registry.
 
 The native `Eric-Song-Nop/opendal` package and its C/static-library ABI are not
 changed or reused by this backend.
@@ -178,8 +181,10 @@ must not be used for OPFS, S3, or other genuinely asynchronous services.
   checkout;
 - decide whether core-module loading remains the product boundary or is
   replaced by a WIT component;
-- add OPFS, then browser-safe S3, only after the common lifecycle, transfer,
-  packaging, and service-specific cancellation contracts are proven.
+- exercise additional browser-compatible service profiles through the same
+  generic constructor after the common lifecycle, transfer, packaging, and
+  service-specific cancellation contracts are proven; OPFS is only one
+  optional persistence fixture.
 
 The existing native artifact manifest is intentionally not used for these Wasm
 outputs. Wasm distribution will receive its own compatibility and provenance
