@@ -22,8 +22,9 @@ There are two deliberately different runners:
   bounded list, idempotent recursive delete, and `NotFound`; forces all eight
   Rust futures to return `Pending` on their first poll; proves
   that a previously queued browser heartbeat runs before completion; suppresses
-  a cancel-before-ready callback; and verifies handle cleanup and instance
-  teardown.
+  a cancel-before-ready callback; verifies completion-wins cancellation,
+  terminal close, two concurrent operators, and disposal with work in flight;
+  and checks handle cleanup after late completion.
 
 Only the browser canary is evidence for `Pending -> Ready` and event-loop
 responsiveness. A passing Node canary is not asynchronous-browser evidence.
@@ -178,10 +179,6 @@ must not be used for OPFS, S3, or other genuinely asynchronous services.
 
 - obtain a documented, portable ordinary-browser MoonBit async continuation
   contract, or keep the callback surface explicitly preview-only;
-- complete the task race/concurrency matrix beyond the current success,
-  `NotFound`, cancel-before-ready, operator-close, and teardown cases;
-- verify 16 MiB binary values and `memory.grow` handling through the bounded
-  bulk-copy path;
 - record exact imports/exports, artifact sizes, and startup evidence;
 - pin, checksum, and distribute the Rust Wasm companion artifact;
 - make a clean registry consumer acquire the companion module without a Rust

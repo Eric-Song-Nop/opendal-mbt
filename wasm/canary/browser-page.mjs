@@ -198,17 +198,137 @@ try {
   );
   runtime.bridge.exports.opendal_mbt_wasm_last_error_clear();
 
+  const readyPendingBefore =
+    exports.opendal_mbt_wasm_canary_pending_poll_count();
+  const readyLiveBefore =
+    runtime.bridge.exports.opendal_mbt_wasm_live_handle_count();
+  assert(
+    exports.opendal_mbt_wasm_canary_ready_start() === 1,
+    "completion-wins canary did not start pending",
+  );
+  assert(
+    exports.opendal_mbt_wasm_canary_ready_status() === 1,
+    "completion-wins canary completed synchronously",
+  );
+  await Promise.resolve();
+  assert(
+    exports.opendal_mbt_wasm_canary_pending_poll_count() ===
+      readyPendingBefore + 1,
+    "completion-wins task did not observe Pending",
+  );
+  assert(
+    exports.opendal_mbt_wasm_canary_ready_status() === 1,
+    "completion-wins task became ready in the first microtask",
+  );
+  await waitFor(
+    () => exports.opendal_mbt_wasm_canary_ready_status(),
+    2,
+    "completion-wins task",
+  );
+  assert(
+    exports.opendal_mbt_wasm_canary_ready_cancel() === 2,
+    "cancel rolled a completed operation back",
+  );
+  assert(
+    exports.opendal_mbt_wasm_canary_ready_close() === 4,
+    "close did not make a completed operation Closed",
+  );
+  assert(
+    exports.opendal_mbt_wasm_canary_ready_cancel() === 4 &&
+      exports.opendal_mbt_wasm_canary_ready_close() === 4,
+    "repeated cancel/close changed a Closed operation",
+  );
+  await nextTurn();
+  assert(
+    exports.opendal_mbt_wasm_canary_ready_status() === 4,
+    "a late callback changed a Closed operation",
+  );
+  assert(
+    runtime.bridge.exports.opendal_mbt_wasm_live_handle_count() ===
+      readyLiveBefore,
+    "completion-wins lifecycle left live handles",
+  );
+
+  const multiPendingBefore =
+    exports.opendal_mbt_wasm_canary_pending_poll_count();
+  const multiLiveBefore =
+    runtime.bridge.exports.opendal_mbt_wasm_live_handle_count();
+  assert(
+    exports.opendal_mbt_wasm_canary_multi_start() === 1,
+    "multi-operator canary did not start pending",
+  );
+  assert(
+    exports.opendal_mbt_wasm_canary_multi_stage() === 1,
+    "multi-operator canary completed synchronously",
+  );
+  await Promise.resolve();
+  assert(
+    exports.opendal_mbt_wasm_canary_pending_poll_count() ===
+      multiPendingBefore + 2,
+    "two concurrent operators did not both observe Pending",
+  );
+  await waitFor(
+    () => exports.opendal_mbt_wasm_canary_multi_stage(),
+    2,
+    "two concurrent operator reads",
+  );
+  await nextTurn();
+  assert(
+    exports.opendal_mbt_wasm_canary_multi_stage() === 2,
+    "multi-operator callback was delivered more than once",
+  );
+  assert(
+    exports.opendal_mbt_wasm_canary_pending_poll_count() ===
+      multiPendingBefore + 2,
+    "multi-operator tasks were polled as new work more than once",
+  );
+  assert(
+    runtime.bridge.exports.opendal_mbt_wasm_live_handle_count() ===
+      multiLiveBefore,
+    "multi-operator lifecycle left live handles",
+  );
+
+  const disposePendingBefore =
+    exports.opendal_mbt_wasm_canary_pending_poll_count();
+  assert(
+    exports.opendal_mbt_wasm_canary_dispose_start() === 1,
+    "pending-dispose canary did not start",
+  );
+  await Promise.resolve();
+  assert(
+    exports.opendal_mbt_wasm_canary_pending_poll_count() ===
+      disposePendingBefore + 1,
+    "pending-dispose task did not observe Pending",
+  );
+  assert(
+    exports.opendal_mbt_wasm_canary_dispose_callback_count() === 0,
+    "pending-dispose callback ran before teardown",
+  );
   runtime.dispose();
   assert(
     runtime.bridge.exports.opendal_mbt_wasm_live_handle_count() === 0,
     "bridge teardown left live resource handles",
   );
+  await nextTurn();
+  await nextTurn();
+  await nextTurn();
+  assert(
+    exports.opendal_mbt_wasm_canary_dispose_callback_count() === 0,
+    "late completion delivered after runtime disposal",
+  );
+  assert(
+    runtime.bridge.exports.opendal_mbt_wasm_live_handle_count() === 0,
+    "late completion revived bridge resources after teardown",
+  );
   await report({
     ok: true,
-    pendingTasks: 8,
+    pendingTasks: 12,
     heartbeat: true,
     cancellation: "suppressed",
     diagnostics: "isolated",
+    completionWins: true,
+    concurrentOperators: 2,
+    pendingDispose: "inert",
     bulkTransferBytes,
     bulkTransferChunks,
   });

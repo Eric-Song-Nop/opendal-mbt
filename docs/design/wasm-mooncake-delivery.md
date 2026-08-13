@@ -192,14 +192,16 @@ The browser fixture forces create-dir, write, read, `stat`, bounded list, two
 idempotent recursive deletes, and a missing read to return `Pending` on their
 first Rust poll. It rejects synchronous completion, lets a previously queued
 browser heartbeat run before readiness, completes the MoonBit callback chain,
-suppresses a cancel-before-ready callback, and checks the live-handle baseline
-plus `runtime.dispose()`. Its success payload records `pendingTasks: 8`,
-`heartbeat: true`, `cancellation: "suppressed"`, and `diagnostics: "isolated"`.
+suppresses a cancel-before-ready callback, proves the observable
+completion-wins outcome, runs two independent operators concurrently, and
+disposes one task while it is pending. Its success payload records twelve
+explicitly checked Pending tasks, a responsive heartbeat, isolated scheduler
+diagnostics, and inert late completion after teardown.
 Only this Chrome/Chromium run is evidence for `Pending -> Ready` and a
 responsive browser event loop; the Node command is not.
 
-This proves more than the original poll-once canary, but it does not finish M1
-or the product design:
+This finishes the callback/task portion of M1, but not the stable continuation
+or product-distribution decisions:
 
 - ordinary-browser MoonBit `async fn` suspension is still constrained by the
   officially documented runtime; the currently usable public path is the
@@ -208,9 +210,12 @@ or the product design:
   results but does not abort the underlying OpenDAL future or browser I/O;
 - the synchronous methods remain for smoke coverage and still return code `9`
   if their single no-op-waker poll sees `Pending`;
-- the current browser fixture does not yet cover the full ready/cancel race,
-  double-take/release, multi-operator concurrency, or all teardown orderings;
-- bytes still cross the boundary one byte per Wasm call;
+- browser acceptance covers cancel-before-ready, completion-before-cancel,
+  terminal close, multi-operator concurrency, and teardown while pending;
+  Rust ownership tests cover ready cancellation, double take/release, and late
+  completion after cancellation or teardown;
+- public byte transfer is bounded to 64 MiB objects and 256 KiB windows; the
+  16 MiB canary proves exact non-zero-slice transfer across memory growth;
 - the Mooncake archive does not yet contain or automatically acquire the
   version-matched Rust bridge, and canonical import/export/size evidence is
   still outstanding.
@@ -487,8 +492,9 @@ The current slice implements these required semantics:
   generation checks and explicit release;
 - errors belong to the completion, not to one global sticky error slot.
 
-Streaming reader/writer handles, true host-operation abort, and the complete
-ready/cancel/concurrency race matrix remain later acceptance work.
+Streaming reader/writer handles and true host-operation abort remain later
+work. The callback task race/concurrency matrix is covered by Rust ownership
+tests plus real-browser acceptance.
 
 ### MoonBit continuation gate
 
@@ -906,9 +912,9 @@ browser suspension.
 
 Estimated size: large, roughly 5–8 engineering days.
 
-Status: partial. `make wasm-browser-canary` now supplies real Chrome/Chromium
-evidence for the initial task/callback slice, but the full exit matrix and the
-stable MoonBit continuation decision remain open.
+Status: callback/task slice complete. `make wasm-browser-canary` supplies real
+Chrome/Chromium evidence for its full lifecycle matrix. The stable MoonBit
+continuation decision remains open, so this surface stays experimental.
 
 Deliverables:
 
@@ -929,13 +935,13 @@ Implemented evidence:
   readiness;
 - cancel-before-ready callback suppression, scheduler diagnostic isolation,
   and live-handle restoration;
-- operator close while a cloned task is pending, plus idempotent instance
-  teardown.
+- completion-before-cancel, terminal close, and concurrent reads against two
+  independent operators;
+- operator close while a cloned task is pending, plus instance teardown while
+  another task is still pending and late-completion suppression.
 
 Still required for M1 exit:
 
-- ready-versus-cancel, double-take, double-release, late-completion teardown,
-  and multi-operator concurrency cases with deterministic outcomes;
 - a documented ordinary-browser MoonBit continuation, or an explicit decision
   that release remains callback-based and experimental.
 
@@ -1154,8 +1160,8 @@ Keep changes reviewable and preserve the native baseline:
 
 1. design and Mooncake delivery contract (PR #58);
 2. memory core-module canary (PR #59);
-3. task ABI and delayed-memory async engine (initial canary implemented;
-   race/concurrency hardening remains);
+3. task ABI and delayed-memory async engine (callback race/concurrency matrix
+   implemented);
 4. browser callback adapter (experimental `Operation` and Chrome proof
    implemented; stable continuation decision remains);
 5. bulk-transfer ABI;
@@ -1169,27 +1175,24 @@ Keep changes reviewable and preserve the native baseline:
 The forced-pending memory operation now completes through the public MoonBit
 callback path in Chrome. Task-ABI hardening, the generic constructor, the
 bundler skeleton, and upstream proposals can proceed in parallel. Additional
-service fixtures still wait for the remaining M1 race matrix, M2 transfer path,
-and M3 distribution gates; the Chrome memory result alone does not authorize
+service fixtures still wait for the M3 distribution gates and explicit
+service-profile evidence; the Chrome memory result alone does not authorize
 claims about other services.
 
 ## Immediate next actions
 
 1. Review and freeze the implemented draft task ABI v1, status values, and
    error/completion ownership table.
-2. Add ready/cancel races, double-take/release, late teardown, and concurrent
-   multi-operator browser cases.
-3. Continue the documented Moon continuation spike; keep the current callback
+2. Continue the documented Moon continuation spike; keep the current callback
    `Operation` API explicitly experimental meanwhile.
-4. Replace per-byte transfer with a bounded bulk-copy experiment.
-5. Define `wasm/artifacts-browser.json` and its exact compiled-scheme profile.
-6. Scaffold the exact-version `cmd/wasm-bundle` package.
-7. Create the clean consumer acceptance fixture with Cargo/rustup/npm removed.
-8. Draft the two Moon upstream proposals: target-aware prebuild and
+3. Define `wasm/artifacts-browser.json` and its exact compiled-scheme profile.
+4. Scaffold the exact-version `cmd/wasm-bundle` package.
+5. Create the clean consumer acceptance fixture with Cargo/rustup/npm removed.
+6. Draft the two Moon upstream proposals: target-aware prebuild and
    declarative runtime assets.
-9. Record canonical bridge imports, exports, compressed size, and startup
+7. Record canonical bridge imports, exports, compressed size, and startup
    measurements.
-10. Add non-memory service fixtures through the same generic constructor only
+8. Add non-memory service fixtures through the same generic constructor only
     after the common gates pass.
 
 This ordering makes "Mooncake-installed OpenDAL for browser Wasm" the

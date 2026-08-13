@@ -62,6 +62,24 @@ const ASYNC_OK = 9
 const ASYNC_ERROR = -1
 
 ///|
+const RACE_IDLE = 0
+
+///|
+const RACE_PENDING = 1
+
+///|
+const RACE_COMPLETED = 2
+
+///|
+const RACE_CANCELLED = 3
+
+///|
+const RACE_CLOSED = 4
+
+///|
+const RACE_ERROR = -1
+
+///|
 let async_stage : Ref[Int] = Ref(ASYNC_IDLE)
 
 ///|
@@ -84,6 +102,54 @@ let cancel_operator : Ref[@opendal.Operator?] = Ref(None)
 
 ///|
 let cancel_operation : Ref[@opendal.Operation?] = Ref(None)
+
+///|
+let ready_baseline : Ref[UInt] = Ref(0U)
+
+///|
+let ready_callback_count : Ref[Int] = Ref(0)
+
+///|
+let ready_callback_ok : Ref[Bool] = Ref(false)
+
+///|
+let ready_operator : Ref[@opendal.Operator?] = Ref(None)
+
+///|
+let ready_operation : Ref[@opendal.Operation?] = Ref(None)
+
+///|
+let multi_baseline : Ref[UInt] = Ref(0U)
+
+///|
+let multi_stage : Ref[Int] = Ref(RACE_IDLE)
+
+///|
+let multi_mask : Ref[Int] = Ref(0)
+
+///|
+let multi_callback_count : Ref[Int] = Ref(0)
+
+///|
+let multi_operator_one : Ref[@opendal.Operator?] = Ref(None)
+
+///|
+let multi_operator_two : Ref[@opendal.Operator?] = Ref(None)
+
+///|
+let multi_operation_one : Ref[@opendal.Operation?] = Ref(None)
+
+///|
+let multi_operation_two : Ref[@opendal.Operation?] = Ref(None)
+
+///|
+let dispose_callback_count : Ref[Int] = Ref(0)
+
+///|
+let dispose_operator : Ref[@opendal.Operator?] = Ref(None)
+
+///|
+let dispose_operation : Ref[@opendal.Operation?] = Ref(None)
 
 ///|
 fn fail_async_lifecycle() -> Unit {
@@ -345,6 +411,253 @@ pub fn canary_cancel_is_clean() -> Int {
   } else {
     0
   }
+}
+
+///|
+fn operation_state_code(operation : @opendal.Operation) -> Int {
+  match operation.state() {
+    @opendal.Pending => RACE_PENDING
+    @opendal.Completed => RACE_COMPLETED
+    @opendal.Cancelled => RACE_CANCELLED
+    @opendal.Closed => RACE_CLOSED
+  }
+}
+
+///|
+fn ready_status_value() -> Int {
+  if ready_callback_count.val > 1 ||
+    (ready_callback_count.val == 1 && !ready_callback_ok.val) {
+    return RACE_ERROR
+  }
+  match ready_operation.val {
+    None => RACE_IDLE
+    Some(operation) => {
+      let state = operation_state_code(operation)
+      if (state == RACE_COMPLETED || state == RACE_CLOSED) &&
+        ready_callback_count.val != 1 {
+        RACE_ERROR
+      } else {
+        state
+      }
+    }
+  }
+}
+
+///|
+/// Start a task that will complete with a stable `NotFound` result.
+#export_name("opendal_mbt_wasm_canary_ready_start")
+pub fn canary_ready_start() -> Int {
+  if ready_status_value() == RACE_PENDING {
+    return RACE_ERROR
+  }
+  ready_baseline.val = @opendal.live_handle_count()
+  ready_callback_count.val = 0
+  ready_callback_ok.val = false
+  let operator = @opendal.Operator::new("memory") catch {
+    _ => return RACE_ERROR
+  }
+  ready_operator.val = Some(operator)
+  let operation = operator.read_callback("canary/ready-missing.bin", result => {
+    ready_callback_count.val = ready_callback_count.val + 1
+    ready_callback_ok.val = match result {
+      Err(error) => error.is_not_found()
+      Ok(_) => false
+    }
+  }) catch {
+    _ => {
+      operator.close()
+      ready_operator.val = None
+      return RACE_ERROR
+    }
+  }
+  ready_operation.val = Some(operation)
+  RACE_PENDING
+}
+
+///|
+/// Return the completion-wins operation state and validate callback count.
+#export_name("opendal_mbt_wasm_canary_ready_status")
+pub fn canary_ready_status() -> Int {
+  ready_status_value()
+}
+
+///|
+/// Cancel after completion; this must not roll the state back from Completed.
+#export_name("opendal_mbt_wasm_canary_ready_cancel")
+pub fn canary_ready_cancel() -> Int {
+  if ready_operation.val is Some(operation) {
+    operation.cancel()
+  }
+  ready_status_value()
+}
+
+///|
+/// Close a completed operation and release its retained operator.
+#export_name("opendal_mbt_wasm_canary_ready_close")
+pub fn canary_ready_close() -> Int {
+  if ready_operation.val is Some(operation) {
+    operation.close()
+  }
+  if ready_operator.val is Some(operator) {
+    operator.close()
+  }
+  ready_operator.val = None
+  let state = ready_status_value()
+  if state == RACE_CLOSED && @opendal.live_handle_count() == ready_baseline.val {
+    state
+  } else {
+    RACE_ERROR
+  }
+}
+
+///|
+fn close_multi_resources() -> Unit {
+  if multi_operation_one.val is Some(operation) {
+    operation.close()
+  }
+  if multi_operation_two.val is Some(operation) {
+    operation.close()
+  }
+  if multi_operator_one.val is Some(operator) {
+    operator.close()
+  }
+  if multi_operator_two.val is Some(operator) {
+    operator.close()
+  }
+  multi_operation_one.val = None
+  multi_operation_two.val = None
+  multi_operator_one.val = None
+  multi_operator_two.val = None
+}
+
+///|
+fn fail_multi() -> Unit {
+  close_multi_resources()
+  multi_stage.val = RACE_ERROR
+}
+
+///|
+fn finish_multi(
+  bit : Int,
+  expected : Bytes,
+  result : Result[Bytes, @opendal.WasmError],
+) -> Unit {
+  multi_callback_count.val = multi_callback_count.val + 1
+  if multi_callback_count.val > 2 {
+    fail_multi()
+    return
+  }
+  match result {
+    Ok(actual) if actual == expected => {
+      multi_mask.val = multi_mask.val | bit
+      if multi_mask.val == 3 {
+        close_multi_resources()
+        if multi_callback_count.val == 2 &&
+          @opendal.live_handle_count() == multi_baseline.val {
+          multi_stage.val = RACE_COMPLETED
+        } else {
+          multi_stage.val = RACE_ERROR
+        }
+      }
+    }
+    _ => fail_multi()
+  }
+}
+
+///|
+/// Start reads against two independent operators at the same time.
+#export_name("opendal_mbt_wasm_canary_multi_start")
+pub fn canary_multi_start() -> Int {
+  if multi_stage.val == RACE_PENDING {
+    return RACE_ERROR
+  }
+  multi_baseline.val = @opendal.live_handle_count()
+  multi_stage.val = RACE_PENDING
+  multi_mask.val = 0
+  multi_callback_count.val = 0
+  let operator_one = @opendal.Operator::new("memory") catch {
+    _ => {
+      multi_stage.val = RACE_ERROR
+      return RACE_ERROR
+    }
+  }
+  multi_operator_one.val = Some(operator_one)
+  let operator_two = @opendal.Operator::new("memory") catch {
+    _ => {
+      fail_multi()
+      return RACE_ERROR
+    }
+  }
+  multi_operator_two.val = Some(operator_two)
+  let payload_one = b"operator-one\x00\xff"
+  let payload_two = b"operator-two\x80\x01"
+  operator_one.write("canary/shared.bin", payload_one) catch {
+    _ => {
+      fail_multi()
+      return RACE_ERROR
+    }
+  }
+  operator_two.write("canary/shared.bin", payload_two) catch {
+    _ => {
+      fail_multi()
+      return RACE_ERROR
+    }
+  }
+  let operation_one = operator_one.read_callback("canary/shared.bin", result => {
+    finish_multi(1, payload_one, result)
+  }) catch {
+    _ => {
+      fail_multi()
+      return RACE_ERROR
+    }
+  }
+  multi_operation_one.val = Some(operation_one)
+  let operation_two = operator_two.read_callback("canary/shared.bin", result => {
+    finish_multi(2, payload_two, result)
+  }) catch {
+    _ => {
+      fail_multi()
+      return RACE_ERROR
+    }
+  }
+  multi_operation_two.val = Some(operation_two)
+  RACE_PENDING
+}
+
+///|
+/// Return the multi-operator lifecycle stage.
+#export_name("opendal_mbt_wasm_canary_multi_stage")
+pub fn canary_multi_stage() -> Int {
+  multi_stage.val
+}
+
+///|
+/// Start one pending operation that will be destroyed with the runtime.
+#export_name("opendal_mbt_wasm_canary_dispose_start")
+pub fn canary_dispose_start() -> Int {
+  dispose_callback_count.val = 0
+  let operator = @opendal.Operator::new("memory") catch {
+    _ => return RACE_ERROR
+  }
+  dispose_operator.val = Some(operator)
+  let operation = operator.read_callback("canary/dispose-missing.bin", _ => {
+    dispose_callback_count.val = dispose_callback_count.val + 1
+  }) catch {
+    _ => {
+      operator.close()
+      dispose_operator.val = None
+      return RACE_ERROR
+    }
+  }
+  dispose_operation.val = Some(operation)
+  RACE_PENDING
+}
+
+///|
+/// Return the callback count without touching the torn-down bridge.
+#export_name("opendal_mbt_wasm_canary_dispose_callback_count")
+pub fn canary_dispose_callback_count() -> Int {
+  dispose_callback_count.val
 }
 
 ///|

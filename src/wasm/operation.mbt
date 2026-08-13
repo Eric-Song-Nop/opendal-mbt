@@ -45,7 +45,7 @@ pub fn Operation::close(self : Operation) -> Unit {
   if self.state is Pending {
     self.cancel()
     self.state = Closed
-  } else if self.state is Cancelled {
+  } else if self.state is Cancelled || self.state is Completed {
     self.state = Closed
   }
 }
