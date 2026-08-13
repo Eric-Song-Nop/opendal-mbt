@@ -69,6 +69,8 @@ pub struct Operator {
   // private fields
 }
 pub fn Operator::close(Self) -> Unit
+pub fn Operator::create_dir_callback(Self, StringView, (Result[Unit, WasmError]) -> Unit) -> Operation raise WasmError
+pub fn Operator::delete_callback(Self, StringView, (Result[Unit, WasmError]) -> Unit, version? : StringView, recursive? : Bool) -> Operation raise WasmError
 pub fn Operator::info(Self) -> OperatorInfo raise WasmError
 pub fn Operator::memory() -> Self raise WasmError
 pub fn Operator::new(StringView, config? : Map[String, String]) -> Self raise WasmError

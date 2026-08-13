@@ -26,19 +26,28 @@ const CANARY_SERVICE_INFO_MISMATCH = 7
 const ASYNC_IDLE = 0
 
 ///|
-const ASYNC_WRITE_PENDING = 1
+const ASYNC_CREATE_DIR_PENDING = 1
 
 ///|
-const ASYNC_READ_PENDING = 2
+const ASYNC_WRITE_PENDING = 2
 
 ///|
-const ASYNC_STAT_PENDING = 3
+const ASYNC_READ_PENDING = 3
 
 ///|
-const ASYNC_MISSING_PENDING = 4
+const ASYNC_STAT_PENDING = 4
 
 ///|
-const ASYNC_OK = 5
+const ASYNC_DELETE_PENDING = 5
+
+///|
+const ASYNC_DELETE_AGAIN_PENDING = 6
+
+///|
+const ASYNC_MISSING_PENDING = 7
+
+///|
+const ASYNC_OK = 8
 
 ///|
 const ASYNC_ERROR = -1
@@ -83,7 +92,7 @@ fn fail_async_lifecycle() -> Unit {
 ///|
 fn start_async_missing(operator : @opendal.Operator) -> Unit {
   async_stage.val = ASYNC_MISSING_PENDING
-  let operation = operator.read_callback("canary/missing-async.bin", result => {
+  let operation = operator.read_callback("canary/async/data.bin", result => {
     match result {
       Err(error) if error.is_not_found() => {
         async_operation.val = None
@@ -107,13 +116,55 @@ fn start_async_missing(operator : @opendal.Operator) -> Unit {
 }
 
 ///|
+fn start_async_delete_again(operator : @opendal.Operator) -> Unit {
+  async_stage.val = ASYNC_DELETE_AGAIN_PENDING
+  let operation = operator.delete_callback(
+    "canary/async/",
+    result => {
+      match result {
+        Ok(_) => start_async_missing(operator)
+        Err(_) => fail_async_lifecycle()
+      }
+    },
+    recursive=true,
+  ) catch {
+    _ => {
+      fail_async_lifecycle()
+      return
+    }
+  }
+  async_operation.val = Some(operation)
+}
+
+///|
+fn start_async_delete(operator : @opendal.Operator) -> Unit {
+  async_stage.val = ASYNC_DELETE_PENDING
+  let operation = operator.delete_callback(
+    "canary/async/",
+    result => {
+      match result {
+        Ok(_) => start_async_delete_again(operator)
+        Err(_) => fail_async_lifecycle()
+      }
+    },
+    recursive=true,
+  ) catch {
+    _ => {
+      fail_async_lifecycle()
+      return
+    }
+  }
+  async_operation.val = Some(operation)
+}
+
+///|
 fn start_async_stat(operator : @opendal.Operator, payload : Bytes) -> Unit {
   async_stage.val = ASYNC_STAT_PENDING
-  let operation = operator.stat_callback("canary/async.bin", result => {
+  let operation = operator.stat_callback("canary/async/data.bin", result => {
     match result {
       Ok(metadata) if metadata.is_file &&
         metadata.content_length == payload.length().to_uint64() =>
-        start_async_missing(operator)
+        start_async_delete(operator)
       _ => fail_async_lifecycle()
     }
   }) catch {
@@ -128,10 +179,27 @@ fn start_async_stat(operator : @opendal.Operator, payload : Bytes) -> Unit {
 ///|
 fn start_async_read(operator : @opendal.Operator, payload : Bytes) -> Unit {
   async_stage.val = ASYNC_READ_PENDING
-  let operation = operator.read_callback("canary/async.bin", result => {
+  let operation = operator.read_callback("canary/async/data.bin", result => {
     match result {
       Ok(actual) if actual == payload => start_async_stat(operator, payload)
       _ => fail_async_lifecycle()
+    }
+  }) catch {
+    _ => {
+      fail_async_lifecycle()
+      return
+    }
+  }
+  async_operation.val = Some(operation)
+}
+
+///|
+fn start_async_write(operator : @opendal.Operator, payload : Bytes) -> Unit {
+  async_stage.val = ASYNC_WRITE_PENDING
+  let operation = operator.write_callback("canary/async/data.bin", payload, result => {
+    match result {
+      Ok(_) => start_async_read(operator, payload)
+      Err(_) => fail_async_lifecycle()
     }
   }) catch {
     _ => {
@@ -155,10 +223,10 @@ pub fn canary_async_start() -> Int {
   }
   async_operator.val = Some(operator)
   let payload = b"\x00\xffMoonBit-async\x80OpenDAL"
-  async_stage.val = ASYNC_WRITE_PENDING
-  let operation = operator.write_callback("canary/async.bin", payload, result => {
+  async_stage.val = ASYNC_CREATE_DIR_PENDING
+  let operation = operator.create_dir_callback("canary/async/", result => {
     match result {
-      Ok(_) => start_async_read(operator, payload)
+      Ok(_) => start_async_write(operator, payload)
       Err(_) => fail_async_lifecycle()
     }
   }) catch {
@@ -168,7 +236,7 @@ pub fn canary_async_start() -> Int {
     }
   }
   async_operation.val = Some(operation)
-  ASYNC_WRITE_PENDING
+  ASYNC_CREATE_DIR_PENDING
 }
 
 ///|

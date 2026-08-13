@@ -68,7 +68,7 @@ try {
 
   assert(
     exports.opendal_mbt_wasm_canary_async_start() === 1,
-    "async canary did not start in the write-pending stage",
+    "async canary did not start in the create-dir-pending stage",
   );
   assert(
     exports.opendal_mbt_wasm_canary_async_stage() === 1,
@@ -83,24 +83,24 @@ try {
   assert(!heartbeat, "browser heartbeat ran before the first pending poll");
   assert(
     exports.opendal_mbt_wasm_canary_async_stage() === 1,
-    "write became ready in the first microtask",
+    "create_dir became ready in the first microtask",
   );
 
   await heartbeatPromise;
   assert(heartbeat, "browser heartbeat did not run");
   assert(
     exports.opendal_mbt_wasm_canary_async_stage() === 1,
-    "write completed before the previously queued browser heartbeat",
+    "create_dir completed before the previously queued browser heartbeat",
   );
 
   await waitFor(
     () => exports.opendal_mbt_wasm_canary_async_stage(),
-    5,
+    8,
     "asynchronous OpenDAL memory lifecycle",
   );
   assert(
-    exports.opendal_mbt_wasm_canary_pending_poll_count() === pendingBefore + 4,
-    "not every write/read/stat/NotFound task observed Pending",
+    exports.opendal_mbt_wasm_canary_pending_poll_count() === pendingBefore + 7,
+    "not every create/write/read/stat/delete/NotFound task observed Pending",
   );
 
   assert(
@@ -126,7 +126,7 @@ try {
   );
   await report({
     ok: true,
-    pendingTasks: 4,
+    pendingTasks: 7,
     heartbeat: true,
     cancellation: "suppressed",
   });

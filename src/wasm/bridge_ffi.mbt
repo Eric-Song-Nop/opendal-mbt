@@ -79,6 +79,17 @@ fn bridge_operator_read_start(operator : UInt, path : UInt) -> UInt = "opendal_m
 fn bridge_operator_stat_start(operator : UInt, path : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_operator_stat_start"
 
 ///|
+fn bridge_operator_create_dir_start(operator : UInt, path : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_operator_create_dir_start"
+
+///|
+fn bridge_operator_delete_start(
+  operator : UInt,
+  path : UInt,
+  version : UInt,
+  recursive : Bool,
+) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_operator_delete_start"
+
+///|
 fn bridge_task_state(handle : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_task_state"
 
 ///|

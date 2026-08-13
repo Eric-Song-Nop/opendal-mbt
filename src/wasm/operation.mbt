@@ -11,6 +11,12 @@ const COMPLETION_READ = 2U
 const COMPLETION_STAT = 3U
 
 ///|
+const COMPLETION_CREATE_DIR = 4U
+
+///|
+const COMPLETION_DELETE = 5U
+
+///|
 /// Return the local state of this experimental callback operation.
 pub fn Operation::state(self : Operation) -> OperationState {
   self.state
@@ -83,6 +89,42 @@ fn start_wait(operation : Operation, finish : (UInt) -> Unit) -> Unit {
 }
 
 ///|
+fn finish_unit_operation(
+  operation : Operation,
+  task : UInt,
+  expected_kind : UInt,
+  name : String,
+  callback : (Result[Unit, WasmError]) -> Unit,
+) -> Unit {
+  match operation.take_completion(task) {
+    None =>
+      callback(
+        Err(
+          take_bridge_error(
+            12,
+            "\{name} task became ready without a completion",
+          ),
+        ),
+      )
+    Some(completion) => {
+      let kind = bridge_completion_kind(completion)
+      let status = bridge_completion_status(completion)
+      if kind != expected_kind {
+        ignore(bridge_completion_release(completion))
+        callback(
+          Err(WasmError(2, "\{name} task returned the wrong completion kind")),
+        )
+      } else if status != 0U {
+        callback(Err(completion_error(completion, status, "\{name} failed")))
+      } else {
+        ignore(bridge_completion_release(completion))
+        callback(Ok(()))
+      }
+    }
+  }
+}
+
+///|
 /// Start a callback-based asynchronous write.
 ///
 /// The callback is always delivered from a later browser event-loop turn.
@@ -111,31 +153,7 @@ pub fn Operator::write_callback(
   }
   let operation : Operation = { handle: task, state: Pending }
   start_wait(operation, task => {
-    match operation.take_completion(task) {
-      None =>
-        callback(
-          Err(
-            take_bridge_error(
-              12, "write task became ready without a completion",
-            ),
-          ),
-        )
-      Some(completion) => {
-        let kind = bridge_completion_kind(completion)
-        let status = bridge_completion_status(completion)
-        if kind != COMPLETION_WRITE {
-          ignore(bridge_completion_release(completion))
-          callback(
-            Err(WasmError(2, "write task returned the wrong completion kind")),
-          )
-        } else if status != 0U {
-          callback(Err(completion_error(completion, status, "write failed")))
-        } else {
-          ignore(bridge_completion_release(completion))
-          callback(Ok(()))
-        }
-      }
-    }
+    finish_unit_operation(operation, task, COMPLETION_WRITE, "write", callback)
   })
   operation
 }
@@ -267,6 +285,93 @@ pub fn Operator::stat_callback(
         }
       }
     }
+  })
+  operation
+}
+
+///|
+/// Start callback-based recursive directory creation.
+///
+/// The path must end with `/`. The callback is always delivered from a later
+/// browser event-loop turn.
+pub fn Operator::create_dir_callback(
+  self : Operator,
+  path : StringView,
+  callback : (Result[Unit, WasmError]) -> Unit,
+) -> Operation raise WasmError {
+  if self.handle == 0U {
+    raise WasmError(1, "operator is closed")
+  }
+  ignore(bridge_last_error_clear())
+  let path_handle = copy_path_to_bridge(path)
+  let task = bridge_operator_create_dir_start(self.handle, path_handle)
+  ignore(bridge_buffer_release(path_handle))
+  if task == 0U {
+    raise_last_bridge_error("could not start asynchronous directory creation")
+  }
+  let operation : Operation = { handle: task, state: Pending }
+  start_wait(operation, task => {
+    finish_unit_operation(
+      operation,
+      task,
+      COMPLETION_CREATE_DIR,
+      "create_dir",
+      callback,
+    )
+  })
+  operation
+}
+
+///|
+/// Start a callback-based delete. Deleting a missing path is successful.
+///
+/// The optional version and recursive behavior are passed through to the
+/// selected OpenDAL backend. The callback is delivered from a later browser
+/// event-loop turn.
+pub fn Operator::delete_callback(
+  self : Operator,
+  path : StringView,
+  callback : (Result[Unit, WasmError]) -> Unit,
+  version? : StringView,
+  recursive? : Bool = false,
+) -> Operation raise WasmError {
+  if self.handle == 0U {
+    raise WasmError(1, "operator is closed")
+  }
+  ignore(bridge_last_error_clear())
+  let path_handle = copy_path_to_bridge(path)
+  let version_handle = match version {
+    None => 0U
+    Some(version) =>
+      copy_path_to_bridge(version) catch {
+        error => {
+          ignore(bridge_buffer_release(path_handle))
+          raise error
+        }
+      }
+  }
+  let task = bridge_operator_delete_start(
+    self.handle,
+    path_handle,
+    version_handle,
+    recursive,
+  )
+  if version_handle != 0U {
+    ignore(bridge_buffer_release(version_handle))
+  }
+  ignore(bridge_buffer_release(path_handle))
+  if task == 0U {
+    raise_last_bridge_error("could not start an asynchronous delete")
+  }
+  let operation : Operation = { handle: task, state: Pending }
+  start_wait(operation, task => {
+    finish_unit_operation(
+      operation,
+      task,
+      COMPLETION_DELETE,
+      "delete",
+      callback,
+    )
   })
   operation
 }

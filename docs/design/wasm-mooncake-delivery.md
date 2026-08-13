@@ -163,17 +163,19 @@ MoonBit application Wasm
   -> OpenDAL memory service
 ```
 
-The scalar ABI is version `0x0001_0001`. Its current feature bitmap is
-`0x0000_003f`: memory service, poll-once synchronous canary, generation
-handles, binary buffers, task ABI, and generic operator construction through
-the compiled OpenDAL service registry. In addition to the original
+The scalar ABI is version `0x0001_0002`. Its current feature bitmap is
+`0x0000_007f`: memory service, poll-once synchronous canary, generation
+handles, binary buffers, task ABI, generic operator construction through the
+compiled OpenDAL service registry, and common create-dir/delete mutations. In
+addition to the original
 synchronous round trip, the bridge now has generation-checked task and
 completion handles, per-completion OpenDAL errors, logical cancellation,
 per-operator service identity and capabilities, and permanent instance
 teardown. The MoonBit facade exposes backend-neutral `Operator::new(scheme,
-config)` plus the experimental public `write_callback`, `read_callback`, and
-`stat_callback` methods. Each callback returns an `Operation` whose observable
-states are `Pending`, `Completed`, `Cancelled`, and `Closed`.
+config)` plus the experimental public `write_callback`, `read_callback`,
+`stat_callback`, `create_dir_callback`, and `delete_callback` methods. Each
+callback returns an `Operation` whose observable states are `Pending`,
+`Completed`, `Cancelled`, and `Closed`.
 
 The repository has two acceptance commands with intentionally different
 claims:
@@ -186,12 +188,13 @@ make wasm-canary
 make wasm-browser-canary
 ```
 
-The browser fixture forces write, read, `stat`, and a missing read to return
-`Pending` on their first Rust poll, rejects synchronous completion, lets a
-previously queued browser heartbeat run before readiness, completes the
-MoonBit callback chain, suppresses a cancel-before-ready callback, and checks
-the live-handle baseline plus `runtime.dispose()`. Its success payload records
-`pendingTasks: 4`, `heartbeat: true`, and `cancellation: "suppressed"`.
+The browser fixture forces create-dir, write, read, `stat`, two idempotent
+recursive deletes, and a missing read to return `Pending` on their first Rust
+poll. It rejects synchronous completion, lets a previously queued browser
+heartbeat run before readiness, completes the MoonBit callback chain,
+suppresses a cancel-before-ready callback, and checks the live-handle baseline
+plus `runtime.dispose()`. Its success payload records `pendingTasks: 7`,
+`heartbeat: true`, and `cancellation: "suppressed"`.
 Only this Chrome/Chromium run is evidence for `Pending -> Ready` and a
 responsive browser event loop; the Node command is not.
 
@@ -391,8 +394,8 @@ rather than the bounded bulk-copy step shown above.
 
 ### Target bootstrap
 
-The current facade checks bridge ABI `0x0001_0001` and required feature bits
-`0x0000_003f` before creating an operator. The artifact-manifest and
+The current facade checks bridge ABI `0x0001_0002` and required feature bits
+`0x0000_007f` before creating an operator. The artifact-manifest and
 service-profile checks below remain product work.
 
 Before creating an operator, the facade and loader validate:
@@ -458,8 +461,9 @@ Pending or Ready
 ```
 
 `task_take` moves the result exactly once into an independently owned
-completion. Completion kinds are write (`1`), read (`2`), and stat (`3`);
-successful read/stat takes and failed-error takes consume that completion.
+completion. Completion kinds are write (`1`), read (`2`), stat (`3`),
+create-dir (`4`), and delete (`5`); successful read/stat takes and failed-error
+takes consume that completion, while successful unit completions are released.
 The local MoonBit `Operation` maps the lifecycle to `Pending`, `Completed`,
 `Cancelled`, and `Closed` without exposing either handle class.
 
@@ -914,8 +918,10 @@ Deliverables:
 
 Implemented evidence:
 
-- task ABI and per-completion errors for callback write/read/stat;
-- four forced `Pending -> Ready` operations, including owned `NotFound`;
+- task ABI and per-completion errors for callback
+  create-dir/write/read/stat/delete;
+- seven forced `Pending -> Ready` operations, including idempotent recursive
+  delete and owned `NotFound`;
 - later-turn callback delivery and a browser heartbeat that runs before
   readiness;
 - cancel-before-ready callback suppression and live-handle restoration;
@@ -1094,7 +1100,7 @@ an interactive development session wait idly.
 | Moon facade | type/error conversion and compile-contract fixtures |
 | Node core-Wasm smoke | `make wasm-canary`: synchronous ABI/bootstrap, repeated lifecycle, teardown |
 | Core Wasm | import/export inspection and size record; no WASI/POSIX/thread surprises |
-| Browser runtime | `make wasm-browser-canary`: real Chrome/Chromium, four forced-pending tasks, heartbeat, logical cancel suppression, cleanup |
+| Browser runtime | `make wasm-browser-canary`: real Chrome/Chromium, seven forced-pending tasks, heartbeat, logical cancel suppression, cleanup |
 | Binary transfer | NUL/non-UTF-8, 16 MiB chunks, limits, memory growth |
 | Service fixtures | generic construction, reported capabilities, and each service's relevant persistence/security failures |
 | Packaging | fresh Mooncake consumer, no Rust/npm/checkout, relocatable output |

@@ -44,10 +44,11 @@ minimal dependency and feature set does not change native build profiles.
 
 ## ABI conventions
 
-- ABI version is `0x0001_0001` (major 1, minor 1).
-- Feature flags currently equal `0x0000_003f`: bit 0 memory service, bit 1
+- ABI version is `0x0001_0002` (major 1, minor 2).
+- Feature flags currently equal `0x0000_007f`: bit 0 memory service, bit 1
   poll-once canary, bit 2 generation handles, bit 3 binary buffers, and bit 4
-  task ABI, and bit 5 generic operator construction and service inspection.
+  task ABI, bit 5 generic operator construction and service inspection, and
+  bit 6 common create-dir/delete mutations.
 - Handles are positive signed 32-bit values as well as valid `u32` values; the
   generation field is 15 bits so MoonBit can carry them in an `Int` unchanged.
   A slot is permanently retired when that generation space is exhausted, so a
@@ -73,9 +74,10 @@ minimal dependency and feature set does not change native build profiles.
   owns. `live_handle_count` is the canary leak oracle.
 
 Task state scalars are `1` pending, `2` ready, `3` cancelled, and `4`
-consumed. Completion kinds are `1` write, `2` read, and `3` stat. `task_take`
-moves a ready result into a separately owned completion exactly once. Read,
-metadata, and error take operations then consume that completion.
+consumed. Completion kinds are `1` write, `2` read, `3` stat, `4` create-dir,
+and `5` delete. `task_take` moves a ready result into a separately owned
+completion exactly once. Read, metadata, and error take operations then consume
+that completion; successful unit completions are explicitly released.
 
 Task cancellation is **logical**. Cancelling pending work makes late completion
 inert; cancelling ready work wins over an unconsumed result. It does not abort
