@@ -1,196 +1,182 @@
 # OpenDAL MoonBit WebAssembly canaries
 
-Status: experimental, unpublished implementation slice
+Status: experimental, unpublished implementation candidate
 
-This directory contains the repository end-to-end proofs described in
-[`docs/design/wasm-integration.md`](../docs/design/wasm-integration.md) and the
-current delivery plan in
+This directory contains the repository proofs for the backend-neutral
+`Eric-Song-Nop/opendal/wasm` binding. The binding constructs an OpenDAL
+operator by scheme and configuration; `memory` is the deterministic artifact
+fixture used by the current tests, not a special public backend or product
+direction.
+
+The architecture and delivery plan are documented in
+[`docs/design/wasm-integration.md`](../docs/design/wasm-integration.md) and
 [`docs/design/wasm-mooncake-delivery.md`](../docs/design/wasm-mooncake-delivery.md).
-A MoonBit `wasm` package invokes the real Rust OpenDAL `memory` service without
-sharing either language runtime's object layout or linear-memory allocator.
 
-## What the canaries prove
+## What exists
 
-There are two deliberately different runners:
+The experimental public MoonBit package exposes:
 
-- `make wasm-canary` is a Node.js smoke test for the synchronous scalar ABI. It
-  checks ABI version and features, binary-safe write/read, `stat`, owned
-  `NotFound`, generation-checked stale-handle rejection, explicit release, and
-  teardown with zero live handles.
-- `make wasm-browser-canary` launches a real headless Chrome/Chromium page. It
-  drives the callback task ABI through create-dir, write, read, `stat`,
-  bounded list, idempotent recursive delete, and `NotFound`; forces all eight
-  Rust futures to return `Pending` on their first poll; proves
-  that a previously queued browser heartbeat runs before completion; suppresses
-  a cancel-before-ready callback; verifies completion-wins cancellation,
-  terminal close, two concurrent operators, and disposal with work in flight;
-  and checks handle cleanup after late completion.
+- `available_schemes()` and `Operator::new(scheme, config)` for every service
+  compiled into the selected bridge artifact;
+- `Operator::info()`, including the effective scheme, root, name, and
+  capabilities reported by OpenDAL;
+- `create_dir_callback`, `write_callback`, `read_callback`, `stat_callback`,
+  bounded `list_callback`, and `delete_callback` operations;
+- an `Operation` with `Pending`, `Completed`, `Cancelled`, and `Closed` states,
+  plus idempotent logical cancellation and close;
+- owned `Bytes`, `Metadata`, `Entry`, `Capability`, and `WasmError` values;
+- explicit, idempotent `Operator::close()`.
 
-Only the browser canary is evidence for `Pending -> Ready` and event-loop
-responsiveness. A passing Node canary is not asynchronous-browser evidence.
+The public MoonBit package intentionally does **not** expose synchronous
+storage methods, `Operator::memory`, raw task/resource handles, ABI version or
+feature queries, live-handle counters, or forced-pending diagnostics. Those
+remaining raw bridge exports are low-level fixture and ABI oracles only.
 
-Both calls originate in
-[`integration/wasm/canary.mbt`](../integration/wasm/canary.mbt) through the
-public `Eric-Song-Nop/opendal/wasm` package. The Rust implementation is not
-reproduced in MoonBit or JavaScript.
+The current bridge artifact compiles the OpenDAL memory service. A future
+artifact may compile any set of browser-compatible OpenDAL services without
+changing this MoonBit API. Runtime availability is the intersection of the
+artifact's compiled schemes and the selected service's browser/host
+requirements; `available_schemes()` reports the former, and capability values
+come from the constructed operator.
 
 ## Module boundary
 
 ```text
-MoonBit canary
+MoonBit application
   -> Eric-Song-Nop/opendal/wasm
   -> scalar resource/task imports named opendal_mbt_bridge.*
-  -> callback scheduling import named opendal_mbt_host.wait_task
-  -> Rust core-Wasm module
-  -> OpenDAL memory service
+  -> scheduler and bounded-copy imports named opendal_mbt_host.*
+  -> repository loader
+  -> Rust core-Wasm bridge
+  -> OpenDAL service selected by Operator::new(scheme, config)
 ```
 
-Rust and MoonBit keep separate memories. Paths, payloads, messages, metadata,
-errors, tasks, and completions are owned through positive, generation-checked
-integer handles. The Rust bridge ABI uses only fixed-width Wasm scalars; no
-pointer or language object enters Rust. The separate scheduler import carries a task
-handle and a MoonBit closure through MoonBit's Wasm closure FFI.
-[`loader/index.mjs`](loader/index.mjs) instantiates Rust first, supplies the
-bridge exports and callback host imports to MoonBit, and owns teardown.
+Rust and MoonBit define and export separate linear memories. Paths, payloads,
+messages, metadata, errors, tasks, and completions are owned behind positive,
+generation-checked integer handles. Cross-module calls use fixed-width Wasm
+scalars. The loader instantiates Rust first, wires its exports and the host
+scheduler/copy functions into MoonBit, and owns instance teardown.
+
+Whole-object materialization is capped at 64 MiB. The loader copies at most
+256 KiB per call and recreates typed-array views for every window so
+`memory.grow` cannot leave a stale view. The public facade does not use the
+bridge's legacy per-byte buffer operations.
+
+Operator configuration is capped at 1,024 entries and 1 MiB of combined key
+and value UTF-8. ASCII-case-insensitive duplicate keys are rejected before an
+operator is constructed.
+
+## Evidence
+
+The three checks make different claims:
+
+- `make wasm-static-contract` checks the committed browser-memory snapshot:
+  exact Rust and MoonBit imports/exports, one defined and exported memory per
+  module, no imported/shared/memory64 memory, no `env` or WASI imports, MoonBit
+  bridge imports resolved by Rust exports, and raw/gzip/Brotli size ceilings.
+- `make wasm-canary` runs in Node.js through the callback task path. It checks
+  bootstrap, generic memory construction, bounded bulk transfer, two complete
+  callback lifecycles, owned errors, repeated cleanup, and final teardown.
+- `make wasm-browser-canary` runs the same callback binding in real headless
+  Chrome/Chromium. It explicitly enables the bridge's test-only
+  forced-pending wrapper and checks twelve observed pending tasks, heartbeat
+  ordering, cancellation suppression, completion-versus-cancel behavior,
+  concurrent operators, diagnostic isolation, and teardown with work in
+  flight.
+
+Only the Chrome/Chromium check is evidence that the forced `Pending -> Ready`
+sequence yields to a real browser event loop. The Node check exercises real
+tasks and callbacks, but it neither enables the forced-pending hook nor makes
+a browser-heartbeat claim.
+
+The bridge ABI is version `0x0001_0004`. The bridge reports feature bitmap
+`0x0000_01ff`; bits 0 and 1 are the memory and poll-once fixture capabilities.
+The public facade requires only `0x0000_01fc` (generation handles, binary
+buffers, task ABI, generic operator construction, common mutations, bounded
+listing, and bounded bulk transfer).
+
+The static snapshot is an implementation compatibility gate, not a release
+manifest: it does not yet provide artifact provenance, immutable release
+hashes, a service-profile distribution contract, or a clean Mooncake
+consumer.
 
 ## Build and run
 
 Prerequisites are the repository's pinned Rust and MoonBit toolchains, Node.js
-18 or newer, the Rust `wasm32-unknown-unknown` target, and the wasm-bindgen CLI
-version locked by the bridge dependency graph. The browser canary additionally
-needs Chrome or Chromium; set `OPENDAL_MBT_BROWSER_BIN` if it is not in a known
-location.
+18 or newer, the Rust `wasm32-unknown-unknown` target, and wasm-bindgen CLI
+`0.2.127`. The browser canary additionally needs Chrome or Chromium; set
+`OPENDAL_MBT_BROWSER_BIN` when its executable is not at a known path.
 
 ```sh
 rustup target add wasm32-unknown-unknown
 cargo install wasm-bindgen-cli --version 0.2.127 --locked
 
-# Synchronous ABI smoke in Node.js.
+make wasm-static-contract
 make wasm-canary
-
-# Forced-Pending callback lifecycle in a real browser.
 make wasm-browser-canary
 ```
 
-The equivalent steps are:
+`make wasm-rust` builds the raw Rust module and processes it with the exactly
+pinned wasm-bindgen CLI. The raw Cargo output is wasm-bindgen input, not the
+deployable bridge. `make wasm-moon` builds the MoonBit canary with the native
+artifact resolver disabled for that Wasm build; native builds retain their
+existing behavior.
+
+After an intentional module-boundary change, regenerate the static snapshot
+with the pinned Wasm toolchains and review the complete import/export diff:
 
 ```sh
-CARGO_PROFILE_RELEASE_PANIC=abort \
-  cargo build --locked --package opendal-mbt-wasm-bridge \
-  --target wasm32-unknown-unknown --release
-
-mkdir -p target/wasm-bindgen/release
-wasm-bindgen --target web --no-typescript \
-  --out-dir target/wasm-bindgen/release \
-  --out-name opendal_mbt_wasm_bridge \
-  target/wasm32-unknown-unknown/release/opendal_mbt_wasm_bridge.wasm
-mv target/wasm-bindgen/release/opendal_mbt_wasm_bridge.js \
-  target/wasm-bindgen/release/opendal_mbt_wasm_bridge.mjs
-
-OPENDAL_MBT_SKIP_NATIVE=1 \
-  moon build --target wasm --release integration/wasm
-
-node wasm/canary/run.mjs \
-  target/wasm-bindgen/release/opendal_mbt_wasm_bridge.mjs \
+make wasm-rust wasm-moon
+node scripts/check-wasm-contract.mjs --print-snapshot \
   target/wasm-bindgen/release/opendal_mbt_wasm_bridge_bg.wasm \
-  _build/wasm/release/build/eric-song-nop/opendal-wasm-canary/opendal-wasm-canary.wasm
-
-node wasm/canary/run-browser.mjs \
   target/wasm-bindgen/release/opendal_mbt_wasm_bridge.mjs \
-  target/wasm-bindgen/release/opendal_mbt_wasm_bridge_bg.wasm \
-  _build/wasm/release/build/eric-song-nop/opendal-wasm-canary/opendal-wasm-canary.wasm
+  _build/wasm/release/build/eric-song-nop/opendal-wasm-canary/opendal-wasm-canary.wasm \
+  > wasm/contract/browser-memory.json
+make wasm-static-contract
 ```
 
-The raw Cargo output is wasm-bindgen input, not a deployable bridge. OpenDAL's
-Wasm dependencies use JavaScript-backed time, UUID, and related support; the
-generated `.mjs` supplies those host imports and initializes the processed
-`_bg.wasm` module. The CLI version must match the Rust `wasm-bindgen` crate.
+Snapshot regeneration is a compatibility review, not an automatic response to
+a failing gate. Size baselines record the reviewed build; only the separately
+reviewed ceilings fail ordinary build-size drift.
 
-`OPENDAL_MBT_SKIP_NATIVE=1` is currently explicit because the installed Moon
-prebuild protocol supplies environment and module paths, but not the selected
-backend. The opt-out returns an empty link configuration before reading or
-downloading a native artifact. Native builds retain their existing default.
+## Execution and cancellation
 
-The Node runner exits successfully only when the MoonBit-exported synchronous
-round trip returns status `0`. Other status values identify the failed
-acceptance check; they are defined next to the fixture in
-`integration/wasm/canary.mbt`. The browser runner serves the artifacts on
-loopback HTTP, waits for the page to report, and prints a successful result of
-the following shape:
+Rust schedules production tasks with `wasm_bindgen_futures::spawn_local` and
+awaits the OpenDAL future directly. The forced-pending delay is disabled by
+default and can be enabled only through a raw canary export; the browser test
+does so before its deterministic scheduling matrix.
 
-```json
-{"ok":true,"pendingTasks":8,"heartbeat":true,"cancellation":"suppressed","diagnostics":"isolated"}
-```
+The loader starts task observation from a later microtask and polls pending
+tasks on later zero-delay timer turns. A MoonBit callback therefore never runs
+from the initiating MoonBit/Rust stack. Cancellation unregisters the loader
+wait before cancelling and releasing the task handle. It suppresses callback
+delivery and makes a late completion inert, but it does not claim to abort an
+underlying browser API or OpenDAL future. `runtime.dispose()` cancels remaining
+waits, permanently tears down the bridge instance, and makes subsequent late
+completion inert.
 
-## Package surface
+This callback surface is explicit because ordinary-browser MoonBit `async fn`
+suspension is not yet a stable, documented portability contract. The binding
+does not disguise callbacks as synchronous storage operations.
 
-The experimental `Eric-Song-Nop/opendal/wasm` package currently exposes:
+## Remaining distribution work
 
-- backend-neutral `Operator::new(scheme, config)`, `available_schemes`,
-  `OperatorInfo`, and `Capability`; `Operator::memory` remains a thin test
-  convenience;
-- synchronous `write`, `read`, and `stat`, and idempotent `close`;
-- `write_callback`, `read_callback`, `stat_callback`,
-  `create_dir_callback`, and `delete_callback`, each returning an `Operation`
-  with `Pending`, `Completed`, `Cancelled`, and `Closed` states;
-- `list_callback` with recursive, page-limit, and start-after options, returning
-  owned `Entry` snapshots under fixed total entry/UTF-8 byte ceilings;
-- idempotent `Operation::cancel` and `Operation::close`;
-- `Metadata` with `EntryMode`, `content_length`, `is_file`, and `is_dir`;
-- an owned `WasmError` snapshot with code, message, and `is_not_found`;
-- bridge version/features plus canary-only live-handle and forced-pending
-  diagnostics.
+M0 (two-module interoperability and ownership), M1 (callback task lifecycle),
+and M2 (bounded bulk transfer) now have repository evidence. The static
+browser-memory contract also has a committed gate. None of those facts makes
+the package installable from Mooncakes.
 
-The bridge ABI is version `0x0001_0004`. Its current feature bitmap is
-`0x0000_01ff`: memory service, poll-once synchronous canary, generation
-handles, binary buffers, task ABI, generic operator construction through the
-compiled OpenDAL service registry, common create-dir/delete mutations, and
-bounded streaming list materialization and cross-memory bulk transfer.
+Before a preview release, the project still needs:
 
-The native `Eric-Song-Nop/opendal` package and its C/static-library ABI are not
-changed or reused by this backend.
+- a versioned Wasm artifact manifest with provenance and exact hashes;
+- a supported way to deliver the bridge, wasm-bindgen glue, loader, and
+  manifest from the Moon package;
+- a clean consumer with no Rust toolchain, npm dependency, source checkout, or
+  handwritten import table;
+- cold acquisition, verified cache, relocation, mismatch, and corruption
+  tests;
+- explicit browser/service profiles and service-specific acceptance fixtures.
 
-## Execution and cancellation limits
-
-The callback path owns Rust tasks and completions. Rust uses
-`wasm_bindgen_futures::spawn_local`; production tasks await the OpenDAL future
-directly. The browser canary explicitly enables a zero-delay wrapper that
-guarantees at least one real `Pending` poll. The loader observes task state
-from later microtasks/timer turns and delivers the MoonBit callback only after
-the task is ready. Inputs are copied and the OpenDAL operator is cloned before
-a task starts.
-
-This is a real browser scheduling proof, but it is not yet the stable MoonBit
-`async fn` API. Ordinary browser-hosted MoonBit async/await remains limited by
-the officially documented runtime support. The currently usable public Wasm
-path is the explicitly experimental callback `Operation` API.
-
-Cancellation is **logical cancellation**. It suppresses the user callback and
-makes a late completion inert, but it does not claim to abort the underlying
-OpenDAL future or browser I/O. The loader unregisters its wait before MoonBit
-releases the task, preventing orphan polls from changing the caller-visible
-sticky diagnostic. `runtime.dispose()` stops loader polling, clears the bridge
-arena, and makes later task completion inert.
-
-The synchronous methods remain only for ABI smoke coverage. They still poll
-once with a no-op waker and report code `9` if an OpenDAL future suspends; they
-must not be used for OPFS, S3, or other genuinely asynchronous services.
-
-## Still required before release
-
-- obtain a documented, portable ordinary-browser MoonBit async continuation
-  contract, or keep the callback surface explicitly preview-only;
-- record exact imports/exports, artifact sizes, and startup evidence;
-- pin, checksum, and distribute the Rust Wasm companion artifact;
-- make a clean registry consumer acquire the companion module without a Rust
-  checkout;
-- decide whether core-module loading remains the product boundary or is
-  replaced by a WIT component;
-- exercise additional browser-compatible service profiles through the same
-  generic constructor after the common lifecycle, transfer, packaging, and
-  service-specific cancellation contracts are proven; OPFS is only one
-  optional persistence fixture.
-
-The existing native artifact manifest is intentionally not used for these Wasm
-outputs. Wasm distribution will receive its own compatibility and provenance
-contract.
+OPFS may be one optional persistence fixture in that last category. It is not
+a milestone by itself and does not stand in for the generic binding or for any
+other OpenDAL backend.

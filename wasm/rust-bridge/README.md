@@ -1,25 +1,33 @@
-# OpenDAL MoonBit Wasm bridge canary
+# OpenDAL MoonBit Wasm bridge
 
-This crate is the Rust half of the OpenDAL/MoonBit WebAssembly proof. It builds
-as a core Wasm module and exposes a scalar-only resource/task ABI that a
-MoonBit Wasm module imports through the repository loader. Values cross the
-Rust boundary as fixed-width integer scalars and generation-checked handles;
-Rust pointers and language-owned objects never cross it.
+This crate is the Rust half of the OpenDAL/MoonBit WebAssembly binding. It
+builds as a core Wasm module and exposes a scalar resource/task ABI imported by
+the MoonBit Wasm facade through the repository loader. Values cross the Rust
+boundary as fixed-width scalars and generation-checked handles; Rust pointers
+and language-owned objects never cross as public ABI values.
 
-The bridge uses OpenDAL's always-available `memory` service and currently has
-two execution paths:
+The bridge initializes OpenDAL's compiled service registry. The public facade
+uses one backend-neutral construction path,
+`Operator::new(scheme, config)`, for every service present in the selected
+artifact. The current browser-memory artifact compiles only the deterministic
+memory fixture. Enabling another browser-compatible service is an artifact
+profile and acceptance-test change, not a new facade constructor.
 
-- synchronous `write`, `read`, and `stat` poll exactly once and exist only for
-  the Node ABI smoke test; a pending future returns `ASYNC_PENDING` (`9`);
-- `*_start` creates an owned task driven by
-  `wasm_bindgen_futures::spawn_local`. Production tasks await the OpenDAL
-  future directly. The browser canary explicitly enables a zero-delay wrapper
-  so each tested task has an observably `Pending` first poll.
+## Execution paths
 
-The task path is exercised in real Chrome/Chromium. This artifact currently
-compiles only the deterministic memory fixture, but construction is routed
-through OpenDAL's generic service registry so other browser-compatible
-profiles do not require backend-specific facade APIs.
+The public MoonBit facade imports only task-start operations for create-dir,
+write, read, stat, bounded list, and delete. Each start clones the OpenDAL
+operator, copies its inputs, publishes a task handle, and schedules the future
+with `wasm_bindgen_futures::spawn_local`.
+
+Production tasks await the OpenDAL future directly. A raw canary setter can
+wrap subsequently started tasks in a zero-delay future that guarantees an
+observable first `Pending` poll. This hook is disabled by default and is used
+only by the Chrome scheduling test.
+
+The bridge still exports synchronous poll-once operations and canary
+diagnostics as low-level fixture/ABI oracles. They are not imported or exposed
+by the public MoonBit package and must not be treated as browser storage APIs.
 
 ## Build
 
@@ -30,7 +38,7 @@ wasm-bindgen CLI, and emits the matching `.mjs` and processed `_bg.wasm` pair:
 make wasm-rust
 ```
 
-The raw Cargo input to wasm-bindgen can also be built directly:
+The raw Cargo input can also be built directly:
 
 ```sh
 CARGO_PROFILE_RELEASE_PANIC=abort cargo build --locked \
@@ -39,65 +47,59 @@ CARGO_PROFILE_RELEASE_PANIC=abort cargo build --locked \
   --release
 ```
 
-The bridge is a separate Cargo crate from the native static archive, so its
-minimal dependency and feature set does not change native build profiles.
+The bridge is separate from the native static archive, so its dependency and
+feature profile does not alter the native package.
 
 ## ABI conventions
 
 - ABI version is `0x0001_0004` (major 1, minor 4).
-- Feature flags currently equal `0x0000_01ff`: bit 0 memory service, bit 1
-  poll-once canary, bit 2 generation handles, bit 3 binary buffers, and bit 4
-  task ABI, bit 5 generic operator construction and service inspection, and
-  bit 6 common create-dir/delete mutations, bit 7 bounded streaming list
-  materialization, and bit 8 bounded cross-memory transfer.
-- Handles are positive signed 32-bit values as well as valid `u32` values; the
-  generation field is 15 bits so MoonBit can carry them in an `Int` unchanged.
-  A slot is permanently retired when that generation space is exhausted, so a
-  released handle never becomes valid again through wraparound.
-- Successful constructors, synchronous `read`/`stat`, task starts, task take,
-  result take, error snapshots, and error messages return a non-zero handle;
-  `0` means failure or "no last error" where noted.
-- Status-returning calls return `0` on success and a stable error code on
-  failure.
-- `buffer_len`, `buffer_get`, and `metadata_is_file` return a non-negative
-  value on success and `-1` on failure.
-- `buffer_new_sized` allocates at most 64 MiB and `buffer_data_ptr` exposes a
-  checked window of at most 256 KiB for one synchronous host copy. Its pointer
-  is invalid after the next call that mutates or releases that buffer.
-- Synchronous failures, task-start failures, and ABI misuse record a sticky
-  last error. `last_error_take` converts it to an owned error handle. A failed
-  asynchronous OpenDAL operation instead owns its error inside its completion;
-  `completion_take_error` moves it to an error handle. Error-message queries
-  return a new buffer handle, which the caller must release.
-- `metadata_content_length_low` and `metadata_content_length_high` return the
-  two halves of the unsigned 64-bit content length. Their scalar `0` is
-  ambiguous, so callers should consult the sticky last error after an invalid
-  metadata handle.
-- Every handle returned by the bridge must be released with the matching
-  release function. Releasing a task or completion drops any result it still
-  owns. `live_handle_count` is the canary leak oracle.
+- The bridge reports feature flags `0x0000_01ff`: bit 0 memory fixture, bit 1
+  poll-once fixture, bit 2 generation handles, bit 3 binary buffers, bit 4
+  task ABI, bit 5 generic operator construction and inspection, bit 6 common
+  create-dir/delete mutations, bit 7 bounded streaming list materialization,
+  and bit 8 bounded cross-memory transfer.
+- The public facade requires `0x0000_01fc`; memory and poll-once are not generic
+  facade requirements.
+- Handles are positive signed 32-bit values as well as valid `u32` values. The
+  generation field is 15 bits so MoonBit can carry a handle in `Int` without
+  changing it. Slots retire before generation wraparound.
+- Constructors, task starts, typed result takes, error snapshots, and message
+  copies return non-zero handles. `0` indicates failure or no last error where
+  documented. Status calls return `0` on success.
+- Operator configuration is capped at 1,024 entries and 1 MiB of combined key
+  and value UTF-8. ASCII-case-insensitive duplicate keys fail atomically.
+- Every owned handle has a matching release operation. Releasing a task or
+  completion drops an unconsumed result. The safe MoonBit wrappers make close
+  and cancellation idempotent.
+- `buffer_new_sized` allocates at most 64 MiB. `buffer_data_ptr` exposes a
+  checked window of at most 256 KiB for one immediate synchronous host copy;
+  the pointer is invalid after the next mutation or release of that buffer.
+- Asynchronous OpenDAL errors belong to their completion. Start/ABI misuse
+  errors use the bridge's sticky last-error slot until the MoonBit facade
+  copies them into an owned `WasmError`.
+- Lists publish atomically only below 65,536 entries and 16 MiB of combined
+  path/name UTF-8. A backend request `limit` remains a service hint and does
+  not replace those binding limits.
 
-Task state scalars are `1` pending, `2` ready, `3` cancelled, and `4`
-consumed. Completion kinds are `1` write, `2` read, `3` stat, `4` create-dir,
-`5` delete, and `6` list. `task_take` moves a ready result into a separately
-owned completion exactly once. Read, metadata, entry-list, and error take
-operations then consume that completion; successful unit completions are
-explicitly released. Lists are streamed into owned snapshots and fail before
-publication above 65,536 entries or 16 MiB of path/name UTF-8 data.
+Task states are `1` pending, `2` ready, `3` cancelled, and `4` consumed.
+Completion kinds are `1` write, `2` read, `3` stat, `4` create-dir, `5`
+delete, and `6` list. `task_take` moves a ready completion exactly once.
 
-Task cancellation is **logical**. Cancelling pending work makes late completion
-inert; cancelling ready work wins over an unconsumed result. It does not abort
-the underlying OpenDAL future. `opendal_mbt_wasm_teardown` is idempotent and
-permanent for the instance: it clears every live resource and ignores late
-task completion.
+Cancellation is logical. Cancelling pending work suppresses publication to the
+MoonBit callback path; cancelling a ready task drops its unconsumed result. It
+does not claim to abort an underlying browser operation. Bridge teardown is
+idempotent and permanent for the instance: it clears all live resources and
+ignores late completion.
 
 Stable status/error codes are: `0` success/no error, `1` invalid or stale
 handle, `2` wrong resource type, `3` buffer too large, `4` index out of bounds,
 `5` invalid byte, `6` invalid UTF-8 path, `7` OpenDAL `NotFound`, `8` other
-OpenDAL error, `9` async operation became pending, `10` handle limit, and `11`
-scalar length overflow, `12` task not ready, `13` task already consumed, and
-`14` bridge instance torn down, `15` list materialization limit, `16`
-allocation failure, and `17` invalid scalar argument.
+OpenDAL error, `9` poll-once operation became pending, `10` handle limit, `11`
+scalar length overflow, `12` task not ready, `13` task already consumed, `14`
+bridge torn down, `15` list materialization limit, `16` allocation failure,
+and `17` invalid scalar argument.
 
-The exported symbols all use the `opendal_mbt_wasm_` prefix. See `src/lib.rs`
-for the complete list and exact signatures.
+All exported symbols use the `opendal_mbt_wasm_` prefix. The committed static
+browser-memory contract records their exact current set, the module imports,
+memory shape, and size ceilings. Raw fixture exports can remain in the bridge
+without becoming part of the public MoonBit interface.
