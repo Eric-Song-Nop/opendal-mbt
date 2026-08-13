@@ -8,14 +8,6 @@ import {
 // Values
 pub fn available_schemes() -> Array[String] raise WasmError
 
-pub fn bridge_features() -> UInt
-
-pub fn bridge_version() -> UInt
-
-pub fn canary_forced_pending_poll_count() -> UInt
-
-pub fn live_handle_count() -> UInt
-
 // Errors
 pub suberror WasmError {
   WasmError(Int, String)
@@ -89,13 +81,9 @@ pub fn Operator::create_dir_callback(Self, StringView, (Result[Unit, WasmError])
 pub fn Operator::delete_callback(Self, StringView, (Result[Unit, WasmError]) -> Unit, version? : StringView, recursive? : Bool) -> Operation raise WasmError
 pub fn Operator::info(Self) -> OperatorInfo raise WasmError
 pub fn Operator::list_callback(Self, StringView, (Result[Array[Entry], WasmError]) -> Unit, recursive? : Bool, limit? : UInt64, start_after? : StringView) -> Operation raise WasmError
-pub fn Operator::memory() -> Self raise WasmError
 pub fn Operator::new(StringView, config? : Map[String, String]) -> Self raise WasmError
-pub fn Operator::read(Self, StringView) -> Bytes raise WasmError
 pub fn Operator::read_callback(Self, StringView, (Result[Bytes, WasmError]) -> Unit) -> Operation raise WasmError
-pub fn Operator::stat(Self, StringView) -> Metadata raise WasmError
 pub fn Operator::stat_callback(Self, StringView, (Result[Metadata, WasmError]) -> Unit) -> Operation raise WasmError
-pub fn Operator::write(Self, StringView, BytesView) -> Unit raise WasmError
 pub fn Operator::write_callback(Self, StringView, BytesView, (Result[Unit, WasmError]) -> Unit) -> Operation raise WasmError
 
 pub struct OperatorInfo {

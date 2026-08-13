@@ -57,14 +57,31 @@ try {
   });
 
   const exports = runtime.exports;
+  const bridge = runtime.bridge.exports;
+  const pendingPollCount = () =>
+    bridge.opendal_mbt_wasm_canary_forced_pending_poll_count();
   const bulkTransferBytes = 16 * 1024 * 1024;
   const bulkTransferChunks = bulkTransferBytes / (256 * 1024);
+  const bulkLiveBefore = bridge.opendal_mbt_wasm_live_handle_count();
   const transferBefore = runtime.transfer.stats();
   const moonMemoryBefore = runtime.moonbit.exports.memory.buffer;
   const bridgeMemoryBefore = runtime.bridge.exports.memory.buffer;
   assert(
-    exports.opendal_mbt_wasm_canary_bulk_roundtrip() === 0,
-    "16 MiB bulk transfer canary failed",
+    exports.opendal_mbt_wasm_canary_bulk_start() === 1,
+    "16 MiB bulk transfer canary did not start pending",
+  );
+  assert(
+    exports.opendal_mbt_wasm_canary_bulk_stage() === 1,
+    "16 MiB bulk transfer canary completed synchronously",
+  );
+  await waitFor(
+    () => exports.opendal_mbt_wasm_canary_bulk_stage(),
+    3,
+    "16 MiB asynchronous bulk transfer",
+  );
+  assert(
+    bridge.opendal_mbt_wasm_live_handle_count() === bulkLiveBefore,
+    "16 MiB bulk transfer canary left live handles",
   );
   const transferAfter = runtime.transfer.stats();
   assert(
@@ -95,31 +112,28 @@ try {
     runtime.bridge.exports.memory.buffer !== bridgeMemoryBefore,
     "16 MiB transfer did not exercise bridge memory.grow",
   );
-  const liveBeforeOversize =
-    runtime.bridge.exports.opendal_mbt_wasm_live_handle_count();
-  runtime.bridge.exports.opendal_mbt_wasm_last_error_clear();
+  const liveBeforeOversize = bridge.opendal_mbt_wasm_live_handle_count();
+  bridge.opendal_mbt_wasm_last_error_clear();
   assert(
-    runtime.bridge.exports.opendal_mbt_wasm_buffer_new_sized(
-      64 * 1024 * 1024 + 1,
-    ) === 0,
+    bridge.opendal_mbt_wasm_buffer_new_sized(64 * 1024 * 1024 + 1) === 0,
     "bridge accepted a buffer above the 64 MiB materialization limit",
   );
   assert(
-    runtime.bridge.exports.opendal_mbt_wasm_last_error_code() === 3,
+    bridge.opendal_mbt_wasm_last_error_code() === 3,
     "oversized allocation did not report BufferTooLarge",
   );
   assert(
-    runtime.bridge.exports.opendal_mbt_wasm_live_handle_count() ===
-      liveBeforeOversize,
+    bridge.opendal_mbt_wasm_live_handle_count() === liveBeforeOversize,
     "oversized allocation published a partial buffer handle",
   );
-  runtime.bridge.exports.opendal_mbt_wasm_last_error_clear();
+  bridge.opendal_mbt_wasm_last_error_clear();
   assert(
-    runtime.bridge.exports.opendal_mbt_wasm_canary_set_force_pending(1) === 0,
+    bridge.opendal_mbt_wasm_canary_set_force_pending(1) === 0,
     "could not enable the deterministic forced-Pending test hook",
   );
 
-  const pendingBefore = exports.opendal_mbt_wasm_canary_pending_poll_count();
+  const asyncLiveBefore = bridge.opendal_mbt_wasm_live_handle_count();
+  const pendingBefore = pendingPollCount();
   let heartbeat = false;
   const heartbeatPromise = new Promise((resolve) => {
     setTimeout(() => {
@@ -139,7 +153,7 @@ try {
 
   await Promise.resolve();
   assert(
-    exports.opendal_mbt_wasm_canary_pending_poll_count() === pendingBefore + 1,
+    pendingPollCount() === pendingBefore + 1,
     "the Rust future did not return Pending on its first poll",
   );
   assert(!heartbeat, "browser heartbeat ran before the first pending poll");
@@ -161,28 +175,27 @@ try {
     "asynchronous OpenDAL memory lifecycle",
   );
   assert(
-    exports.opendal_mbt_wasm_canary_pending_poll_count() === pendingBefore + 8,
+    pendingPollCount() === pendingBefore + 8,
     "not every create/write/read/stat/list/delete/NotFound task observed Pending",
   );
+  assert(
+    bridge.opendal_mbt_wasm_live_handle_count() === asyncLiveBefore,
+    "asynchronous OpenDAL lifecycle left live handles",
+  );
 
+  const cancelLiveBefore = bridge.opendal_mbt_wasm_live_handle_count();
   assert(
     exports.opendal_mbt_wasm_canary_cancel_start() === 0,
     "cancel-before-ready canary did not start",
   );
-  const diagnosticBuffer =
-    runtime.bridge.exports.opendal_mbt_wasm_buffer_new();
+  const diagnosticBuffer = bridge.opendal_mbt_wasm_buffer_new();
   assert(diagnosticBuffer !== 0, "could not allocate diagnostic buffer");
   assert(
-    runtime.bridge.exports.opendal_mbt_wasm_buffer_push(
-      diagnosticBuffer,
-      256,
-    ) === 5,
+    bridge.opendal_mbt_wasm_buffer_push(diagnosticBuffer, 256) === 5,
     "could not seed the sticky diagnostic",
   );
   assert(
-    runtime.bridge.exports.opendal_mbt_wasm_buffer_release(
-      diagnosticBuffer,
-    ) === 0,
+    bridge.opendal_mbt_wasm_buffer_release(diagnosticBuffer) === 0,
     "could not release diagnostic buffer",
   );
   await nextTurn();
@@ -193,19 +206,17 @@ try {
     "a cancelled task delivered its user callback",
   );
   assert(
-    exports.opendal_mbt_wasm_canary_cancel_is_clean() === 1,
+    bridge.opendal_mbt_wasm_live_handle_count() === cancelLiveBefore,
     "cancel-before-ready left live resource handles",
   );
   assert(
-    runtime.bridge.exports.opendal_mbt_wasm_last_error_code() === 5,
+    bridge.opendal_mbt_wasm_last_error_code() === 5,
     "an orphan scheduler poll overwrote the caller's sticky diagnostic",
   );
-  runtime.bridge.exports.opendal_mbt_wasm_last_error_clear();
+  bridge.opendal_mbt_wasm_last_error_clear();
 
-  const readyPendingBefore =
-    exports.opendal_mbt_wasm_canary_pending_poll_count();
-  const readyLiveBefore =
-    runtime.bridge.exports.opendal_mbt_wasm_live_handle_count();
+  const readyPendingBefore = pendingPollCount();
+  const readyLiveBefore = bridge.opendal_mbt_wasm_live_handle_count();
   assert(
     exports.opendal_mbt_wasm_canary_ready_start() === 1,
     "completion-wins canary did not start pending",
@@ -216,8 +227,7 @@ try {
   );
   await Promise.resolve();
   assert(
-    exports.opendal_mbt_wasm_canary_pending_poll_count() ===
-      readyPendingBefore + 1,
+    pendingPollCount() === readyPendingBefore + 1,
     "completion-wins task did not observe Pending",
   );
   assert(
@@ -248,15 +258,12 @@ try {
     "a late callback changed a Closed operation",
   );
   assert(
-    runtime.bridge.exports.opendal_mbt_wasm_live_handle_count() ===
-      readyLiveBefore,
+    bridge.opendal_mbt_wasm_live_handle_count() === readyLiveBefore,
     "completion-wins lifecycle left live handles",
   );
 
-  const multiPendingBefore =
-    exports.opendal_mbt_wasm_canary_pending_poll_count();
-  const multiLiveBefore =
-    runtime.bridge.exports.opendal_mbt_wasm_live_handle_count();
+  const multiPendingBefore = pendingPollCount();
+  const multiLiveBefore = bridge.opendal_mbt_wasm_live_handle_count();
   assert(
     exports.opendal_mbt_wasm_canary_multi_start() === 1,
     "multi-operator canary did not start pending",
@@ -267,8 +274,7 @@ try {
   );
   await Promise.resolve();
   assert(
-    exports.opendal_mbt_wasm_canary_pending_poll_count() ===
-      multiPendingBefore + 2,
+    pendingPollCount() === multiPendingBefore + 2,
     "two concurrent operators did not both observe Pending",
   );
   await waitFor(
@@ -282,26 +288,22 @@ try {
     "multi-operator callback was delivered more than once",
   );
   assert(
-    exports.opendal_mbt_wasm_canary_pending_poll_count() ===
-      multiPendingBefore + 2,
+    pendingPollCount() === multiPendingBefore + 2,
     "multi-operator tasks were polled as new work more than once",
   );
   assert(
-    runtime.bridge.exports.opendal_mbt_wasm_live_handle_count() ===
-      multiLiveBefore,
+    bridge.opendal_mbt_wasm_live_handle_count() === multiLiveBefore,
     "multi-operator lifecycle left live handles",
   );
 
-  const disposePendingBefore =
-    exports.opendal_mbt_wasm_canary_pending_poll_count();
+  const disposePendingBefore = pendingPollCount();
   assert(
     exports.opendal_mbt_wasm_canary_dispose_start() === 1,
     "pending-dispose canary did not start",
   );
   await Promise.resolve();
   assert(
-    exports.opendal_mbt_wasm_canary_pending_poll_count() ===
-      disposePendingBefore + 1,
+    pendingPollCount() === disposePendingBefore + 1,
     "pending-dispose task did not observe Pending",
   );
   assert(
@@ -310,7 +312,7 @@ try {
   );
   runtime.dispose();
   assert(
-    runtime.bridge.exports.opendal_mbt_wasm_live_handle_count() === 0,
+    bridge.opendal_mbt_wasm_live_handle_count() === 0,
     "bridge teardown left live resource handles",
   );
   await nextTurn();
@@ -321,7 +323,7 @@ try {
     "late completion delivered after runtime disposal",
   );
   assert(
-    runtime.bridge.exports.opendal_mbt_wasm_live_handle_count() === 0,
+    bridge.opendal_mbt_wasm_live_handle_count() === 0,
     "late completion revived bridge resources after teardown",
   );
   await report({

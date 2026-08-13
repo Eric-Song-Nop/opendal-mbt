@@ -5,12 +5,6 @@ fn bridge_abi_version() -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_abi_ver
 fn bridge_feature_flags() -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_feature_flags"
 
 ///|
-fn bridge_live_handle_count() -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_live_handle_count"
-
-///|
-fn bridge_canary_forced_pending_poll_count() -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_canary_forced_pending_poll_count"
-
-///|
 fn bridge_buffer_new_sized(length : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_buffer_new_sized"
 
 ///|
@@ -49,15 +43,6 @@ fn bridge_operator_info_name(operator : UInt) -> UInt = "opendal_mbt_bridge" "op
 
 ///|
 fn bridge_operator_info_capability_word(operator : UInt, word : UInt) -> UInt64 = "opendal_mbt_bridge" "opendal_mbt_wasm_operator_info_capability_word"
-
-///|
-fn bridge_operator_write(operator : UInt, path : UInt, data : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_operator_write"
-
-///|
-fn bridge_operator_read(operator : UInt, path : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_operator_read"
-
-///|
-fn bridge_operator_stat(operator : UInt, path : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_operator_stat"
 
 ///|
 fn bridge_operator_write_start(

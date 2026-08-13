@@ -2,7 +2,10 @@
 const EXPECTED_ABI_VERSION = 0x0001_0004U
 
 ///|
-const REQUIRED_FEATURE_FLAGS = 0x0000_01ffU
+// The public facade requires the resource, task, generic-operator, mutation,
+// listing, and bulk-transfer features. Memory and the poll-once adapter are
+// fixture-only bridge capabilities, not requirements of the generic facade.
+const REQUIRED_FEATURE_FLAGS = 0x0000_01fcU
 
 ///|
 const MAX_TRANSFER_BUFFER_LENGTH = 67108864

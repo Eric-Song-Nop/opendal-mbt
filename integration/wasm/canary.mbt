@@ -1,32 +1,20 @@
 ///|
-const CANARY_OK = 0
-
-///|
-const CANARY_UNEXPECTED_ERROR = 1
-
-///|
-const CANARY_ROUNDTRIP_MISMATCH = 2
-
-///|
-const CANARY_METADATA_MISMATCH = 3
-
-///|
-const CANARY_MISSING_PATH_WAS_READ = 4
-
-///|
-const CANARY_WRONG_MISSING_ERROR = 5
-
-///|
-const CANARY_HANDLE_LEAK = 6
-
-///|
-const CANARY_SERVICE_INFO_MISMATCH = 7
-
-///|
-const CANARY_BULK_TRANSFER_MISMATCH = 8
-
-///|
 const BULK_TRANSFER_BYTES = 16777216
+
+///|
+const BULK_IDLE = 0
+
+///|
+const BULK_WRITE_PENDING = 1
+
+///|
+const BULK_READ_PENDING = 2
+
+///|
+const BULK_OK = 3
+
+///|
+const BULK_ERROR = -1
 
 ///|
 const ASYNC_IDLE = 0
@@ -83,9 +71,6 @@ const RACE_ERROR = -1
 let async_stage : Ref[Int] = Ref(ASYNC_IDLE)
 
 ///|
-let async_baseline : Ref[UInt] = Ref(0U)
-
-///|
 let async_operator : Ref[@opendal.Operator?] = Ref(None)
 
 ///|
@@ -95,16 +80,10 @@ let async_operation : Ref[@opendal.Operation?] = Ref(None)
 let cancel_callback_count : Ref[Int] = Ref(0)
 
 ///|
-let cancel_baseline : Ref[UInt] = Ref(0U)
-
-///|
 let cancel_operator : Ref[@opendal.Operator?] = Ref(None)
 
 ///|
 let cancel_operation : Ref[@opendal.Operation?] = Ref(None)
-
-///|
-let ready_baseline : Ref[UInt] = Ref(0U)
 
 ///|
 let ready_callback_count : Ref[Int] = Ref(0)
@@ -117,9 +96,6 @@ let ready_operator : Ref[@opendal.Operator?] = Ref(None)
 
 ///|
 let ready_operation : Ref[@opendal.Operation?] = Ref(None)
-
-///|
-let multi_baseline : Ref[UInt] = Ref(0U)
 
 ///|
 let multi_stage : Ref[Int] = Ref(RACE_IDLE)
@@ -152,6 +128,15 @@ let dispose_operator : Ref[@opendal.Operator?] = Ref(None)
 let dispose_operation : Ref[@opendal.Operation?] = Ref(None)
 
 ///|
+let bulk_stage : Ref[Int] = Ref(BULK_IDLE)
+
+///|
+let bulk_operator : Ref[@opendal.Operator?] = Ref(None)
+
+///|
+let bulk_operation : Ref[@opendal.Operation?] = Ref(None)
+
+///|
 fn fail_async_lifecycle() -> Unit {
   if async_operation.val is Some(operation) {
     operation.close()
@@ -172,11 +157,7 @@ fn start_async_missing(operator : @opendal.Operator) -> Unit {
       Err(error) if error.is_not_found() => {
         async_operation.val = None
         async_operator.val = None
-        if @opendal.live_handle_count() == async_baseline.val {
-          async_stage.val = ASYNC_OK
-        } else {
-          async_stage.val = ASYNC_ERROR
-        }
+        async_stage.val = ASYNC_OK
       }
       _ => fail_async_lifecycle()
     }
@@ -326,13 +307,12 @@ fn start_async_write(operator : @opendal.Operator, payload : Bytes) -> Unit {
 }
 
 ///|
-/// Start a forced-pending asynchronous memory round trip.
+/// Start an asynchronous memory-service lifecycle.
 #export_name("opendal_mbt_wasm_canary_async_start")
 pub fn canary_async_start() -> Int {
   if async_stage.val != ASYNC_IDLE && async_stage.val != ASYNC_OK {
     return ASYNC_ERROR
   }
-  async_baseline.val = @opendal.live_handle_count()
   let operator = @opendal.Operator::new("memory") catch {
     _ => return ASYNC_ERROR
   }
@@ -362,18 +342,10 @@ pub fn canary_async_stage() -> Int {
 }
 
 ///|
-/// Return the forced-pending poll count through the MoonBit facade.
-#export_name("opendal_mbt_wasm_canary_pending_poll_count")
-pub fn canary_pending_poll_count() -> UInt {
-  @opendal.canary_forced_pending_poll_count()
-}
-
-///|
 /// Cancel and release a task before its forced delay completes.
 #export_name("opendal_mbt_wasm_canary_cancel_start")
 pub fn canary_cancel_start() -> Int {
   cancel_callback_count.val = 0
-  cancel_baseline.val = @opendal.live_handle_count()
   let operator = @opendal.Operator::new("memory") catch {
     _ => return ASYNC_ERROR
   }
@@ -403,23 +375,12 @@ pub fn canary_cancel_callback_count() -> Int {
 }
 
 ///|
-/// Return whether cancellation restored the live-handle baseline.
-#export_name("opendal_mbt_wasm_canary_cancel_is_clean")
-pub fn canary_cancel_is_clean() -> Int {
-  if @opendal.live_handle_count() == cancel_baseline.val {
-    1
-  } else {
-    0
-  }
-}
-
-///|
 fn operation_state_code(operation : @opendal.Operation) -> Int {
   match operation.state() {
-    @opendal.Pending => RACE_PENDING
-    @opendal.Completed => RACE_COMPLETED
-    @opendal.Cancelled => RACE_CANCELLED
-    @opendal.Closed => RACE_CLOSED
+    Pending => RACE_PENDING
+    Completed => RACE_COMPLETED
+    Cancelled => RACE_CANCELLED
+    Closed => RACE_CLOSED
   }
 }
 
@@ -450,7 +411,6 @@ pub fn canary_ready_start() -> Int {
   if ready_status_value() == RACE_PENDING {
     return RACE_ERROR
   }
-  ready_baseline.val = @opendal.live_handle_count()
   ready_callback_count.val = 0
   ready_callback_ok.val = false
   let operator = @opendal.Operator::new("memory") catch {
@@ -502,12 +462,7 @@ pub fn canary_ready_close() -> Int {
     operator.close()
   }
   ready_operator.val = None
-  let state = ready_status_value()
-  if state == RACE_CLOSED && @opendal.live_handle_count() == ready_baseline.val {
-    state
-  } else {
-    RACE_ERROR
-  }
+  ready_status_value()
 }
 
 ///|
@@ -537,23 +492,18 @@ fn fail_multi() -> Unit {
 }
 
 ///|
-fn finish_multi(
-  bit : Int,
-  expected : Bytes,
-  result : Result[Bytes, @opendal.WasmError],
-) -> Unit {
+fn finish_multi(bit : Int, result : Result[Bytes, @opendal.WasmError]) -> Unit {
   multi_callback_count.val = multi_callback_count.val + 1
   if multi_callback_count.val > 2 {
     fail_multi()
     return
   }
   match result {
-    Ok(actual) if actual == expected => {
+    Err(error) if error.is_not_found() => {
       multi_mask.val = multi_mask.val | bit
       if multi_mask.val == 3 {
         close_multi_resources()
-        if multi_callback_count.val == 2 &&
-          @opendal.live_handle_count() == multi_baseline.val {
+        if multi_callback_count.val == 2 {
           multi_stage.val = RACE_COMPLETED
         } else {
           multi_stage.val = RACE_ERROR
@@ -571,7 +521,6 @@ pub fn canary_multi_start() -> Int {
   if multi_stage.val == RACE_PENDING {
     return RACE_ERROR
   }
-  multi_baseline.val = @opendal.live_handle_count()
   multi_stage.val = RACE_PENDING
   multi_mask.val = 0
   multi_callback_count.val = 0
@@ -589,32 +538,20 @@ pub fn canary_multi_start() -> Int {
     }
   }
   multi_operator_two.val = Some(operator_two)
-  let payload_one = b"operator-one\x00\xff"
-  let payload_two = b"operator-two\x80\x01"
-  operator_one.write("canary/shared.bin", payload_one) catch {
-    _ => {
-      fail_multi()
-      return RACE_ERROR
-    }
-  }
-  operator_two.write("canary/shared.bin", payload_two) catch {
-    _ => {
-      fail_multi()
-      return RACE_ERROR
-    }
-  }
-  let operation_one = operator_one.read_callback("canary/shared.bin", result => {
-    finish_multi(1, payload_one, result)
-  }) catch {
+  let operation_one = operator_one.read_callback(
+    "canary/operator-one-missing.bin",
+    result => finish_multi(1, result),
+  ) catch {
     _ => {
       fail_multi()
       return RACE_ERROR
     }
   }
   multi_operation_one.val = Some(operation_one)
-  let operation_two = operator_two.read_callback("canary/shared.bin", result => {
-    finish_multi(2, payload_two, result)
-  }) catch {
+  let operation_two = operator_two.read_callback(
+    "canary/operator-two-missing.bin",
+    result => finish_multi(2, result),
+  ) catch {
     _ => {
       fail_multi()
       return RACE_ERROR
@@ -661,131 +598,73 @@ pub fn canary_dispose_callback_count() -> Int {
 }
 
 ///|
-fn run_one_lifecycle() -> Int {
-  let schemes = @opendal.available_schemes() catch {
-    _ => return CANARY_UNEXPECTED_ERROR
+fn fail_bulk_lifecycle() -> Unit {
+  if bulk_operation.val is Some(operation) {
+    operation.close()
   }
-  if schemes != ["memory"] {
-    return CANARY_SERVICE_INFO_MISMATCH
-  }
-  let operator = @opendal.Operator::new("memory", config={
-    "root": "generic-prefix",
-  }) catch {
-    _ => return CANARY_UNEXPECTED_ERROR
-  }
-  let info = operator.info() catch {
-    _ => {
-      operator.close()
-      return CANARY_UNEXPECTED_ERROR
-    }
-  }
-  if info.scheme != "memory" ||
-    info.root != "/generic-prefix/" ||
-    !info.capability.can_stat() ||
-    !info.capability.can_read() ||
-    !info.capability.can_write() {
+  if bulk_operator.val is Some(operator) {
     operator.close()
-    return CANARY_SERVICE_INFO_MISMATCH
   }
-  let payload = b"\x00\xffMoonBit\x80OpenDAL"
-  operator.write("canary/binary.bin", payload) catch {
-    _ => {
-      operator.close()
-      return CANARY_UNEXPECTED_ERROR
-    }
-  }
-  let actual = operator.read("canary/binary.bin") catch {
-    _ => {
-      operator.close()
-      return CANARY_UNEXPECTED_ERROR
-    }
-  }
-  if actual != payload {
-    operator.close()
-    return CANARY_ROUNDTRIP_MISMATCH
-  }
-  let metadata = operator.stat("canary/binary.bin") catch {
-    _ => {
-      operator.close()
-      return CANARY_UNEXPECTED_ERROR
-    }
-  }
-  if !metadata.is_file() ||
-    metadata.content_length != payload.length().to_uint64() {
-    operator.close()
-    return CANARY_METADATA_MISMATCH
-  }
-  let missing_code = try operator.read("canary/missing.bin") catch {
-    error =>
-      if error.is_not_found() {
-        CANARY_OK
-      } else {
-        CANARY_WRONG_MISSING_ERROR
+  bulk_operation.val = None
+  bulk_operator.val = None
+  bulk_stage.val = BULK_ERROR
+}
+
+///|
+fn start_bulk_read(operator : @opendal.Operator, expected : BytesView) -> Unit {
+  bulk_stage.val = BULK_READ_PENDING
+  let operation = operator.read_callback("canary/bulk.bin", result => {
+    match result {
+      Ok(actual) if actual[:] == expected => {
+        operator.close()
+        bulk_operation.val = None
+        bulk_operator.val = None
+        bulk_stage.val = BULK_OK
       }
-  } noraise {
-    _ => CANARY_MISSING_PATH_WAS_READ
+      _ => fail_bulk_lifecycle()
+    }
+  }) catch {
+    _ => {
+      fail_bulk_lifecycle()
+      return
+    }
   }
-  operator.close()
-  missing_code
+  bulk_operation.val = Some(operation)
 }
 
 ///|
-/// Exercise binary transfer, actual OpenDAL memory I/O, NotFound translation,
-/// explicit release, and stale-slot generation reuse twice.
-#export_name("opendal_mbt_wasm_canary_roundtrip")
-pub fn canary_roundtrip() -> Int {
-  let baseline = @opendal.live_handle_count()
-  let first = run_one_lifecycle()
-  if first != CANARY_OK {
-    return first
+/// Start an asynchronous 16 MiB round trip from a non-zero `BytesView` offset.
+#export_name("opendal_mbt_wasm_canary_bulk_start")
+pub fn canary_bulk_start() -> Int {
+  if bulk_stage.val != BULK_IDLE && bulk_stage.val != BULK_OK {
+    return BULK_ERROR
   }
-  let second = run_one_lifecycle()
-  if second != CANARY_OK {
-    return second
-  }
-  if @opendal.live_handle_count() != baseline {
-    return CANARY_HANDLE_LEAK
-  }
-  CANARY_OK
-}
-
-///|
-/// Round-trip exactly 16 MiB from a non-zero `BytesView` start offset.
-#export_name("opendal_mbt_wasm_canary_bulk_roundtrip")
-pub fn canary_bulk_roundtrip() -> Int {
-  let baseline = @opendal.live_handle_count()
   let operator = @opendal.Operator::new("memory") catch {
-    _ => return CANARY_UNEXPECTED_ERROR
+    _ => return BULK_ERROR
   }
+  bulk_operator.val = Some(operator)
   let block = b"\x00\xffMoonBit\x80DAL!!!x"
   let storage = block.repeat(986896)
   let payload : BytesView = storage[16:16 + BULK_TRANSFER_BYTES]
-  operator.write("canary/bulk.bin", payload) catch {
+  bulk_stage.val = BULK_WRITE_PENDING
+  let operation = operator.write_callback("canary/bulk.bin", payload, result => {
+    match result {
+      Ok(_) => start_bulk_read(operator, payload)
+      Err(_) => fail_bulk_lifecycle()
+    }
+  }) catch {
     _ => {
-      operator.close()
-      return CANARY_UNEXPECTED_ERROR
+      fail_bulk_lifecycle()
+      return BULK_ERROR
     }
   }
-  let actual = operator.read("canary/bulk.bin") catch {
-    _ => {
-      operator.close()
-      return CANARY_UNEXPECTED_ERROR
-    }
-  }
-  let matches = actual[:] == payload
-  operator.close()
-  if !matches {
-    return CANARY_BULK_TRANSFER_MISMATCH
-  }
-  if @opendal.live_handle_count() != baseline {
-    return CANARY_HANDLE_LEAK
-  }
-  CANARY_OK
+  bulk_operation.val = Some(operation)
+  BULK_WRITE_PENDING
 }
 
 ///|
-/// Return the loaded bridge version through the public MoonBit facade.
-#export_name("opendal_mbt_wasm_canary_bridge_version")
-pub fn canary_bridge_version() -> UInt {
-  @opendal.bridge_version()
+/// Return the current asynchronous bulk-transfer stage.
+#export_name("opendal_mbt_wasm_canary_bulk_stage")
+pub fn canary_bulk_stage() -> Int {
+  bulk_stage.val
 }

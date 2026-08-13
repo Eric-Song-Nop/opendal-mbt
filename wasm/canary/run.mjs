@@ -14,12 +14,46 @@ function assert(condition, message) {
   }
 }
 
-function assertBulkTransfer(runtime) {
+function nextTurn() {
+  return new Promise((resolveNextTurn) => setTimeout(resolveNextTurn, 0));
+}
+
+async function waitFor(read, expected, description) {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const actual = read();
+    if (actual === expected) {
+      return;
+    }
+    if (actual < 0) {
+      throw new Error(`${description} failed with state ${actual}`);
+    }
+    await nextTurn();
+  }
+  throw new Error(`timed out waiting for ${description}; found ${read()}`);
+}
+
+async function assertBulkTransfer(runtime) {
+  const bridge = runtime.bridge.exports;
+  const liveBefore = bridge.opendal_mbt_wasm_live_handle_count();
   const before = runtime.transfer.stats();
   const moonMemoryBefore = runtime.moonbit.exports.memory.buffer;
   const bridgeMemoryBefore = runtime.bridge.exports.memory.buffer;
-  const status = runtime.exports.opendal_mbt_wasm_canary_bulk_roundtrip();
-  assert(status === 0, `16 MiB bulk canary failed with status ${status}`);
+  const status = runtime.exports.opendal_mbt_wasm_canary_bulk_start();
+  assert(status === 1, `16 MiB bulk canary failed to start: ${status}`);
+  assert(
+    runtime.exports.opendal_mbt_wasm_canary_bulk_stage() === 1,
+    "16 MiB bulk canary completed synchronously",
+  );
+  await waitFor(
+    () => runtime.exports.opendal_mbt_wasm_canary_bulk_stage(),
+    3,
+    "16 MiB asynchronous bulk transfer",
+  );
+  assert(
+    bridge.opendal_mbt_wasm_live_handle_count() === liveBefore,
+    "16 MiB bulk canary left live resource handles",
+  );
   const after = runtime.transfer.stats();
   assert(
     after.moonToBridgeCalls - before.moonToBridgeCalls ===
@@ -48,8 +82,6 @@ function assertBulkTransfer(runtime) {
     "16 MiB transfer did not exercise bridge memory.grow",
   );
 
-  const bridge = runtime.bridge.exports;
-  const liveBefore = bridge.opendal_mbt_wasm_live_handle_count();
   bridge.opendal_mbt_wasm_last_error_clear();
   assert(
     bridge.opendal_mbt_wasm_buffer_new_sized(64 * 1024 * 1024 + 1) === 0,
@@ -64,6 +96,29 @@ function assertBulkTransfer(runtime) {
     "oversized allocation published a partial buffer handle",
   );
   bridge.opendal_mbt_wasm_last_error_clear();
+}
+
+async function assertAsyncLifecycle(runtime, iteration) {
+  const bridge = runtime.bridge.exports;
+  const liveBefore = bridge.opendal_mbt_wasm_live_handle_count();
+  const status = runtime.exports.opendal_mbt_wasm_canary_async_start();
+  assert(
+    status === 1,
+    `asynchronous lifecycle ${iteration} failed to start: ${status}`,
+  );
+  assert(
+    runtime.exports.opendal_mbt_wasm_canary_async_stage() === 1,
+    `asynchronous lifecycle ${iteration} completed synchronously`,
+  );
+  await waitFor(
+    () => runtime.exports.opendal_mbt_wasm_canary_async_stage(),
+    9,
+    `asynchronous OpenDAL lifecycle ${iteration}`,
+  );
+  assert(
+    bridge.opendal_mbt_wasm_live_handle_count() === liveBefore,
+    `asynchronous lifecycle ${iteration} left live resource handles`,
+  );
 }
 
 async function readProcessedBridge(path) {
@@ -95,7 +150,7 @@ async function main() {
     bridge: await readProcessedBridge(bridgePath),
     moonbit: await readFile(resolve(moonbitPath)),
   });
-  const version = runtime.exports.opendal_mbt_wasm_canary_bridge_version();
+  const version = runtime.bridge.exports.opendal_mbt_wasm_abi_version();
   if (version !== expectedAbiVersion) {
     throw new Error(
       `bridge ABI mismatch: expected 0x${expectedAbiVersion.toString(16)}, ` +
@@ -107,10 +162,9 @@ async function main() {
   if (staleRejected !== 1) {
     throw new Error("bridge accepted a released handle after slot reuse");
   }
-  assertBulkTransfer(runtime);
-  const status = runtime.exports.opendal_mbt_wasm_canary_roundtrip();
-  if (status !== 0) {
-    throw new Error(`OpenDAL MoonBit Wasm canary failed with status ${status}`);
+  await assertBulkTransfer(runtime);
+  for (let iteration = 1; iteration <= 2; iteration += 1) {
+    await assertAsyncLifecycle(runtime, iteration);
   }
   runtime.dispose();
   if (runtime.bridge.exports.opendal_mbt_wasm_live_handle_count() !== 0) {
