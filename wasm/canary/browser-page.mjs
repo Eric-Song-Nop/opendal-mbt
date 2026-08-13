@@ -107,6 +107,22 @@ try {
     exports.opendal_mbt_wasm_canary_cancel_start() === 0,
     "cancel-before-ready canary did not start",
   );
+  const diagnosticBuffer =
+    runtime.bridge.exports.opendal_mbt_wasm_buffer_new();
+  assert(diagnosticBuffer !== 0, "could not allocate diagnostic buffer");
+  assert(
+    runtime.bridge.exports.opendal_mbt_wasm_buffer_push(
+      diagnosticBuffer,
+      256,
+    ) === 5,
+    "could not seed the sticky diagnostic",
+  );
+  assert(
+    runtime.bridge.exports.opendal_mbt_wasm_buffer_release(
+      diagnosticBuffer,
+    ) === 0,
+    "could not release diagnostic buffer",
+  );
   await nextTurn();
   await nextTurn();
   await nextTurn();
@@ -118,6 +134,11 @@ try {
     exports.opendal_mbt_wasm_canary_cancel_is_clean() === 1,
     "cancel-before-ready left live resource handles",
   );
+  assert(
+    runtime.bridge.exports.opendal_mbt_wasm_last_error_code() === 5,
+    "an orphan scheduler poll overwrote the caller's sticky diagnostic",
+  );
+  runtime.bridge.exports.opendal_mbt_wasm_last_error_clear();
 
   runtime.dispose();
   assert(
@@ -129,6 +150,7 @@ try {
     pendingTasks: 8,
     heartbeat: true,
     cancellation: "suppressed",
+    diagnostics: "isolated",
   });
 } catch (error) {
   runtime?.dispose();

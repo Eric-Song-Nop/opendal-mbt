@@ -6,14 +6,27 @@ const TASK_READY = 2;
 
 function createTaskHost(bridgeExports) {
   let disposed = false;
-  const timers = new Set();
+  const waits = new Map();
 
-  function schedule(callback) {
-    const timer = setTimeout(() => {
-      timers.delete(timer);
+  function schedule(registration, callback) {
+    registration.timer = setTimeout(() => {
+      registration.timer = undefined;
       callback();
     }, 0);
-    timers.add(timer);
+  }
+
+  function cancelWait(handle) {
+    const key = handle >>> 0;
+    const registration = waits.get(key);
+    if (registration === undefined) {
+      return;
+    }
+    waits.delete(key);
+    registration.cancelled = true;
+    if (registration.timer !== undefined) {
+      clearTimeout(registration.timer);
+      registration.timer = undefined;
+    }
   }
 
   function waitTask(handle, callback) {
@@ -23,28 +36,39 @@ function createTaskHost(bridgeExports) {
     if (typeof callback !== "function") {
       throw new TypeError("task callback must be a function");
     }
+    const key = handle >>> 0;
+    cancelWait(key);
+    const registration = { cancelled: false, timer: undefined };
+    waits.set(key, registration);
     const poll = () => {
-      if (disposed) {
+      if (
+        disposed ||
+        registration.cancelled ||
+        waits.get(key) !== registration
+      ) {
         return;
       }
-      const state = bridgeExports.opendal_mbt_wasm_task_state(handle);
+      const state = bridgeExports.opendal_mbt_wasm_task_state(key);
       if (state === TASK_PENDING) {
-        schedule(poll);
-      } else if (state === TASK_READY) {
-        callback(handle);
+        schedule(registration, poll);
+        return;
+      }
+      waits.delete(key);
+      registration.cancelled = true;
+      if (state === TASK_READY) {
+        callback(key);
       }
     };
     queueMicrotask(poll);
   }
 
   return {
-    imports: { wait_task: waitTask },
+    imports: { wait_task: waitTask, cancel_wait: cancelWait },
     dispose() {
       disposed = true;
-      for (const timer of timers) {
-        clearTimeout(timer);
+      for (const handle of waits.keys()) {
+        cancelWait(handle);
       }
-      timers.clear();
     },
   };
 }

@@ -100,9 +100,6 @@ fn bridge_operator_list_start(
 ) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_operator_list_start"
 
 ///|
-fn bridge_task_state(handle : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_task_state"
-
-///|
 fn bridge_task_take(handle : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_task_take"
 
 ///|
@@ -152,6 +149,9 @@ fn bridge_entry_list_release(handle : UInt) -> UInt = "opendal_mbt_bridge" "open
 
 ///|
 fn host_wait_task(handle : UInt, callback : (UInt) -> Unit) -> Unit = "opendal_mbt_host" "wait_task"
+
+///|
+fn host_cancel_wait(handle : UInt) -> Unit = "opendal_mbt_host" "cancel_wait"
 
 ///|
 fn bridge_operator_release(handle : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_operator_release"

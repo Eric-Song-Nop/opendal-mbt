@@ -190,11 +190,11 @@ make wasm-browser-canary
 
 The browser fixture forces create-dir, write, read, `stat`, bounded list, two
 idempotent recursive deletes, and a missing read to return `Pending` on their
-first Rust poll. It rejects synchronous completion, lets a previously queued browser
-heartbeat run before readiness, completes the MoonBit callback chain,
+first Rust poll. It rejects synchronous completion, lets a previously queued
+browser heartbeat run before readiness, completes the MoonBit callback chain,
 suppresses a cancel-before-ready callback, and checks the live-handle baseline
 plus `runtime.dispose()`. Its success payload records `pendingTasks: 8`,
-`heartbeat: true`, and `cancellation: "suppressed"`.
+`heartbeat: true`, `cancellation: "suppressed"`, and `diagnostics: "isolated"`.
 Only this Chrome/Chromium run is evidence for `Pending -> Ready` and a
 responsive browser event loop; the Node command is not.
 
@@ -475,6 +475,8 @@ The current slice implements these required semantics:
 - callback delivery begins from a later microtask/timer turn to avoid
   re-entering the initiating Rust or MoonBit frame;
 - cancelling a task prevents later delivery to MoonBit;
+- cancellation unregisters the loader wait before releasing the task, so an
+  orphan scheduler poll cannot overwrite an unrelated sticky diagnostic;
 - cancellation is logical; true cancellation of an underlying Fetch or OPFS
   promise is not claimed;
 - an in-flight task owns an OpenDAL operator clone, so closing the MoonBit
@@ -925,7 +927,8 @@ Implemented evidence:
   idempotent recursive delete, and owned `NotFound`;
 - later-turn callback delivery and a browser heartbeat that runs before
   readiness;
-- cancel-before-ready callback suppression and live-handle restoration;
+- cancel-before-ready callback suppression, scheduler diagnostic isolation,
+  and live-handle restoration;
 - operator close while a cloned task is pending, plus idempotent instance
   teardown.
 

@@ -5,8 +5,8 @@ first, then instantiates the MoonBit Wasm consumer with three repository-owned
 import groups:
 
 - the Rust scalar exports as `opendal_mbt_bridge`;
-- `opendal_mbt_host.wait_task` for later-turn task polling and callback
-  delivery;
+- `opendal_mbt_host.wait_task` and `cancel_wait` for later-turn task polling,
+  callback delivery, and explicit wait deregistration;
 - `moonbit:ffi.make_closure` for MoonBit Wasm closure imports.
 
 The application does not construct this import table:
@@ -36,10 +36,12 @@ local path strings are intentionally not interpreted as files.
 
 For callback operations, `wait_task` begins polling in a microtask. A pending
 task is polled again from a later zero-delay timer turn; a ready task receives
-its MoonBit callback. This keeps callback delivery out of the initiating
-MoonBit/Rust stack. `dispose()` is idempotent: it cancels loader timers and
-permanently tears down the Rust instance so late task completions are inert.
-Call it when the application instance is no longer used.
+its MoonBit callback. Cancelling an `Operation` deregisters its wait before the
+task handle is released, so an already queued poll cannot touch a stale handle
+or overwrite an unrelated bridge diagnostic. This keeps callback delivery out
+of the initiating MoonBit/Rust stack. `dispose()` is idempotent: it cancels all
+registered waits and permanently tears down the Rust instance so late task
+completions are inert. Call it when the application instance is no longer used.
 
 The Node runner currently invokes only the synchronous round-trip export, so
 it is an ABI smoke test. The real Chrome/Chromium runner in

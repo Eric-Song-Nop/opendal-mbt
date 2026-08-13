@@ -1,7 +1,4 @@
 ///|
-const TASK_READY = 2U
-
-///|
 const COMPLETION_WRITE = 1U
 
 ///|
@@ -32,6 +29,7 @@ pub fn Operation::state(self : Operation) -> OperationState {
 /// continue, but any late completion is discarded by the bridge.
 pub fn Operation::cancel(self : Operation) -> Unit {
   if self.state is Pending && self.handle != 0U {
+    host_cancel_wait(self.handle)
     ignore(bridge_task_cancel(self.handle))
     ignore(bridge_task_release(self.handle))
     self.handle = 0U
@@ -84,11 +82,7 @@ fn completion_error(
 
 ///|
 fn start_wait(operation : Operation, finish : (UInt) -> Unit) -> Unit {
-  host_wait_task(operation.handle, task => {
-    if bridge_task_state(task) == TASK_READY {
-      finish(task)
-    }
-  })
+  host_wait_task(operation.handle, finish)
 }
 
 ///|

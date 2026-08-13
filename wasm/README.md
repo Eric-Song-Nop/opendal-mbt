@@ -118,7 +118,7 @@ loopback HTTP, waits for the page to report, and prints a successful result of
 the following shape:
 
 ```json
-{"ok":true,"pendingTasks":8,"heartbeat":true,"cancellation":"suppressed"}
+{"ok":true,"pendingTasks":8,"heartbeat":true,"cancellation":"suppressed","diagnostics":"isolated"}
 ```
 
 ## Package surface
@@ -165,8 +165,10 @@ path is the explicitly experimental callback `Operation` API.
 
 Cancellation is **logical cancellation**. It suppresses the user callback and
 makes a late completion inert, but it does not claim to abort the underlying
-OpenDAL future or browser I/O. `runtime.dispose()` stops loader polling, clears
-the bridge arena, and makes later task completion inert.
+OpenDAL future or browser I/O. The loader unregisters its wait before MoonBit
+releases the task, preventing orphan polls from changing the caller-visible
+sticky diagnostic. `runtime.dispose()` stops loader polling, clears the bridge
+arena, and makes later task completion inert.
 
 The synchronous methods remain only for ABI smoke coverage. They still poll
 once with a no-op waker and report code `9` if an OpenDAL future suspends; they
