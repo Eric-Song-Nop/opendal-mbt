@@ -28,6 +28,8 @@ const MAX_BUFFER_LENGTH: usize = 64 * 1024 * 1024;
 const MAX_TRANSFER_CHUNK: usize = 256 * 1024;
 const MAX_LIST_ENTRIES: usize = 65_536;
 const MAX_LIST_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_CONFIG_ENTRIES: usize = 1_024;
+const MAX_CONFIG_BYTES: usize = 1024 * 1024;
 
 const STATUS_OK: u32 = 0;
 const SCALAR_ERROR: i32 = -1;
@@ -174,10 +176,10 @@ impl ResourceKind {
     }
 }
 
-#[derive(Clone)]
 struct OperatorBuilder {
     scheme: String,
     config: Vec<(String, String)>,
+    config_bytes: usize,
 }
 
 struct EntrySnapshot {
@@ -648,8 +650,8 @@ fn path_and_operator(
         let state = state.borrow();
         let operator = state.arena.operator(operator_handle)?.clone();
         let path = std::str::from_utf8(state.arena.buffer(path_handle)?)
-            .map_err(|_| BridgeError::InvalidUtf8)?
-            .to_owned();
+            .map_err(|_| BridgeError::InvalidUtf8)
+            .and_then(try_owned_string)?;
         Ok((operator, path))
     })
 }
@@ -658,8 +660,8 @@ fn owned_utf8_buffer(handle: u32) -> Result<String, BridgeError> {
     STATE.with(|state| {
         let state = state.borrow();
         std::str::from_utf8(state.arena.buffer(handle)?)
-            .map(str::to_owned)
             .map_err(|_| BridgeError::InvalidUtf8)
+            .and_then(try_owned_string)
     })
 }
 
@@ -839,9 +841,60 @@ fn insert_buffer(buffer: impl Into<Vec<u8>>) -> Result<u32, BridgeError> {
     insert_resource(Resource::Buffer(buffer))
 }
 
-fn build_operator(builder: &OperatorBuilder) -> Result<Operator, BridgeError> {
+fn try_clone_operator_builder(builder: &OperatorBuilder) -> Result<OperatorBuilder, BridgeError> {
+    let mut config = Vec::new();
+    config
+        .try_reserve_exact(builder.config.len())
+        .map_err(|_| BridgeError::AllocationFailed)?;
+    for (key, value) in &builder.config {
+        config.push((try_owned_string(key)?, try_owned_string(value)?));
+    }
+    Ok(OperatorBuilder {
+        scheme: try_owned_string(&builder.scheme)?,
+        config,
+        config_bytes: builder.config_bytes,
+    })
+}
+
+fn push_operator_config(
+    builder: &mut OperatorBuilder,
+    key: String,
+    value: String,
+) -> Result<(), BridgeError> {
+    if builder
+        .config
+        .iter()
+        .any(|(existing, _)| existing.eq_ignore_ascii_case(&key))
+    {
+        return Err(BridgeError::InvalidArgument {
+            message: "duplicate config key".to_owned(),
+        });
+    }
+    if builder.config.len() >= MAX_CONFIG_ENTRIES {
+        return Err(BridgeError::InvalidArgument {
+            message: format!("config exceeds the {MAX_CONFIG_ENTRIES}-entry limit"),
+        });
+    }
+    let config_bytes = builder
+        .config_bytes
+        .checked_add(key.len())
+        .and_then(|length| length.checked_add(value.len()))
+        .filter(|length| *length <= MAX_CONFIG_BYTES)
+        .ok_or_else(|| BridgeError::InvalidArgument {
+            message: format!("config exceeds the {MAX_CONFIG_BYTES}-byte limit"),
+        })?;
+    builder
+        .config
+        .try_reserve(1)
+        .map_err(|_| BridgeError::AllocationFailed)?;
+    builder.config.push((key, value));
+    builder.config_bytes = config_bytes;
+    Ok(())
+}
+
+fn build_operator(builder: OperatorBuilder) -> Result<Operator, BridgeError> {
     opendal::init_default_registry();
-    Operator::via_iter(&builder.scheme, builder.config.clone()).map_err(BridgeError::from)
+    Operator::via_iter(&builder.scheme, builder.config).map_err(BridgeError::from)
 }
 
 fn capability_word(operator: &Operator, word: u32) -> Result<u64, BridgeError> {
@@ -1104,6 +1157,7 @@ pub extern "C" fn opendal_mbt_wasm_operator_builder_new(scheme_handle: u32) -> u
         insert_resource(Resource::OperatorBuilder(OperatorBuilder {
             scheme,
             config: Vec::new(),
+            config_bytes: 0,
         }))
     });
     handle_or_record_error(result)
@@ -1119,13 +1173,12 @@ pub extern "C" fn opendal_mbt_wasm_operator_builder_set(
     let result = owned_utf8_buffer(key_handle).and_then(|key| {
         let value = owned_utf8_buffer(value_handle)?;
         STATE.with(|state| {
-            state
-                .borrow_mut()
-                .arena
-                .operator_builder_mut(builder_handle)?
-                .config
-                .push((key, value));
-            Ok(())
+            let mut state = state.borrow_mut();
+            push_operator_config(
+                state.arena.operator_builder_mut(builder_handle)?,
+                key,
+                value,
+            )
         })
     });
     status(result)
@@ -1135,14 +1188,11 @@ pub extern "C" fn opendal_mbt_wasm_operator_builder_set(
 #[unsafe(no_mangle)]
 pub extern "C" fn opendal_mbt_wasm_operator_builder_build(builder_handle: u32) -> u32 {
     let result = STATE.with(|state| {
-        Ok(state
-            .borrow()
-            .arena
-            .operator_builder(builder_handle)?
-            .clone())
+        let state = state.borrow();
+        try_clone_operator_builder(state.arena.operator_builder(builder_handle)?)
     });
     handle_or_record_error(result.and_then(|builder| {
-        build_operator(&builder).and_then(|operator| insert_resource(Resource::Operator(operator)))
+        build_operator(builder).and_then(|operator| insert_resource(Resource::Operator(operator)))
     }))
 }
 
@@ -1208,8 +1258,8 @@ pub extern "C" fn opendal_mbt_wasm_operator_write(
         let state = state.borrow();
         let operator = state.arena.operator(operator_handle)?.clone();
         let path = std::str::from_utf8(state.arena.buffer(path_handle)?)
-            .map_err(|_| BridgeError::InvalidUtf8)?
-            .to_owned();
+            .map_err(|_| BridgeError::InvalidUtf8)
+            .and_then(try_owned_string)?;
         let data = try_owned_bytes(state.arena.buffer(data_handle)?)?;
         Ok((operator, path, data))
     });
@@ -1274,8 +1324,8 @@ pub extern "C" fn opendal_mbt_wasm_operator_write_start(
         let state = state.borrow();
         let operator = state.arena.operator(operator_handle)?.clone();
         let path = std::str::from_utf8(state.arena.buffer(path_handle)?)
-            .map_err(|_| BridgeError::InvalidUtf8)?
-            .to_owned();
+            .map_err(|_| BridgeError::InvalidUtf8)
+            .and_then(try_owned_string)?;
         let data = try_owned_bytes(state.arena.buffer(data_handle)?)?;
         Ok((operator, path, data))
     });
@@ -2065,6 +2115,69 @@ mod tests {
             STATUS_OK
         );
         assert_eq!(opendal_mbt_wasm_live_handle_count(), 0);
+        reset_state();
+    }
+
+    #[test]
+    fn generic_builder_rejects_duplicate_and_unbounded_config() {
+        reset_state();
+        let scheme = insert_test_buffer(b"memory");
+        let builder = opendal_mbt_wasm_operator_builder_new(scheme);
+        assert_ne!(builder, 0);
+        assert_eq!(opendal_mbt_wasm_buffer_release(scheme), STATUS_OK);
+
+        let upper_key = insert_test_buffer(b"Root");
+        let first_value = insert_test_buffer(b"first");
+        assert_eq!(
+            opendal_mbt_wasm_operator_builder_set(builder, upper_key, first_value),
+            STATUS_OK
+        );
+        assert_eq!(opendal_mbt_wasm_buffer_release(upper_key), STATUS_OK);
+        assert_eq!(opendal_mbt_wasm_buffer_release(first_value), STATUS_OK);
+
+        let lower_key = insert_test_buffer(b"root");
+        let second_value = insert_test_buffer(b"second");
+        assert_eq!(
+            opendal_mbt_wasm_operator_builder_set(builder, lower_key, second_value),
+            17
+        );
+        assert_eq!(opendal_mbt_wasm_last_error_code(), 17);
+        assert_eq!(opendal_mbt_wasm_last_error_clear(), STATUS_OK);
+        assert_eq!(opendal_mbt_wasm_buffer_release(lower_key), STATUS_OK);
+        assert_eq!(opendal_mbt_wasm_buffer_release(second_value), STATUS_OK);
+        STATE.with(|state| {
+            let state = state.borrow();
+            let builder = state.arena.operator_builder(builder).unwrap();
+            assert_eq!(builder.config.len(), 1);
+            assert_eq!(builder.config_bytes, 9);
+        });
+        assert_eq!(
+            opendal_mbt_wasm_operator_builder_release(builder),
+            STATUS_OK
+        );
+
+        let mut byte_limited = OperatorBuilder {
+            scheme: "memory".to_owned(),
+            config: Vec::new(),
+            config_bytes: MAX_CONFIG_BYTES,
+        };
+        assert!(matches!(
+            push_operator_config(&mut byte_limited, "x".to_owned(), String::new()),
+            Err(BridgeError::InvalidArgument { .. })
+        ));
+        assert!(byte_limited.config.is_empty());
+        assert_eq!(byte_limited.config_bytes, MAX_CONFIG_BYTES);
+
+        let mut entry_limited = OperatorBuilder {
+            scheme: "memory".to_owned(),
+            config: vec![("existing".to_owned(), String::new()); MAX_CONFIG_ENTRIES],
+            config_bytes: 0,
+        };
+        assert!(matches!(
+            push_operator_config(&mut entry_limited, "new".to_owned(), String::new()),
+            Err(BridgeError::InvalidArgument { .. })
+        ));
+        assert_eq!(entry_limited.config.len(), MAX_CONFIG_ENTRIES);
         reset_state();
     }
 
