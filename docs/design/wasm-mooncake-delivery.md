@@ -446,10 +446,10 @@ teardown() -> status
 
 Every operation copies its inputs into Rust-owned storage before `start`
 returns and clones the operator for the in-flight future. Rust drives the
-future with `wasm_bindgen_futures::spawn_local`. The memory canary adds a
-zero-delay timer wrapper to force at least one pending poll; this is a
-deterministic scheduling oracle, not a claim that every production service
-needs an artificial delay.
+future with `wasm_bindgen_futures::spawn_local`. Production tasks await that
+future directly. The memory canary explicitly enables a zero-delay timer
+wrapper to force at least one pending poll; this is a deterministic scheduling
+oracle, not a production-service delay.
 
 The implemented bridge task states are scalar `1` pending, `2` ready, `3`
 cancelled, and `4` consumed:
@@ -1110,7 +1110,7 @@ an interactive development session wait idly.
 | Moon facade | type/error conversion and compile-contract fixtures |
 | Node core-Wasm smoke | `make wasm-canary`: synchronous ABI/bootstrap, repeated lifecycle, teardown |
 | Core Wasm | import/export inspection and size record; no WASI/POSIX/thread surprises |
-| Browser runtime | `make wasm-browser-canary`: real Chrome/Chromium, eight forced-pending tasks, heartbeat, logical cancel suppression, cleanup |
+| Browser runtime | `make wasm-browser-canary`: real Chrome/Chromium, twelve explicitly checked forced-pending tasks, heartbeat, race/concurrency matrix, pending teardown |
 | Binary transfer | NUL/non-UTF-8, 16 MiB chunks, limits, memory growth |
 | Service fixtures | generic construction, reported capabilities, and each service's relevant persistence/security failures |
 | Packaging | fresh Mooncake consumer, no Rust/npm/checkout, relocatable output |

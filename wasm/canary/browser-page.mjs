@@ -114,6 +114,10 @@ try {
     "oversized allocation published a partial buffer handle",
   );
   runtime.bridge.exports.opendal_mbt_wasm_last_error_clear();
+  assert(
+    runtime.bridge.exports.opendal_mbt_wasm_canary_set_force_pending(1) === 0,
+    "could not enable the deterministic forced-Pending test hook",
+  );
 
   const pendingBefore = exports.opendal_mbt_wasm_canary_pending_poll_count();
   let heartbeat = false;

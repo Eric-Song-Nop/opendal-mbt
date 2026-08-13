@@ -124,7 +124,8 @@ fn finish_unit_operation(
 ///|
 /// Start a callback-based asynchronous write.
 ///
-/// The callback is always delivered from a later browser event-loop turn.
+/// The callback is delivered from a later microtask or timer turn, never from
+/// the initiating call stack.
 pub fn Operator::write_callback(
   self : Operator,
   path : StringView,
@@ -158,7 +159,8 @@ pub fn Operator::write_callback(
 ///|
 /// Start a callback-based asynchronous whole-object read.
 ///
-/// The callback is always delivered from a later browser event-loop turn.
+/// The callback is delivered from a later microtask or timer turn, never from
+/// the initiating call stack.
 pub fn Operator::read_callback(
   self : Operator,
   path : StringView,
@@ -219,7 +221,8 @@ pub fn Operator::read_callback(
 ///|
 /// Start a callback-based asynchronous metadata lookup.
 ///
-/// The callback is always delivered from a later browser event-loop turn.
+/// The callback is delivered from a later microtask or timer turn, never from
+/// the initiating call stack.
 pub fn Operator::stat_callback(
   self : Operator,
   path : StringView,

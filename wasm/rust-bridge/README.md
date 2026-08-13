@@ -12,9 +12,9 @@ two execution paths:
 - synchronous `write`, `read`, and `stat` poll exactly once and exist only for
   the Node ABI smoke test; a pending future returns `ASYNC_PENDING` (`9`);
 - `*_start` creates an owned task driven by
-  `wasm_bindgen_futures::spawn_local`. The canary wraps every task in a
-  zero-delay timer so its first poll is observably `Pending` before it can
-  become ready.
+  `wasm_bindgen_futures::spawn_local`. Production tasks await the OpenDAL
+  future directly. The browser canary explicitly enables a zero-delay wrapper
+  so each tested task has an observably `Pending` first poll.
 
 The task path is exercised in real Chrome/Chromium. This artifact currently
 compiles only the deterministic memory fixture, but construction is routed

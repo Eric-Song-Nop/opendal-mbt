@@ -506,6 +506,7 @@ struct State {
     arena: Arena,
     last_error: Option<BridgeError>,
     forced_pending_poll_count: u32,
+    force_pending_for_canary: bool,
     torn_down: bool,
 }
 
@@ -616,8 +617,13 @@ where
 
 fn start_task(future: impl Future<Output = Completion> + 'static) -> Result<u32, BridgeError> {
     let handle = insert_resource(Resource::Task(Task::Pending))?;
+    let force_pending = STATE.with(|state| state.borrow().force_pending_for_canary);
     wasm_bindgen_futures::spawn_local(async move {
-        let completion = ForcePending::new(future).await;
+        let completion = if force_pending {
+            ForcePending::new(future).await
+        } else {
+            future.await
+        };
         publish_task(handle, completion);
     });
     Ok(handle)
@@ -917,6 +923,18 @@ pub extern "C" fn opendal_mbt_wasm_feature_flags() -> u32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn opendal_mbt_wasm_canary_forced_pending_poll_count() -> u32 {
     STATE.with(|state| state.borrow().forced_pending_poll_count)
+}
+
+/// Enables or disables the forced-delay wrapper for tasks started afterwards.
+///
+/// This is a deterministic browser-test hook. Production tasks leave it
+/// disabled and await the OpenDAL future directly on `spawn_local`.
+#[unsafe(no_mangle)]
+pub extern "C" fn opendal_mbt_wasm_canary_set_force_pending(enabled: u32) -> u32 {
+    let result = scalar_bool(enabled, "force_pending").map(|enabled| {
+        STATE.with(|state| state.borrow_mut().force_pending_for_canary = enabled);
+    });
+    status(result)
 }
 
 /// Returns the number of resource handles that have not been released.
@@ -1243,9 +1261,9 @@ pub extern "C" fn opendal_mbt_wasm_operator_stat(operator_handle: u32, path_hand
 
 /// Starts an asynchronous write and returns an owned task handle.
 ///
-/// Inputs are copied before this function returns. The task cannot become
-/// ready synchronously because the canary scheduler forces one browser timer
-/// turn before polling the OpenDAL future.
+/// Inputs are copied before this function returns. `spawn_local` first polls
+/// the OpenDAL future after the initiating call returns; the browser canary
+/// can additionally enable a deterministic forced-pending timer.
 #[unsafe(no_mangle)]
 pub extern "C" fn opendal_mbt_wasm_operator_write_start(
     operator_handle: u32,
@@ -1966,6 +1984,19 @@ mod tests {
             checked_buffer_window(8, u32::MAX, 1),
             Err(BridgeError::IndexOutOfBounds { .. })
         ));
+    }
+
+    #[test]
+    fn forced_pending_is_an_explicit_canary_setting() {
+        reset_state();
+        assert!(!STATE.with(|state| state.borrow().force_pending_for_canary));
+        assert_eq!(opendal_mbt_wasm_canary_set_force_pending(1), STATUS_OK);
+        assert!(STATE.with(|state| state.borrow().force_pending_for_canary));
+        assert_eq!(opendal_mbt_wasm_canary_set_force_pending(0), STATUS_OK);
+        assert!(!STATE.with(|state| state.borrow().force_pending_for_canary));
+        assert_eq!(opendal_mbt_wasm_canary_set_force_pending(2), 17);
+        assert_eq!(opendal_mbt_wasm_last_error_code(), 17);
+        reset_state();
     }
 
     #[test]

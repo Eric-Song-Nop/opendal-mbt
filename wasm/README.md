@@ -153,11 +153,12 @@ changed or reused by this backend.
 ## Execution and cancellation limits
 
 The callback path owns Rust tasks and completions. Rust uses
-`wasm_bindgen_futures::spawn_local`; the canary wraps each operation in a
-zero-delay browser timer that guarantees at least one real `Pending` poll. The
-loader observes task state from later microtasks/timer turns and delivers the
-MoonBit callback only after the task is ready. Inputs are copied and the
-OpenDAL operator is cloned before a task starts.
+`wasm_bindgen_futures::spawn_local`; production tasks await the OpenDAL future
+directly. The browser canary explicitly enables a zero-delay wrapper that
+guarantees at least one real `Pending` poll. The loader observes task state
+from later microtasks/timer turns and delivers the MoonBit callback only after
+the task is ready. Inputs are copied and the OpenDAL operator is cloned before
+a task starts.
 
 This is a real browser scheduling proof, but it is not yet the stable MoonBit
 `async fn` API. Ordinary browser-hosted MoonBit async/await remains limited by
