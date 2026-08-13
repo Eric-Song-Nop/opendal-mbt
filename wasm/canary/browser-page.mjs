@@ -57,6 +57,64 @@ try {
   });
 
   const exports = runtime.exports;
+  const bulkTransferBytes = 16 * 1024 * 1024;
+  const bulkTransferChunks = bulkTransferBytes / (256 * 1024);
+  const transferBefore = runtime.transfer.stats();
+  const moonMemoryBefore = runtime.moonbit.exports.memory.buffer;
+  const bridgeMemoryBefore = runtime.bridge.exports.memory.buffer;
+  assert(
+    exports.opendal_mbt_wasm_canary_bulk_roundtrip() === 0,
+    "16 MiB bulk transfer canary failed",
+  );
+  const transferAfter = runtime.transfer.stats();
+  assert(
+    transferAfter.moonToBridgeCalls - transferBefore.moonToBridgeCalls ===
+      bulkTransferChunks + 3,
+    "Moon-to-bridge calls did not scale with the 256 KiB chunk count",
+  );
+  assert(
+    transferAfter.bridgeToMoonCalls - transferBefore.bridgeToMoonCalls ===
+      bulkTransferChunks,
+    "bridge-to-Moon calls did not scale with the 256 KiB chunk count",
+  );
+  assert(
+    transferAfter.moonToBridgeBytes - transferBefore.moonToBridgeBytes ===
+      bulkTransferBytes + 36,
+    "Moon-to-bridge bulk byte count was not exact",
+  );
+  assert(
+    transferAfter.bridgeToMoonBytes - transferBefore.bridgeToMoonBytes ===
+      bulkTransferBytes,
+    "bridge-to-Moon bulk byte count was not exact",
+  );
+  assert(
+    runtime.moonbit.exports.memory.buffer !== moonMemoryBefore,
+    "16 MiB transfer did not exercise MoonBit memory.grow",
+  );
+  assert(
+    runtime.bridge.exports.memory.buffer !== bridgeMemoryBefore,
+    "16 MiB transfer did not exercise bridge memory.grow",
+  );
+  const liveBeforeOversize =
+    runtime.bridge.exports.opendal_mbt_wasm_live_handle_count();
+  runtime.bridge.exports.opendal_mbt_wasm_last_error_clear();
+  assert(
+    runtime.bridge.exports.opendal_mbt_wasm_buffer_new_sized(
+      64 * 1024 * 1024 + 1,
+    ) === 0,
+    "bridge accepted a buffer above the 64 MiB materialization limit",
+  );
+  assert(
+    runtime.bridge.exports.opendal_mbt_wasm_last_error_code() === 3,
+    "oversized allocation did not report BufferTooLarge",
+  );
+  assert(
+    runtime.bridge.exports.opendal_mbt_wasm_live_handle_count() ===
+      liveBeforeOversize,
+    "oversized allocation published a partial buffer handle",
+  );
+  runtime.bridge.exports.opendal_mbt_wasm_last_error_clear();
+
   const pendingBefore = exports.opendal_mbt_wasm_canary_pending_poll_count();
   let heartbeat = false;
   const heartbeatPromise = new Promise((resolve) => {
@@ -151,6 +209,8 @@ try {
     heartbeat: true,
     cancellation: "suppressed",
     diagnostics: "isolated",
+    bulkTransferBytes,
+    bulkTransferChunks,
   });
 } catch (error) {
   runtime?.dispose();

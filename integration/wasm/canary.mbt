@@ -23,6 +23,12 @@ const CANARY_HANDLE_LEAK = 6
 const CANARY_SERVICE_INFO_MISMATCH = 7
 
 ///|
+const CANARY_BULK_TRANSFER_MISMATCH = 8
+
+///|
+const BULK_TRANSFER_BYTES = 16777216
+
+///|
 const ASYNC_IDLE = 0
 
 ///|
@@ -423,6 +429,40 @@ pub fn canary_roundtrip() -> Int {
   let second = run_one_lifecycle()
   if second != CANARY_OK {
     return second
+  }
+  if @opendal.live_handle_count() != baseline {
+    return CANARY_HANDLE_LEAK
+  }
+  CANARY_OK
+}
+
+///|
+/// Round-trip exactly 16 MiB from a non-zero `BytesView` start offset.
+#export_name("opendal_mbt_wasm_canary_bulk_roundtrip")
+pub fn canary_bulk_roundtrip() -> Int {
+  let baseline = @opendal.live_handle_count()
+  let operator = @opendal.Operator::new("memory") catch {
+    _ => return CANARY_UNEXPECTED_ERROR
+  }
+  let block = b"\x00\xffMoonBit\x80DAL!!!x"
+  let storage = block.repeat(986896)
+  let payload : BytesView = storage[16:16 + BULK_TRANSFER_BYTES]
+  operator.write("canary/bulk.bin", payload) catch {
+    _ => {
+      operator.close()
+      return CANARY_UNEXPECTED_ERROR
+    }
+  }
+  let actual = operator.read("canary/bulk.bin") catch {
+    _ => {
+      operator.close()
+      return CANARY_UNEXPECTED_ERROR
+    }
+  }
+  let matches = actual[:] == payload
+  operator.close()
+  if !matches {
+    return CANARY_BULK_TRANSFER_MISMATCH
   }
   if @opendal.live_handle_count() != baseline {
     return CANARY_HANDLE_LEAK
