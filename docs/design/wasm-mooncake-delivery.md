@@ -163,11 +163,11 @@ MoonBit application Wasm
   -> OpenDAL memory service
 ```
 
-The scalar ABI is version `0x0001_0003`. Its current feature bitmap is
-`0x0000_00ff`: memory service, poll-once synchronous canary, generation
+The scalar ABI is version `0x0001_0004`. Its current feature bitmap is
+`0x0000_01ff`: memory service, poll-once synchronous canary, generation
 handles, binary buffers, task ABI, generic operator construction through the
 compiled OpenDAL service registry, common create-dir/delete mutations, and
-bounded streaming list materialization. In addition to the original
+bounded streaming list materialization, and bounded bulk transfer. In addition to the original
 synchronous round trip, the bridge now has generation-checked task and
 completion handles, per-completion OpenDAL errors, logical cancellation,
 per-operator service identity and capabilities, and permanent instance
@@ -389,13 +389,13 @@ remain implemented by MoonBit facade code and Rust OpenDAL.
 The implemented memory canary already has the task/resource imports,
 repository-owned scheduling, `wasm_bindgen_futures` executor, and OpenDAL
 memory service in this graph. It currently exposes a callback facade rather
-than portable MoonBit `async fn`, and it still uses per-byte scalar transfers
-rather than the bounded bulk-copy step shown above.
+than portable MoonBit `async fn`. Public reads and writes use the bounded
+bulk-copy step shown above; per-byte exports remain canary-only oracles.
 
 ### Target bootstrap
 
-The current facade checks bridge ABI `0x0001_0003` and required feature bits
-`0x0000_00ff` before creating an operator. The artifact-manifest and
+The current facade checks bridge ABI `0x0001_0004` and required feature bits
+`0x0000_01ff` before creating an operator. The artifact-manifest and
 service-profile checks below remain product work.
 
 Before creating an operator, the facade and loader validate:
@@ -519,8 +519,8 @@ POSIX pipe, or UI-thread blocking facade is rejected.
 
 ### Bulk data transfer
 
-The current per-byte `buffer_push` and `buffer_get` calls remain useful as a
-canary oracle but must be removed from production read/write paths.
+The per-byte `buffer_push` and `buffer_get` calls remain useful as canary
+oracles but are not imported by production read/write paths.
 
 The host adapter can see both module memories and performs bounded copies:
 

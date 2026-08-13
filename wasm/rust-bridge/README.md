@@ -44,12 +44,12 @@ minimal dependency and feature set does not change native build profiles.
 
 ## ABI conventions
 
-- ABI version is `0x0001_0003` (major 1, minor 3).
-- Feature flags currently equal `0x0000_00ff`: bit 0 memory service, bit 1
+- ABI version is `0x0001_0004` (major 1, minor 4).
+- Feature flags currently equal `0x0000_01ff`: bit 0 memory service, bit 1
   poll-once canary, bit 2 generation handles, bit 3 binary buffers, and bit 4
   task ABI, bit 5 generic operator construction and service inspection, and
-  bit 6 common create-dir/delete mutations, and bit 7 bounded streaming list
-  materialization.
+  bit 6 common create-dir/delete mutations, bit 7 bounded streaming list
+  materialization, and bit 8 bounded cross-memory transfer.
 - Handles are positive signed 32-bit values as well as valid `u32` values; the
   generation field is 15 bits so MoonBit can carry them in an `Int` unchanged.
   A slot is permanently retired when that generation space is exhausted, so a
@@ -61,6 +61,9 @@ minimal dependency and feature set does not change native build profiles.
   failure.
 - `buffer_len`, `buffer_get`, and `metadata_is_file` return a non-negative
   value on success and `-1` on failure.
+- `buffer_new_sized` allocates at most 64 MiB and `buffer_data_ptr` exposes a
+  checked window of at most 256 KiB for one synchronous host copy. Its pointer
+  is invalid after the next call that mutates or releases that buffer.
 - Synchronous failures, task-start failures, and ABI misuse record a sticky
   last error. `last_error_take` converts it to an owned error handle. A failed
   asynchronous OpenDAL operation instead owns its error inside its completion;

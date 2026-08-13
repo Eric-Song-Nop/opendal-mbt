@@ -11,16 +11,10 @@ fn bridge_live_handle_count() -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_l
 fn bridge_canary_forced_pending_poll_count() -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_canary_forced_pending_poll_count"
 
 ///|
-fn bridge_buffer_new() -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_buffer_new"
-
-///|
-fn bridge_buffer_push(handle : UInt, byte : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_buffer_push"
+fn bridge_buffer_new_sized(length : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_buffer_new_sized"
 
 ///|
 fn bridge_buffer_len(handle : UInt) -> Int = "opendal_mbt_bridge" "opendal_mbt_wasm_buffer_len"
-
-///|
-fn bridge_buffer_get(handle : UInt, index : UInt) -> Int = "opendal_mbt_bridge" "opendal_mbt_wasm_buffer_get"
 
 ///|
 fn bridge_buffer_release(handle : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_buffer_release"
@@ -152,6 +146,26 @@ fn host_wait_task(handle : UInt, callback : (UInt) -> Unit) -> Unit = "opendal_m
 
 ///|
 fn host_cancel_wait(handle : UInt) -> Unit = "opendal_mbt_host" "cancel_wait"
+
+///|
+fn host_copy_moon_to_bridge(
+  handle : UInt,
+  bridge_offset : UInt,
+  moon_base : UInt,
+  moon_data_length : UInt,
+  moon_offset : UInt,
+  length : UInt,
+) -> UInt = "opendal_mbt_host" "copy_moon_to_bridge"
+
+///|
+fn host_copy_bridge_to_moon(
+  handle : UInt,
+  bridge_offset : UInt,
+  moon_base : UInt,
+  moon_data_length : UInt,
+  moon_offset : UInt,
+  length : UInt,
+) -> UInt = "opendal_mbt_host" "copy_bridge_to_moon"
 
 ///|
 fn bridge_operator_release(handle : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_operator_release"

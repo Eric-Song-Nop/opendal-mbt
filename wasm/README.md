@@ -140,11 +140,11 @@ The experimental `Eric-Song-Nop/opendal/wasm` package currently exposes:
 - bridge version/features plus canary-only live-handle and forced-pending
   diagnostics.
 
-The bridge ABI is version `0x0001_0003`. Its current feature bitmap is
-`0x0000_00ff`: memory service, poll-once synchronous canary, generation
+The bridge ABI is version `0x0001_0004`. Its current feature bitmap is
+`0x0000_01ff`: memory service, poll-once synchronous canary, generation
 handles, binary buffers, task ABI, generic operator construction through the
 compiled OpenDAL service registry, common create-dir/delete mutations, and
-bounded streaming list materialization.
+bounded streaming list materialization and cross-memory bulk transfer.
 
 The native `Eric-Song-Nop/opendal` package and its C/static-library ABI are not
 changed or reused by this backend.
@@ -180,8 +180,8 @@ must not be used for OPFS, S3, or other genuinely asynchronous services.
   contract, or keep the callback surface explicitly preview-only;
 - complete the task race/concurrency matrix beyond the current success,
   `NotFound`, cancel-before-ready, operator-close, and teardown cases;
-- replace per-byte public transfer with bounded bulk copy and verify large
-  binary values and `memory.grow` handling;
+- verify 16 MiB binary values and `memory.grow` handling through the bounded
+  bulk-copy path;
 - record exact imports/exports, artifact sizes, and startup evidence;
 - pin, checksum, and distribute the Rust Wasm companion artifact;
 - make a clean registry consumer acquire the companion module without a Rust

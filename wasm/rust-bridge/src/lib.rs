@@ -12,7 +12,7 @@ use std::task::{Context, Poll, Waker};
 use futures_util::TryStreamExt;
 use opendal::{ErrorKind, Metadata, Operator, OperatorRegistry, services::Memory};
 
-const ABI_VERSION: u32 = 0x0001_0003;
+const ABI_VERSION: u32 = 0x0001_0004;
 const FEATURE_MEMORY_SERVICE: u32 = 1 << 0;
 const FEATURE_POLL_ONCE_CANARY: u32 = 1 << 1;
 const FEATURE_GENERATION_HANDLES: u32 = 1 << 2;
@@ -21,9 +21,11 @@ const FEATURE_TASK_ABI: u32 = 1 << 4;
 const FEATURE_GENERIC_OPERATOR: u32 = 1 << 5;
 const FEATURE_CORE_MUTATIONS: u32 = 1 << 6;
 const FEATURE_BOUNDED_LIST: u32 = 1 << 7;
+const FEATURE_BULK_TRANSFER: u32 = 1 << 8;
 const MAX_SLOTS: usize = u16::MAX as usize;
 const MAX_GENERATION: u16 = i16::MAX as u16;
-const MAX_BUFFER_LENGTH: usize = i32::MAX as usize;
+const MAX_BUFFER_LENGTH: usize = 64 * 1024 * 1024;
+const MAX_TRANSFER_CHUNK: usize = 256 * 1024;
 const MAX_LIST_ENTRIES: usize = 65_536;
 const MAX_LIST_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
 
@@ -691,12 +693,70 @@ fn try_owned_string(value: &str) -> Result<String, BridgeError> {
 }
 
 fn try_owned_bytes(value: &[u8]) -> Result<Vec<u8>, BridgeError> {
+    if value.len() > MAX_BUFFER_LENGTH {
+        return Err(BridgeError::BufferTooLarge);
+    }
     let mut owned = Vec::new();
     owned
         .try_reserve_exact(value.len())
         .map_err(|_| BridgeError::AllocationFailed)?;
     owned.extend_from_slice(value);
     Ok(owned)
+}
+
+fn try_owned_opendal_buffer(buffer: opendal::Buffer) -> Result<Vec<u8>, BridgeError> {
+    let length = buffer.len();
+    if length > MAX_BUFFER_LENGTH {
+        return Err(BridgeError::BufferTooLarge);
+    }
+    let mut owned = Vec::new();
+    owned
+        .try_reserve_exact(length)
+        .map_err(|_| BridgeError::AllocationFailed)?;
+    for chunk in buffer {
+        owned.extend_from_slice(&chunk);
+    }
+    Ok(owned)
+}
+
+fn checked_buffer_window(
+    buffer_length: usize,
+    offset: u32,
+    length: u32,
+) -> Result<std::ops::Range<usize>, BridgeError> {
+    let offset = usize::try_from(offset).map_err(|_| BridgeError::LengthOverflow)?;
+    let length = usize::try_from(length).map_err(|_| BridgeError::LengthOverflow)?;
+    if length == 0 || length > MAX_TRANSFER_CHUNK {
+        return Err(BridgeError::InvalidArgument {
+            message: format!("transfer length must be 1..={MAX_TRANSFER_CHUNK}, found {length}"),
+        });
+    }
+    let end = offset
+        .checked_add(length)
+        .ok_or(BridgeError::IndexOutOfBounds {
+            index: u32::MAX,
+            length: buffer_length,
+        })?;
+    if end > buffer_length {
+        return Err(BridgeError::IndexOutOfBounds {
+            index: offset as u32,
+            length: buffer_length,
+        });
+    }
+    Ok(offset..end)
+}
+
+fn zeroed_buffer(length: u32) -> Result<Vec<u8>, BridgeError> {
+    let length = usize::try_from(length).map_err(|_| BridgeError::LengthOverflow)?;
+    if length > MAX_BUFFER_LENGTH {
+        return Err(BridgeError::BufferTooLarge);
+    }
+    let mut buffer = Vec::new();
+    buffer
+        .try_reserve_exact(length)
+        .map_err(|_| BridgeError::AllocationFailed)?;
+    buffer.resize(length, 0);
+    Ok(buffer)
 }
 
 fn push_entry_snapshot(
@@ -766,7 +826,11 @@ async fn collect_list(
 }
 
 fn insert_buffer(buffer: impl Into<Vec<u8>>) -> Result<u32, BridgeError> {
-    insert_resource(Resource::Buffer(buffer.into()))
+    let buffer = buffer.into();
+    if buffer.len() > MAX_BUFFER_LENGTH {
+        return Err(BridgeError::BufferTooLarge);
+    }
+    insert_resource(Resource::Buffer(buffer))
 }
 
 fn build_operator(builder: &OperatorBuilder) -> Result<Operator, BridgeError> {
@@ -844,6 +908,7 @@ pub extern "C" fn opendal_mbt_wasm_feature_flags() -> u32 {
         | FEATURE_GENERIC_OPERATOR
         | FEATURE_CORE_MUTATIONS
         | FEATURE_BOUNDED_LIST
+        | FEATURE_BULK_TRANSFER
 }
 
 /// Returns how many forced-delay tasks reached an actual pending poll.
@@ -898,13 +963,13 @@ pub extern "C" fn opendal_mbt_wasm_canary_stale_handle_rejected() -> u32 {
 /// Allocates an empty byte buffer and returns its handle, or `0` on failure.
 #[unsafe(no_mangle)]
 pub extern "C" fn opendal_mbt_wasm_buffer_new() -> u32 {
-    match insert_resource(Resource::Buffer(Vec::new())) {
-        Ok(handle) => handle,
-        Err(error) => {
-            record_error(error);
-            0
-        }
-    }
+    handle_or_record_error(insert_buffer(Vec::new()))
+}
+
+/// Allocates a zeroed byte buffer with a fixed length, or returns `0`.
+#[unsafe(no_mangle)]
+pub extern "C" fn opendal_mbt_wasm_buffer_new_sized(length: u32) -> u32 {
+    handle_or_record_error(zeroed_buffer(length).and_then(insert_buffer))
 }
 
 /// Appends one byte and returns a status code.
@@ -962,6 +1027,21 @@ pub extern "C" fn opendal_mbt_wasm_buffer_get(handle: u32, index: u32) -> i32 {
             SCALAR_ERROR
         }
     }
+}
+
+/// Returns a checked mutable buffer window pointer, or `0` on failure.
+///
+/// The pointer remains valid only until the next bridge call that can mutate
+/// or release this buffer. A window is limited to `MAX_TRANSFER_CHUNK` bytes.
+#[unsafe(no_mangle)]
+pub extern "C" fn opendal_mbt_wasm_buffer_data_ptr(handle: u32, offset: u32, length: u32) -> u32 {
+    let result = STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let buffer = state.arena.buffer_mut(handle)?;
+        let range = checked_buffer_window(buffer.len(), offset, length)?;
+        u32::try_from(buffer[range].as_mut_ptr() as usize).map_err(|_| BridgeError::LengthOverflow)
+    });
+    handle_or_record_error(result)
 }
 
 /// Releases a buffer handle and returns a status code.
@@ -1112,7 +1192,7 @@ pub extern "C" fn opendal_mbt_wasm_operator_write(
         let path = std::str::from_utf8(state.arena.buffer(path_handle)?)
             .map_err(|_| BridgeError::InvalidUtf8)?
             .to_owned();
-        let data = state.arena.buffer(data_handle)?.to_vec();
+        let data = try_owned_bytes(state.arena.buffer(data_handle)?)?;
         Ok((operator, path, data))
     });
 
@@ -1131,7 +1211,7 @@ pub extern "C" fn opendal_mbt_wasm_operator_write(
 pub extern "C" fn opendal_mbt_wasm_operator_read(operator_handle: u32, path_handle: u32) -> u32 {
     let result = path_and_operator(operator_handle, path_handle).and_then(|(operator, path)| {
         let buffer = poll_once(operator.read(&path))?.map_err(BridgeError::from)?;
-        insert_resource(Resource::Buffer(buffer.to_vec()))
+        try_owned_opendal_buffer(buffer).and_then(insert_buffer)
     });
     match result {
         Ok(handle) => handle,
@@ -1178,7 +1258,7 @@ pub extern "C" fn opendal_mbt_wasm_operator_write_start(
         let path = std::str::from_utf8(state.arena.buffer(path_handle)?)
             .map_err(|_| BridgeError::InvalidUtf8)?
             .to_owned();
-        let data = state.arena.buffer(data_handle)?.to_vec();
+        let data = try_owned_bytes(state.arena.buffer(data_handle)?)?;
         Ok((operator, path, data))
     });
     let result = inputs.and_then(|(operator, path, data)| {
@@ -1203,13 +1283,10 @@ pub extern "C" fn opendal_mbt_wasm_operator_read_start(
 ) -> u32 {
     let result = path_and_operator(operator_handle, path_handle).and_then(|(operator, path)| {
         start_task(async move {
-            Completion::Read(
-                operator
-                    .read(&path)
-                    .await
-                    .map(|buffer| buffer.to_vec())
-                    .map_err(BridgeError::from),
-            )
+            Completion::Read(match operator.read(&path).await {
+                Ok(buffer) => try_owned_opendal_buffer(buffer),
+                Err(error) => Err(BridgeError::from(error)),
+            })
         })
     });
     handle_or_record_error(result)
@@ -1436,7 +1513,7 @@ pub extern "C" fn opendal_mbt_wasm_completion_take_buffer(handle: u32) -> u32 {
         let Completion::Read(Ok(buffer)) = completion else {
             unreachable!("completion kind and status checked before removal")
         };
-        STATE.with(|state| state.borrow_mut().arena.insert(Resource::Buffer(buffer)))
+        insert_buffer(buffer)
     });
     handle_or_record_error(result)
 }
@@ -1485,6 +1562,11 @@ fn take_successful_completion(handle: u32, expected_kind: u32) -> Result<Complet
         }
         if let Some(error) = completion.error() {
             return Err(error.clone());
+        }
+        if let Completion::Read(Ok(buffer)) = completion
+            && buffer.len() > MAX_BUFFER_LENGTH
+        {
+            return Err(BridgeError::BufferTooLarge);
         }
         state
             .arena
@@ -1803,7 +1885,7 @@ pub extern "C" fn opendal_mbt_wasm_error_message(handle: u32) -> u32 {
             let state = state.borrow();
             Ok(state.arena.error(handle)?.to_string().into_bytes())
         })
-        .and_then(|message| insert_resource(Resource::Buffer(message)));
+        .and_then(insert_buffer);
     match result {
         Ok(message_handle) => message_handle,
         Err(error) => {
@@ -1839,6 +1921,51 @@ mod tests {
         let value = STATE.with(|state| state.borrow().arena.buffer(handle).unwrap().to_vec());
         assert_eq!(opendal_mbt_wasm_buffer_release(handle), STATUS_OK);
         value
+    }
+
+    #[test]
+    fn sized_buffers_are_zeroed_and_bounded() {
+        reset_state();
+        let buffer = opendal_mbt_wasm_buffer_new_sized(4);
+        assert_ne!(buffer, 0);
+        assert_eq!(opendal_mbt_wasm_buffer_len(buffer), 4);
+        for index in 0..4 {
+            assert_eq!(opendal_mbt_wasm_buffer_get(buffer, index), 0);
+        }
+        assert_eq!(opendal_mbt_wasm_buffer_release(buffer), STATUS_OK);
+
+        assert_eq!(
+            opendal_mbt_wasm_buffer_new_sized((MAX_BUFFER_LENGTH + 1) as u32),
+            0
+        );
+        assert_eq!(opendal_mbt_wasm_last_error_code(), 3);
+        assert_eq!(opendal_mbt_wasm_last_error_clear(), STATUS_OK);
+        assert_eq!(opendal_mbt_wasm_live_handle_count(), 0);
+        reset_state();
+    }
+
+    #[test]
+    fn transfer_windows_are_non_empty_bounded_and_in_range() {
+        assert_eq!(
+            checked_buffer_window(MAX_TRANSFER_CHUNK, 0, MAX_TRANSFER_CHUNK as u32).unwrap(),
+            0..MAX_TRANSFER_CHUNK
+        );
+        assert!(matches!(
+            checked_buffer_window(1, 0, 0),
+            Err(BridgeError::InvalidArgument { .. })
+        ));
+        assert!(matches!(
+            checked_buffer_window(MAX_TRANSFER_CHUNK + 1, 0, (MAX_TRANSFER_CHUNK + 1) as u32,),
+            Err(BridgeError::InvalidArgument { .. })
+        ));
+        assert!(matches!(
+            checked_buffer_window(8, 8, 1),
+            Err(BridgeError::IndexOutOfBounds { .. })
+        ));
+        assert!(matches!(
+            checked_buffer_window(8, u32::MAX, 1),
+            Err(BridgeError::IndexOutOfBounds { .. })
+        ));
     }
 
     #[test]

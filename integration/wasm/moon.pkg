@@ -5,3 +5,7 @@ import {
 }
 
 pkgtype(kind: "foreign_library")
+
+options(
+  link: { "wasm": { "export-memory-name": "memory" } },
+)

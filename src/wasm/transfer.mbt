@@ -1,8 +1,22 @@
 ///|
-const EXPECTED_ABI_VERSION = 0x0001_0003U
+const EXPECTED_ABI_VERSION = 0x0001_0004U
 
 ///|
-const REQUIRED_FEATURE_FLAGS = 0x0000_00ffU
+const REQUIRED_FEATURE_FLAGS = 0x0000_01ffU
+
+///|
+const MAX_TRANSFER_BUFFER_LENGTH = 67108864
+
+///|
+const MAX_TRANSFER_CHUNK_LENGTH = 262144
+
+///|
+/// This adapter is private because MoonBit's linear-Wasm `Bytes` layout is
+/// pinned by this package's toolchain, not part of MoonBit's stable Wasm ABI.
+#borrow(bytes)
+extern "wasm" fn bytes_address(bytes : Bytes) -> UInt =
+  #|(func (param i32) (result i32)
+  #|  (local.get 0))
 
 ///|
 fn take_bridge_error(
@@ -42,17 +56,38 @@ fn take_owned_bridge_error(
 ///|
 fn copy_buffer_from_bridge_without_error_snapshot(handle : UInt) -> Bytes {
   let length = bridge_buffer_len(handle)
-  if length < 0 {
+  if length < 0 || length > MAX_TRANSFER_BUFFER_LENGTH {
+    ignore(bridge_last_error_clear())
     return b""
   }
-  Bytes::makei(length, index => {
-    let value = bridge_buffer_get(handle, index.reinterpret_as_uint())
-    if value < 0 {
-      b'\x00'
+  let output = Bytes::make(length, b'\x00')
+  if length == 0 {
+    return output
+  }
+  let base = bytes_address(output)
+  let mut offset = 0
+  while offset < length {
+    let remaining = length - offset
+    let chunk = if remaining > MAX_TRANSFER_CHUNK_LENGTH {
+      MAX_TRANSFER_CHUNK_LENGTH
     } else {
-      value.to_byte()
+      remaining
     }
-  })
+    let status = host_copy_bridge_to_moon(
+      handle,
+      offset.reinterpret_as_uint(),
+      base,
+      length.reinterpret_as_uint(),
+      offset.reinterpret_as_uint(),
+      chunk.reinterpret_as_uint(),
+    )
+    if status != 0U {
+      ignore(bridge_last_error_clear())
+      return b""
+    }
+    offset = offset + chunk
+  }
+  output
 }
 
 ///|
@@ -63,20 +98,46 @@ fn raise_last_bridge_error(fallback_message : String) -> Unit raise WasmError {
 
 ///|
 fn copy_bytes_to_bridge(bytes : BytesView) -> UInt raise WasmError {
-  let handle = bridge_buffer_new()
+  let length = bytes.length()
+  if length < 0 || length > MAX_TRANSFER_BUFFER_LENGTH {
+    raise WasmError(3, "buffer exceeds the 64 MiB Wasm transfer limit")
+  }
+  let handle = bridge_buffer_new_sized(length.reinterpret_as_uint())
   if handle == 0U {
     raise_last_bridge_error("could not allocate a bridge buffer")
   }
-  for byte in bytes {
-    let status = bridge_buffer_push(handle, byte.to_int().reinterpret_as_uint())
+  if length == 0 {
+    return handle
+  }
+  let data = bytes.data()
+  let base = bytes_address(data)
+  let data_length = data.length()
+  let view_offset = bytes.start_offset()
+  let mut offset = 0
+  while offset < length {
+    let remaining = length - offset
+    let chunk = if remaining > MAX_TRANSFER_CHUNK_LENGTH {
+      MAX_TRANSFER_CHUNK_LENGTH
+    } else {
+      remaining
+    }
+    let status = host_copy_moon_to_bridge(
+      handle,
+      offset.reinterpret_as_uint(),
+      base,
+      data_length.reinterpret_as_uint(),
+      (view_offset + offset).reinterpret_as_uint(),
+      chunk.reinterpret_as_uint(),
+    )
     if status != 0U {
       let error = take_bridge_error(
         status.reinterpret_as_int(),
-        "could not copy a byte into the bridge",
+        "could not copy a MoonBit byte window into the bridge",
       )
       ignore(bridge_buffer_release(handle))
       raise error
     }
+    offset = offset + chunk
   }
   handle
 }
@@ -87,13 +148,39 @@ fn copy_buffer_from_bridge(handle : UInt) -> Bytes raise WasmError {
   if length < 0 {
     raise_last_bridge_error("could not query a bridge buffer length")
   }
-  Bytes::makei(length, index => {
-    let value = bridge_buffer_get(handle, index.reinterpret_as_uint())
-    if value < 0 {
-      raise_last_bridge_error("could not copy a byte from the bridge")
+  if length > MAX_TRANSFER_BUFFER_LENGTH {
+    raise WasmError(3, "buffer exceeds the 64 MiB Wasm transfer limit")
+  }
+  let output = Bytes::make(length, b'\x00')
+  if length == 0 {
+    return output
+  }
+  let base = bytes_address(output)
+  let mut offset = 0
+  while offset < length {
+    let remaining = length - offset
+    let chunk = if remaining > MAX_TRANSFER_CHUNK_LENGTH {
+      MAX_TRANSFER_CHUNK_LENGTH
+    } else {
+      remaining
     }
-    value.to_byte()
-  })
+    let status = host_copy_bridge_to_moon(
+      handle,
+      offset.reinterpret_as_uint(),
+      base,
+      length.reinterpret_as_uint(),
+      offset.reinterpret_as_uint(),
+      chunk.reinterpret_as_uint(),
+    )
+    if status != 0U {
+      raise take_bridge_error(
+        status.reinterpret_as_int(),
+        "could not copy a bridge byte window into MoonBit",
+      )
+    }
+    offset = offset + chunk
+  }
+  output
 }
 
 ///|

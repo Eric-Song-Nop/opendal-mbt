@@ -3,6 +3,8 @@ const DEFAULT_HOST_MODULE = "opendal_mbt_host";
 const MOONBIT_FFI_MODULE = "moonbit:ffi";
 const TASK_PENDING = 1;
 const TASK_READY = 2;
+const MAX_TRANSFER_CHUNK = 256 * 1024;
+const INVALID_ARGUMENT = 17;
 
 function createTaskHost(bridgeExports) {
   let disposed = false;
@@ -69,6 +71,144 @@ function createTaskHost(bridgeExports) {
       for (const handle of waits.keys()) {
         cancelWait(handle);
       }
+    },
+  };
+}
+
+function createTransferHost(bridgeExports) {
+  const bridgeMemory = bridgeExports.memory;
+  const bufferDataPointer =
+    bridgeExports.opendal_mbt_wasm_buffer_data_ptr;
+  const lastErrorCode = bridgeExports.opendal_mbt_wasm_last_error_code;
+  if (!(bridgeMemory instanceof WebAssembly.Memory)) {
+    throw new TypeError("Rust bridge does not export its WebAssembly.Memory");
+  }
+  if (
+    typeof bufferDataPointer !== "function" ||
+    typeof lastErrorCode !== "function"
+  ) {
+    throw new TypeError("Rust bridge does not export the bulk-transfer ABI");
+  }
+  let moonMemory;
+  let moonToBridgeCalls = 0;
+  let bridgeToMoonCalls = 0;
+  let moonToBridgeBytes = 0;
+  let bridgeToMoonBytes = 0;
+
+  function bindMoonMemory(memory) {
+    if (!(memory instanceof WebAssembly.Memory)) {
+      throw new TypeError("MoonBit consumer does not export its WebAssembly.Memory");
+    }
+    moonMemory = memory;
+  }
+
+  function recordInvalidArgument(handle) {
+    bufferDataPointer(handle >>> 0, 0, 0);
+    return lastErrorCode() || INVALID_ARGUMENT;
+  }
+
+  function copyWindow(
+    direction,
+    handle,
+    bridgeOffset,
+    moonBase,
+    moonDataLength,
+    moonOffset,
+    length,
+  ) {
+    const normalizedHandle = handle >>> 0;
+    const normalizedBridgeOffset = bridgeOffset >>> 0;
+    const normalizedMoonBase = moonBase >>> 0;
+    const normalizedMoonDataLength = moonDataLength >>> 0;
+    const normalizedMoonOffset = moonOffset >>> 0;
+    const normalizedLength = length >>> 0;
+    if (
+      moonMemory === undefined ||
+      normalizedLength === 0 ||
+      normalizedLength > MAX_TRANSFER_CHUNK ||
+      normalizedMoonOffset > normalizedMoonDataLength ||
+      normalizedLength > normalizedMoonDataLength - normalizedMoonOffset
+    ) {
+      return recordInvalidArgument(normalizedHandle);
+    }
+
+    const moonBuffer = moonMemory.buffer;
+    if (
+      normalizedMoonBase > moonBuffer.byteLength ||
+      normalizedMoonDataLength > moonBuffer.byteLength - normalizedMoonBase
+    ) {
+      return recordInvalidArgument(normalizedHandle);
+    }
+
+    const bridgePointer =
+      bufferDataPointer(
+        normalizedHandle,
+        normalizedBridgeOffset,
+        normalizedLength,
+      ) >>> 0;
+    if (bridgePointer === 0) {
+      return lastErrorCode() || INVALID_ARGUMENT;
+    }
+
+    // A WebAssembly memory can replace its ArrayBuffer after memory.grow.
+    // Re-read both buffers for every window and perform no bridge call between
+    // obtaining the pointer and completing the synchronous copy.
+    const currentBridgeBuffer = bridgeMemory.buffer;
+    const currentMoonBuffer = moonMemory.buffer;
+    if (
+      bridgePointer > currentBridgeBuffer.byteLength ||
+      normalizedLength > currentBridgeBuffer.byteLength - bridgePointer ||
+      normalizedMoonBase > currentMoonBuffer.byteLength ||
+      normalizedMoonDataLength >
+        currentMoonBuffer.byteLength - normalizedMoonBase
+    ) {
+      return recordInvalidArgument(normalizedHandle);
+    }
+    const bridgeView = new Uint8Array(
+      currentBridgeBuffer,
+      bridgePointer,
+      normalizedLength,
+    );
+    const moonView = new Uint8Array(
+      currentMoonBuffer,
+      normalizedMoonBase + normalizedMoonOffset,
+      normalizedLength,
+    );
+    if (direction === "moon-to-bridge") {
+      bridgeView.set(moonView);
+      moonToBridgeCalls += 1;
+      moonToBridgeBytes += normalizedLength;
+    } else {
+      moonView.set(bridgeView);
+      bridgeToMoonCalls += 1;
+      bridgeToMoonBytes += normalizedLength;
+    }
+    return 0;
+  }
+
+  function safelyCopy(direction, ...arguments_) {
+    try {
+      return copyWindow(direction, ...arguments_);
+    } catch {
+      return recordInvalidArgument(arguments_[0] ?? 0);
+    }
+  }
+
+  return {
+    imports: {
+      copy_moon_to_bridge: (...arguments_) =>
+        safelyCopy("moon-to-bridge", ...arguments_),
+      copy_bridge_to_moon: (...arguments_) =>
+        safelyCopy("bridge-to-moon", ...arguments_),
+    },
+    bindMoonMemory,
+    stats() {
+      return {
+        moonToBridgeCalls,
+        bridgeToMoonCalls,
+        moonToBridgeBytes,
+        bridgeToMoonBytes,
+      };
     },
   };
 }
@@ -147,12 +287,14 @@ export async function loadOpenDalMoonBit({
     bridgeInitializer,
   );
   let taskHost;
+  let transferHost;
   try {
     const moonbitModule = await toModule(moonbit);
     const existing = imports[importModule] ?? {};
     const existingHost = imports[hostModule] ?? {};
     const existingMoonBitFfi = imports[MOONBIT_FFI_MODULE] ?? {};
     taskHost = createTaskHost(bridgeInstance.exports);
+    transferHost = createTransferHost(bridgeInstance.exports);
     const moonbitImports = {
       ...imports,
       [importModule]: {
@@ -162,6 +304,7 @@ export async function loadOpenDalMoonBit({
       [hostModule]: {
         ...existingHost,
         ...taskHost.imports,
+        ...transferHost.imports,
       },
       [MOONBIT_FFI_MODULE]: {
         make_closure: (funcref, closure) => funcref.bind(null, closure),
@@ -172,11 +315,15 @@ export async function loadOpenDalMoonBit({
       moonbitModule,
       moonbitImports,
     );
+    transferHost.bindMoonMemory(moonbitInstance.exports.memory);
     let disposed = false;
     return {
       exports: moonbitInstance.exports,
       bridge: bridgeInstance,
       moonbit: moonbitInstance,
+      transfer: {
+        stats: transferHost.stats,
+      },
       dispose() {
         if (disposed) {
           return;

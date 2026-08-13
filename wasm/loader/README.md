@@ -7,6 +7,8 @@ import groups:
 - the Rust scalar exports as `opendal_mbt_bridge`;
 - `opendal_mbt_host.wait_task` and `cancel_wait` for later-turn task polling,
   callback delivery, and explicit wait deregistration;
+- `opendal_mbt_host.copy_moon_to_bridge` and `copy_bridge_to_moon` for bounded
+  copies between the modules' separate linear memories;
 - `moonbit:ffi.make_closure` for MoonBit Wasm closure imports.
 
 The application does not construct this import table:
@@ -48,10 +50,11 @@ it is an ABI smoke test. The real Chrome/Chromium runner in
 `../canary/run-browser.mjs` is the evidence that forced-pending callback tasks
 reach ready state while a browser heartbeat remains responsive.
 
-This loader deliberately does not inspect either module's linear memory. The
-MoonBit facade and Rust bridge still transfer payload bytes through scalar
-buffer operations, and only the separate host callback import carries a
-MoonBit closure. Bounded cross-memory bulk transfer is a later milestone.
+The loader validates both exported linear memories and copies at most 256 KiB
+per host call. It recreates typed-array views for every window so a preceding
+`memory.grow` cannot leave a stale view. Whole objects remain generation-owned
+bridge buffers and are capped at 64 MiB. The old per-byte bridge exports remain
+only as low-level canary oracles; the MoonBit facade no longer imports them.
 
 The loader enables the experimental public callback `Operation` API; it does
 not make ordinary browser MoonBit `async fn` suspension portable. That remains
