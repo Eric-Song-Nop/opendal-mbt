@@ -92,7 +92,7 @@ this plan.
 | Repository canary | A checkout builds two modules and the loader wires them | Engineering proof only |
 | Mooncake preview | `moon add` plus the precompiled official `moonx` bundler works without Rust/npm/source checkout | First publishable preview |
 | Native-like build | `moon add` plus ordinary `moon build --target wasm` materializes all runtime assets | Stable distribution target |
-| Stable browser API | The facade is async, cancellation-safe, bulk-transfer capable, and supports browser-local persistence | First stable Wasm product |
+| Stable browser API | The facade is backend-neutral, async, cancellation-safe, and bulk-transfer capable | First stable Wasm product |
 
 A release must not be described as Mooncake-installable merely because the
 MoonBit facade is present in the source archive. The companion Rust module and
@@ -105,23 +105,28 @@ The first stable target is:
 - MoonBit linear-memory `wasm`, not `wasm-gc`;
 - a secure-context browser `Window`;
 - an async-first MoonBit API;
-- OpenDAL `memory` and OPFS through a `browser-local` artifact profile;
+- a generic `Operator::new(scheme, config)` entry point backed by OpenDAL's
+  compiled service registry;
+- service-minimal artifacts whose enabled schemes are declared in their
+  manifests and discoverable at runtime;
 - two core Wasm modules connected by an official loader;
 - the existing native package remaining source- and ABI-compatible.
 
 The following are separate product tracks, not aliases for this target:
 
 - Node continues to use the native binding;
-- Browser Worker support waits for an OpenDAL OPFS path that does not require
-  `window()`;
+- Browser Worker support depends on the enabled services and their host APIs;
 - WASI needs its own target, network/filesystem contract, and artifact;
 - `wasm-gc` needs a separate ABI and runtime investigation;
-- browser S3 is an opt-in profile after the async and security contracts are
-  proven.
+- credential-bearing browser services need separate security acceptance after
+  the common binding contract is proven.
 
-OPFS is the first useful storage backend, but it is not the interoperability
-mechanism. The implementation must first make an actually pending OpenDAL
-future complete safely through the browser event loop.
+No service is the interoperability mechanism or a privileged public API.
+Memory and OPFS are convenient credential-free fixtures; they prove only the
+common operations exercised by their tests. The binding must first make an
+actually pending OpenDAL future complete safely through the browser event loop,
+then expose the same scheme-and-config construction path for every service
+compiled into an artifact.
 
 ## Decisions already made
 
@@ -137,11 +142,12 @@ future complete safely through the browser event loop.
 5. Use an official host adapter for instantiation, scheduling, and bulk copy.
    Downstream application code never constructs the import object.
 6. Treat WIT and the Component Model as a later simplification experiment,
-   not as a prerequisite for OPFS.
+   not as a prerequisite for the core binding.
 7. Publish Wasm artifacts through a trust chain independent of the native
    static-library manifests.
-8. Make `memory` the async and distribution canary, OPFS the first real
-   browser service, and S3 the first browser network service.
+8. Make `memory` the deterministic async and distribution canary. Exercise
+   other services through the same generic constructor without adding
+   service-specific facade constructors.
 
 ## Current implementation state
 
@@ -319,8 +325,8 @@ The intended stable API is async-first and MoonBit-native. The exact spelling
 will be frozen only after the browser async spike, but its semantics are:
 
 ```moonbit
-async fn use_local_storage() -> Unit {
-  let op = @opendal.Operator::opfs()
+async fn use_storage() -> Unit {
+  let op = @opendal.Operator::new("memory")
   defer op.close()
 
   op.write("notes/hello.txt", b"hello from MoonBit")
@@ -368,7 +374,7 @@ MoonBit browser application
   -> wasm-bindgen-compatible Rust bridge
   -> wasm_bindgen_futures browser executor
   -> OpenDAL async core
-  -> memory / OPFS / Fetch-compatible services
+  -> services compiled into the selected OpenDAL artifact
 ```
 
 JavaScript is a runtime adapter, not a storage implementation. Paths,
@@ -537,11 +543,10 @@ this order:
 
 | Stage | Constructors | Operations | Notes |
 | --- | --- | --- | --- |
-| Async memory | `Operator::memory` | write, read, stat, delete | callback write/read/stat prove real `Pending`; delete and stable `async fn` remain |
-| Browser local | `Operator::opfs` | create_dir, write, read, stat, list, delete | first useful product |
-| Browser S3 | typed S3 builder | write, read, stat, delete | temporary credentials and CORS contract |
-| Streaming | same builders | Reader, Writer, abort, bounded chunks | requires backpressure |
-| Convergence | target-specific constructors | portable common subset | compare native and Wasm interfaces |
+| Generic core | `Operator::new(scheme, config)` | write, read, stat, create_dir, list, delete | available schemes come from the artifact's compiled registry; memory is the deterministic fixture |
+| Service profiles | same generic constructor | capability-gated common operations | service tests validate behavior, not new public constructors |
+| Streaming | same constructor | Reader, Writer, abort, bounded chunks | requires backpressure |
+| Convergence | same scheme/config model | portable common subset | compare native and Wasm interfaces |
 
 Portable values should converge with the native binding where their semantics
 are truly shared:
@@ -565,19 +570,22 @@ whose timing and re-entrancy rules are suitable.
 
 ### Profiles
 
-Use service-minimal artifacts:
+Use service-minimal artifacts. Profiles are packaging choices, not distinct
+MoonBit APIs:
 
 | Profile | OpenDAL features | Purpose |
 | --- | --- | --- |
 | `memory-canary` | memory only | repository interoperability checks; never the stable default |
 | `browser-memory-preview` | memory only | async, bulk-copy, and Mooncake distribution preview |
-| `browser-local` | memory + OPFS | first public browser artifact |
-| `browser-s3` | memory + S3 + Fetch transport | later opt-in network artifact |
-| `browser-standard` | selected local + cloud services | considered only after size measurements |
+| `browser-local-test` | memory + OPFS | persistence test fixture |
+| `browser-object` | memory + selected HTTP object services + browser transport | credential/CORS acceptance profile |
+| `browser-standard` | selected browser-compatible services | considered only after size measurements |
 
-Memory is built into OpenDAL core. OPFS and S3 features are explicit. One
-"all services" Wasm is not the default because service code, browser glue, and
-attack surface affect size and startup.
+Memory is built into OpenDAL core; other services are explicit Cargo features.
+One "all services" Wasm is not the default because target compatibility,
+service code, browser glue, and attack surface affect size and startup. The
+manifest records the exact registered schemes, and the facade exposes them for
+diagnostics and capability-driven application code.
 
 ### Manifest
 
@@ -670,7 +678,18 @@ The resolver follows the native artifact discipline:
 - no fallback from a pinned release to `latest`;
 - local artifact override limited to maintainer workflows.
 
-## Browser service plan
+## Service-neutral binding and fixtures
+
+The public boundary accepts a service scheme and configuration map, matching
+the native binding. Rust initializes OpenDAL's registry and rejects schemes
+that are absent from the selected artifact with an owned error that also names
+the available schemes. Operator information and capabilities are queried from
+the constructed OpenDAL operator; they are not inferred from a facade method
+or hard-coded service table.
+
+Every service remains responsible for its own target and host requirements.
+Adding a service to an artifact is a build-profile and acceptance-test change,
+not a new MoonBit constructor.
 
 ### Memory
 
@@ -681,15 +700,16 @@ The decisive memory test must force at least one operation through
 `Pending -> Ready`. An immediately ready future does not validate browser
 scheduling.
 
-### OPFS
+### OPFS fixture
 
-OPFS is the first public service after the async and distribution gates.
+OPFS is an optional persistence fixture after the common async and distribution
+gates. It receives no privileged facade API.
 OpenDAL `0.58.1` includes a browser-oriented OPFS Wasm example:
 
 - [OpenDAL OPFS Wasm example](https://github.com/apache/opendal/tree/v0.58.1/core/edge/opfs_wasm32)
 
-The first support claim is restricted to a secure-context browser `Window`.
-Acceptance covers:
+An artifact that compiles OPFS is restricted to a secure-context browser
+`Window`. Its service-specific acceptance covers:
 
 - operator construction through `navigator.storage.getDirectory()`;
 - create directory, write, read, stat, list, and delete;
@@ -701,12 +721,14 @@ Acceptance covers:
 - instance teardown with work in flight;
 - zero live bridge resources after cleanup.
 
-Copy, rename, presign, Node, Worker, and WASI are not inferred from the OPFS
-service name. Capability values report only operations proven in this target.
+Copy, rename, presign, Node, Worker, and WASI are not inferred from this
+fixture. Capability values come from OpenDAL and report only the constructed
+operator's operations.
 
-### S3
+### Credential-bearing object-service fixtures
 
-S3 follows OPFS and uses OpenDAL's browser Fetch-compatible transport:
+S3 is one useful network fixture and uses OpenDAL's browser-compatible HTTP
+transport:
 
 - [OpenDAL S3 Wasm example](https://github.com/apache/opendal/tree/v0.58.1/core/edge/s3_read_on_wasm)
 
@@ -794,7 +816,7 @@ The work proceeds in parallel where dependencies allow.
   path and remove remaining sticky-error dependencies from concurrent paths;
 - harden the implemented completion, logical-cancellation, and teardown states;
 - add bulk buffer primitives;
-- add feature-minimal memory/OPFS/S3 profiles;
+- add feature-minimal service profiles without changing the facade API;
 - keep the generated wasm-bindgen browser glue pinned and reproducible;
 - preserve generation-checked resource ownership;
 - record imports, exports, sizes, and features.
@@ -829,7 +851,8 @@ The work proceeds in parallel where dependencies allow.
 - add a clean registry-consumer fixture;
 - verify no Rust/Cargo/npm/source checkout is visible to the consumer;
 - keep native and Wasm release trust chains independent but version-aligned;
-- publish pre-release versions until browser async and OPFS gates close.
+- publish pre-release versions until the browser async and generic-service
+  gates close.
 
 ### E. Upstream Moon work
 
@@ -842,7 +865,7 @@ The work proceeds in parallel where dependencies allow.
 
 Effort ranges are order-of-magnitude estimates for one engineer, not release
 date promises. Toolchain collaboration can proceed concurrently. Recalibrate
-M1–M4 after the task-runner, precompiled-`moonx`, and OPFS skeleton spikes;
+M1–M4 after the task-runner, precompiled-`moonx`, and generic registry spikes;
 those three probes contain most of the schedule uncertainty.
 
 ### M0 — Core-module memory canary
@@ -969,28 +992,31 @@ Exit:
 
 This is the first publishable preview, initially with memory only.
 
-### M4 — OPFS browser-local profile
+### M4 — Generic service profiles and browser fixtures
 
 Estimated size: large, roughly 5–8 engineering days after M1–M3.
 
 Deliverables:
 
-- `services-opfs` bridge profile;
-- typed `Operator::opfs` constructor;
-- create_dir/read/write/stat/list/delete;
-- Browser Window integration fixture;
-- reload, quota, permission, and cancellation cases.
+- generic `Operator::new(scheme, config)` backed by the compiled OpenDAL
+  registry;
+- available-scheme, operator-info, and capability inspection;
+- create_dir/read/write/stat/list/delete through the common task ABI;
+- at least one non-memory Browser Window integration fixture;
+- service-specific reload, quota/permission or credential/CORS cases as
+  applicable.
 
 Exit:
 
-- data persists across reload under HTTPS or localhost;
+- every enabled scheme is constructible through the same facade entry point;
 - capability values match the implemented OpenDAL backend;
 - all expected failures become owned MoonBit errors;
 - the UI event loop remains responsive while storage is pending;
 - teardown leaves no tasks, callbacks, buffers, or operators;
 - the clean Mooncake consumer deploys without Rust/npm.
 
-M4 is the first useful browser-local preview.
+M4 proves that the preview is not a memory-specific binding. It does not make
+one tested backend representative of every OpenDAL service.
 
 ### M5 — Stable distribution and API gate
 
@@ -1052,7 +1078,7 @@ Exit:
 - streaming never materializes an unbounded whole object;
 - cancellation releases producer and consumer resources;
 - WIT replaces the existing ABI only if it reduces application packaging and
-  retains browser async/OPFS behavior with measurable evidence.
+  retains browser async and service-fixture behavior with measurable evidence.
 
 ## Validation matrix
 
@@ -1068,7 +1094,7 @@ an interactive development session wait idly.
 | Core Wasm | import/export inspection and size record; no WASI/POSIX/thread surprises |
 | Browser runtime | `make wasm-browser-canary`: real Chrome/Chromium, four forced-pending tasks, heartbeat, logical cancel suppression, cleanup |
 | Binary transfer | NUL/non-UTF-8, 16 MiB chunks, limits, memory growth |
-| OPFS | persistence, origin isolation, quota/permission, reload |
+| Service fixtures | generic construction, reported capabilities, and each service's relevant persistence/security failures |
 | Packaging | fresh Mooncake consumer, no Rust/npm/checkout, relocatable output |
 | Integrity | wrong hash/size/version/ABI, corrupt cache, interrupted download |
 | Release | candidate artifacts, exact pins, registry install, offline hot cache |
@@ -1087,12 +1113,12 @@ interactively for it.
 | wasm-bindgen browser glue changes | Loader/bridge mismatch | pin exact tool version and ship JS+Wasm as one hashed artifact set |
 | Two memories make copies expensive | Poor large-object throughput | M2 chunked bulk-copy budget; later streaming; no per-byte production path |
 | Cancellation cannot abort host promise | wasted I/O after logical cancel | promise-level abort probes; claim logical cancellation only until stronger evidence |
-| OPFS is Window-specific in OpenDAL 0.58.1 | Worker/Node claims would be wrong | support matrix and Window-only artifact metadata |
+| Some services are target- or host-specific | A generic constructor could be mistaken for universal runtime support | manifest exact compiled schemes; service-specific host matrix and acceptance fixtures |
 | S3 credentials leak in browser | security incident | temporary credentials/presign/broker; redaction cases; no long-lived-key quickstart |
 | Wasm size grows with services | slow download/startup | service-minimal profiles and recorded compressed/uncompressed budgets |
 | Dependency cache layout changes | loader cannot find asset | never expose Moon cache paths; bundler copies to application-owned `dist` |
 | Native and Wasm versions drift | facade/bridge ABI failure | one binding version, exact manifest pins, bootstrap rejection |
-| WIT/component work expands scope | delays useful OPFS release | keep it off the critical path until M7 |
+| WIT/component work expands scope | delays the useful generic binding | keep it off the critical path until M7 |
 
 ## Feasibility assessment
 
@@ -1100,7 +1126,7 @@ interactively for it.
 | --- | ---: | --- |
 | Two-module MoonBit/OpenDAL Wasm binding | 8/10 | production async and bulk transfer, not basic interoperability |
 | Mooncake preview with official bundler | 8/10 | engineering work is local and does not require Moon linker changes |
-| OPFS after async lifecycle | 7/10 | browser runtime, quota/permission, Window restriction |
+| Generic service registry and capability surface | 8/10 | profile selection and service-specific host requirements |
 | Browser S3 | 6/10 | CORS, credentials, Fetch cancellation |
 | Stable MoonBit `async fn` in ordinary browsers | 6/10 | current Moon Wasm1 async runtime portability |
 | `moon add` plus plain `moon build` only | 5/10 today, higher with upstream support | declarative dependency runtime assets |
@@ -1123,16 +1149,17 @@ Keep changes reviewable and preserve the native baseline:
 5. bulk-transfer ABI;
 6. artifact manifest, resolver, and `moonx` bundler;
 7. clean Mooncake preview consumer;
-8. OPFS `browser-local` vertical slice;
+8. generic service construction/capability surface and non-memory fixtures;
 9. stable API/support matrix and release workflow;
 10. optional browser S3 profile;
 11. streaming and WIT/component evaluation.
 
 The forced-pending memory operation now completes through the public MoonBit
-callback path in Chrome. Task-ABI hardening, the bundler skeleton, and upstream
-proposals can proceed in parallel. OPFS still waits for the remaining M1 race
-matrix, M2 transfer path, and M3 distribution gates; the Chrome result alone
-does not authorize a service support claim.
+callback path in Chrome. Task-ABI hardening, the generic constructor, the
+bundler skeleton, and upstream proposals can proceed in parallel. Additional
+service fixtures still wait for the remaining M1 race matrix, M2 transfer path,
+and M3 distribution gates; the Chrome memory result alone does not authorize
+claims about other services.
 
 ## Immediate next actions
 
@@ -1143,14 +1170,15 @@ does not authorize a service support claim.
 3. Continue the documented Moon continuation spike; keep the current callback
    `Operation` API explicitly experimental meanwhile.
 4. Replace per-byte transfer with a bounded bulk-copy experiment.
-5. Define `wasm/artifacts-browser.json` and the `browser-local` archive layout.
+5. Define `wasm/artifacts-browser.json` and its exact compiled-scheme profile.
 6. Scaffold the exact-version `cmd/wasm-bundle` package.
 7. Create the clean consumer acceptance fixture with Cargo/rustup/npm removed.
 8. Draft the two Moon upstream proposals: target-aware prebuild and
    declarative runtime assets.
 9. Record canonical bridge imports, exports, compressed size, and startup
    measurements.
-10. Only then add the OPFS service and persistence cases.
+10. Add non-memory service fixtures through the same generic constructor only
+    after the common gates pass.
 
 This ordering makes "Mooncake-installed OpenDAL for browser Wasm" the
 acceptance criterion at every step, instead of leaving packaging until after
