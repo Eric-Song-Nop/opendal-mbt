@@ -592,6 +592,26 @@
         },
         {
           "module": "opendal_mbt_bridge",
+          "name": "opendal_mbt_wasm_operator_info_capability_word",
+          "kind": "function"
+        },
+        {
+          "module": "opendal_mbt_bridge",
+          "name": "opendal_mbt_wasm_operator_info_name",
+          "kind": "function"
+        },
+        {
+          "module": "opendal_mbt_bridge",
+          "name": "opendal_mbt_wasm_operator_info_root",
+          "kind": "function"
+        },
+        {
+          "module": "opendal_mbt_bridge",
+          "name": "opendal_mbt_wasm_operator_info_scheme",
+          "kind": "function"
+        },
+        {
+          "module": "opendal_mbt_bridge",
           "name": "opendal_mbt_wasm_operator_list_start",
           "kind": "function"
         },
@@ -613,6 +633,11 @@
         {
           "module": "opendal_mbt_bridge",
           "name": "opendal_mbt_wasm_operator_write_start",
+          "kind": "function"
+        },
+        {
+          "module": "opendal_mbt_bridge",
+          "name": "opendal_mbt_wasm_registered_schemes",
           "kind": "function"
         },
         {
@@ -720,9 +745,9 @@
         }
       ],
       "observed_sizes": {
-        "raw": 37796,
-        "gzip": 14834,
-        "brotli": 12529
+        "raw": 45120,
+        "gzip": 17697,
+        "brotli": 14940
       },
       "size_caps": {
         "raw": 65536,

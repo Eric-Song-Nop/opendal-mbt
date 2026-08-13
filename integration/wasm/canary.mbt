@@ -313,8 +313,31 @@ pub fn canary_async_start() -> Int {
   if async_stage.val != ASYNC_IDLE && async_stage.val != ASYNC_OK {
     return ASYNC_ERROR
   }
-  let operator = @opendal.Operator::new("memory") catch {
+  let schemes = @opendal.available_schemes() catch { _ => return ASYNC_ERROR }
+  if schemes != ["memory"] {
+    return ASYNC_ERROR
+  }
+  let operator = @opendal.Operator::new("memory", config={
+    "root": "generic-prefix",
+  }) catch {
     _ => return ASYNC_ERROR
+  }
+  let info = operator.info() catch {
+    _ => {
+      operator.close()
+      return ASYNC_ERROR
+    }
+  }
+  if info.scheme != "memory" ||
+    info.root != "/generic-prefix/" ||
+    !info.capability.can_stat() ||
+    !info.capability.can_read() ||
+    !info.capability.can_write() ||
+    !info.capability.can_create_dir() ||
+    !info.capability.can_delete() ||
+    !info.capability.can_list() {
+    operator.close()
+    return ASYNC_ERROR
   }
   async_operator.val = Some(operator)
   let payload = b"\x00\xffMoonBit-async\x80OpenDAL"
