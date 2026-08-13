@@ -1,6 +1,7 @@
 # Mooncake delivery plan for OpenDAL WebAssembly
 
-Status: proposed execution plan
+Status: proposed execution plan; M0 and an initial M1 callback/task canary are
+implemented, but no Wasm release milestone is complete
 
 Last reviewed: 2026-08-13
 
@@ -144,8 +145,8 @@ future complete safely through the browser event loop.
 
 ## Current implementation state
 
-The implementation in PR #59 already establishes the correct basic module
-shape:
+The implementation in PR #59 and the current follow-up slice establish the
+basic two-module shape:
 
 ```text
 MoonBit application Wasm
@@ -156,22 +157,56 @@ MoonBit application Wasm
   -> OpenDAL memory service
 ```
 
-It includes ABI/feature negotiation, generation-checked handles, binary-safe
-memory read/write, metadata, owned errors, explicit release, and a leak oracle.
-That is enough to prove that MoonBit and Rust do not need a shared allocator
-or a single compiler.
+The scalar ABI remains version `0x0001_0000`. Its current feature bitmap is
+`0x0000_001f`: memory service, poll-once synchronous canary, generation
+handles, binary buffers, and task ABI. In addition to the original synchronous
+round trip, the bridge now has generation-checked task and completion handles,
+per-completion OpenDAL errors, logical cancellation, and permanent instance
+teardown. The MoonBit facade exposes the experimental public
+`write_callback`, `read_callback`, and `stat_callback` methods. Each returns an
+`Operation` whose observable states are `Pending`, `Completed`, `Cancelled`,
+and `Closed`.
 
-The current code remains a canary for four reasons:
+The repository has two acceptance commands with intentionally different
+claims:
 
-- OpenDAL futures are polled once with a no-op waker; `Pending` is an error.
-- MoonBit read/write/stat are synchronous, so real browser I/O cannot suspend.
-- bytes cross the boundary one byte per Wasm call.
+```sh
+# Node.js: synchronous ABI/bootstrap/resource smoke only.
+make wasm-canary
+
+# Real headless Chrome/Chromium: forced-Pending callback lifecycle.
+make wasm-browser-canary
+```
+
+The browser fixture forces write, read, `stat`, and a missing read to return
+`Pending` on their first Rust poll, rejects synchronous completion, lets a
+previously queued browser heartbeat run before readiness, completes the
+MoonBit callback chain, suppresses a cancel-before-ready callback, and checks
+the live-handle baseline plus `runtime.dispose()`. Its success payload records
+`pendingTasks: 4`, `heartbeat: true`, and `cancellation: "suppressed"`.
+Only this Chrome/Chromium run is evidence for `Pending -> Ready` and a
+responsive browser event loop; the Node command is not.
+
+This proves more than the original poll-once canary, but it does not finish M1
+or the product design:
+
+- ordinary-browser MoonBit `async fn` suspension is still constrained by the
+  officially documented runtime; the currently usable public path is the
+  explicitly experimental callback `Operation` API;
+- cancellation is logical only: it suppresses callbacks and discards late
+  results but does not abort the underlying OpenDAL future or browser I/O;
+- the synchronous methods remain for smoke coverage and still return code `9`
+  if their single no-op-waker poll sees `Pending`;
+- the current browser fixture does not yet cover the full ready/cancel race,
+  double-take/release, multi-operator concurrency, or all teardown orderings;
+- bytes still cross the boundary one byte per Wasm call;
 - the Mooncake archive does not yet contain or automatically acquire the
-  version-matched Rust bridge.
+  version-matched Rust bridge, and canonical import/export/size evidence is
+  still outstanding.
 
-The canary code is present, but runtime execution evidence remains a milestone
-gate. A compiler check or a successful Rust target build alone does not close
-that gate.
+A compiler check or successful Rust target build alone does not satisfy these
+runtime gates. M0 remains an engineering proof, and the implemented M1 slice
+is not a release.
 
 ## Why Mooncake installation needs an asset plan
 
@@ -284,7 +319,7 @@ The intended stable API is async-first and MoonBit-native. The exact spelling
 will be frozen only after the browser async spike, but its semantics are:
 
 ```moonbit
-async fn use_local_storage() -> Unit raise @opendal.OpenDalError {
+async fn use_local_storage() -> Unit {
   let op = @opendal.Operator::opfs()
   defer op.close()
 
@@ -295,14 +330,32 @@ async fn use_local_storage() -> Unit raise @opendal.OpenDalError {
 }
 ```
 
-If current Moon cannot expose a portable browser continuation API, an alpha
-package may temporarily expose an explicitly experimental operation/callback
-surface. The stable `/wasm` API is not declared complete until async functions
-can suspend and resume through a documented runtime interface.
+The current canary takes the fallback branch of this design and exposes the
+following callback shape publicly but experimentally:
+
+```moonbit
+let operation = op.read_callback("notes/hello.txt", result => {
+  match result {
+    Ok(bytes) => consume(bytes)
+    Err(error) => report(error)
+  }
+})
+
+// Both calls are idempotent. Cancellation is logical, not an I/O abort.
+operation.cancel()
+operation.close()
+```
+
+`write_callback` and `stat_callback` follow the same pattern. The task and
+completion handles remain hidden behind `Operation`, but this callback surface
+is not renamed or described as stable MoonBit async/await. The stable `/wasm`
+API is not declared complete until async functions can suspend and resume
+through a documented ordinary-browser runtime interface, or the project makes
+an explicit reviewed decision to retain callbacks as the stable contract.
 
 ## Runtime architecture
 
-### Module graph
+### Target module graph
 
 ```text
 MoonBit browser application
@@ -322,7 +375,17 @@ JavaScript is a runtime adapter, not a storage implementation. Paths,
 capabilities, error mapping, service configuration, and storage operations
 remain implemented by MoonBit facade code and Rust OpenDAL.
 
-### Bootstrap
+The implemented memory canary already has the task/resource imports,
+repository-owned scheduling, `wasm_bindgen_futures` executor, and OpenDAL
+memory service in this graph. It currently exposes a callback facade rather
+than portable MoonBit `async fn`, and it still uses per-byte scalar transfers
+rather than the bounded bulk-copy step shown above.
+
+### Target bootstrap
+
+The current facade checks bridge ABI `0x0001_0000` and required feature bits
+`0x0000_001f` before creating an operator. The artifact-manifest and
+service-profile checks below remain product work.
 
 Before creating an operator, the facade and loader validate:
 
@@ -340,56 +403,83 @@ or the latest release.
 
 ### Async task ABI
 
-The poll-once adapter is replaced with an owned task arena. A representative
-operation is:
+The callback path now implements an owned task arena while retaining the
+poll-once synchronous calls for the Node smoke test. The implemented task ABI
+is:
 
 ```text
-operator_read_start(operator, path) -> task_handle
-host_wait(task_handle) -> Promise/completion callback
+operator_write_start(operator, path, data) -> task_handle
+operator_read_start(operator, path)         -> task_handle
+operator_stat_start(operator, path)         -> task_handle
+
 task_state(task_handle) -> state
 task_take(task_handle) -> completion_handle
 task_cancel(task_handle) -> status
 task_release(task_handle) -> status
+
+completion_kind(completion_handle) -> kind
+completion_status(completion_handle) -> status
+completion_take_buffer(completion_handle) -> buffer_handle
+completion_take_metadata(completion_handle) -> metadata_handle
+completion_take_error(completion_handle) -> error_handle
+completion_release(completion_handle) -> status
+
+host wait_task(task_handle, callback)
+teardown() -> status
 ```
 
 Every operation copies its inputs into Rust-owned storage before `start`
-returns. Rust drives the OpenDAL future with
-`wasm_bindgen_futures::spawn_local` or an equivalent browser-local executor.
+returns and clones the operator for the in-flight future. Rust drives the
+future with `wasm_bindgen_futures::spawn_local`. The memory canary adds a
+zero-delay timer wrapper to force at least one pending poll; this is a
+deterministic scheduling oracle, not a claim that every production service
+needs an artificial delay.
 
-The state model is:
+The implemented bridge task states are scalar `1` pending, `2` ready, `3`
+cancelled, and `4` consumed:
 
 ```text
 Pending
   -> Ready(Completion)
   -> Consumed
-  -> Released
+  -> task handle released
 
-Pending
-  -> CancelRequested
+Pending or Ready
   -> Cancelled
-  -> Released
+  -> task handle released
 ```
 
-Required semantics:
+`task_take` moves the result exactly once into an independently owned
+completion. Completion kinds are write (`1`), read (`2`), and stat (`3`);
+successful read/stat takes and failed-error takes consume that completion.
+The local MoonBit `Operation` maps the lifecycle to `Pending`, `Completed`,
+`Cancelled`, and `Closed` without exposing either handle class.
+
+The current slice implements these required semantics:
 
 - each completion is delivered at most once;
 - each result is taken at most once;
-- callback delivery always occurs in a later microtask to avoid re-entering a
-  borrowed Rust or MoonBit frame;
+- callback delivery begins from a later microtask/timer turn to avoid
+  re-entering the initiating Rust or MoonBit frame;
 - cancelling a task prevents later delivery to MoonBit;
-- the first cancellation contract is logical cancellation; true cancellation
-  of an underlying Fetch or OPFS promise is claimed only when proven;
+- cancellation is logical; true cancellation of an underlying Fetch or OPFS
+  promise is not claimed;
 - an in-flight task owns an OpenDAL operator clone, so closing the MoonBit
   wrapper cannot cause use-after-close;
-- dropping an instance unregisters callbacks and makes late completions inert;
-- task, completion, error, buffer, reader, and writer handles use generation
-  checks and explicit release;
+- `runtime.dispose()` unregisters loader polling, clears the bridge arena, and
+  makes late completions inert;
+- task, completion, error, buffer, metadata, and operator handles use
+  generation checks and explicit release;
 - errors belong to the completion, not to one global sticky error slot.
+
+Streaming reader/writer handles, true host-operation abort, and the complete
+ready/cancel/concurrency race matrix remain later acceptance work.
 
 ### MoonBit continuation gate
 
-Rust can produce a browser Promise today. The open question is how a MoonBit
-`async fn` suspends on that Promise in an ordinary browser runtime.
+Rust can run a browser-local future today. The unresolved product question is
+how a MoonBit `async fn` suspends and resumes in an ordinary browser host using
+an officially supported runtime contract.
 
 MoonBit documents Wasm closure imports through `externref` and the
 `moonbit:ffi.make_closure` host import, which is useful for callback delivery:
@@ -401,13 +491,12 @@ latest `moonrun` rather than arbitrary Wasm hosts:
 
 - [MoonBit experimental async support](https://docs.moonbitlang.com/en/latest/language/async-experimental.html)
 
-The next implementation spike must compare:
-
-1. a documented browser-compatible Moon async suspension interface, if one is
-   available in the selected Moon version;
-2. a host callback that resumes a repository-owned Moon continuation;
-3. an explicit experimental `Operation[T]` callback API as a preview-only
-   fallback.
+The current implementation uses documented Wasm closure delivery plus an
+explicit experimental callback `Operation` API. It proves the host scheduler
+and Rust task ABI without claiming that callbacks are native MoonBit
+async/await. The next continuation work must still find and validate a
+documented browser-compatible Moon async suspension interface, or make an
+explicit API decision to keep the callback form preview-only.
 
 Undocumented compiler intrinsics may be used for a short-lived experiment but
 not as the stable package contract. A synchronous busy loop, `Atomics.wait`,
@@ -416,7 +505,7 @@ POSIX pipe, or UI-thread blocking facade is rejected.
 ### Bulk data transfer
 
 The current per-byte `buffer_push` and `buffer_get` calls remain useful as a
-canary oracle but are removed from production read/write paths.
+canary oracle but must be removed from production read/write paths.
 
 The host adapter can see both module memories and performs bounded copies:
 
@@ -448,7 +537,7 @@ this order:
 
 | Stage | Constructors | Operations | Notes |
 | --- | --- | --- | --- |
-| Async memory | `Operator::memory` | write, read, stat, delete | proves real `Pending` completion |
+| Async memory | `Operator::memory` | write, read, stat, delete | callback write/read/stat prove real `Pending`; delete and stable `async fn` remain |
 | Browser local | `Operator::opfs` | create_dir, write, read, stat, list, delete | first useful product |
 | Browser S3 | typed S3 builder | write, read, stat, delete | temporary credentials and CORS contract |
 | Streaming | same builders | Reader, Writer, abort, bounded chunks | requires backpressure |
@@ -699,30 +788,33 @@ The work proceeds in parallel where dependencies allow.
 
 ### A. Rust bridge
 
-- replace poll-once with a task arena and browser executor;
-- remove global sticky errors from concurrent paths;
-- add completion, cancellation, and teardown states;
+- extend the implemented memory task arena/browser executor through the full
+  race and concurrency matrix;
+- keep OpenDAL operation errors in the implemented per-completion ownership
+  path and remove remaining sticky-error dependencies from concurrent paths;
+- harden the implemented completion, logical-cancellation, and teardown states;
 - add bulk buffer primitives;
 - add feature-minimal memory/OPFS/S3 profiles;
-- generate wasm-bindgen browser glue;
+- keep the generated wasm-bindgen browser glue pinned and reproducible;
 - preserve generation-checked resource ownership;
 - record imports, exports, sizes, and features.
 
 ### B. MoonBit facade
 
-- make the unpublished `/wasm` API async-first;
+- retain the implemented callback `Operation` surface as experimental while
+  pursuing the intended async-first API;
 - prototype stable browser continuation integration;
-- own all error/value conversion;
-- hide task, completion, callback, and loader handles;
+- extend the implemented error/value conversion;
+- continue hiding task, completion, callback-host, and loader handles;
 - add explicit close/abort and capability queries;
 - share pure value/validation semantics with native without sharing handles;
 - pin a generated public-interface contract for every preview.
 
 ### C. Loader and bundler
 
-- instantiate the Rust module before the Moon module;
+- retain the implemented Rust-before-Moon instantiation order;
 - validate manifest/ABI/features before exposing the application;
-- implement microtask callback delivery and teardown;
+- harden the implemented later-turn callback delivery and teardown;
 - implement bounded bulk copies across the two memories;
 - provide the Mooncake executable bundler;
 - implement verified cold/hot artifact acquisition;
@@ -755,7 +847,9 @@ those three probes contain most of the schedule uncertainty.
 
 ### M0 — Core-module memory canary
 
-Status: implementation present in draft PR #59; acceptance evidence pending.
+Status: synchronous round-trip and resource evidence is implemented and
+exercised by `make wasm-canary`; exact import/export and artifact-size evidence
+is still pending.
 
 Deliverables:
 
@@ -771,20 +865,44 @@ Exit:
 - repeated lifecycle returns the live-handle count to baseline;
 - the exact module imports/exports and artifact sizes are recorded.
 
-M0 is not a release.
+The first two exit bullets are covered by the Node runner, which executes the
+lifecycle twice and verifies teardown reaches zero live bridge handles. The
+third remains open. M0 is not a release, and its Node runner is not evidence of
+browser suspension.
 
 ### M1 — Actually asynchronous memory engine
 
 Estimated size: large, roughly 5–8 engineering days.
 
+Status: partial. `make wasm-browser-canary` now supplies real Chrome/Chromium
+evidence for the initial task/callback slice, but the full exit matrix and the
+stable MoonBit continuation decision remain open.
+
 Deliverables:
 
 - task ABI v1;
 - forced-delayed memory operation that reaches `Pending`;
-- Promise/event-loop driver;
+- event-loop callback/continuation driver;
 - per-completion errors;
 - logical cancellation and instance teardown;
 - concurrent operations on multiple operators.
+
+Implemented evidence:
+
+- task ABI and per-completion errors for callback write/read/stat;
+- four forced `Pending -> Ready` operations, including owned `NotFound`;
+- later-turn callback delivery and a browser heartbeat that runs before
+  readiness;
+- cancel-before-ready callback suppression and live-handle restoration;
+- operator close while a cloned task is pending, plus idempotent instance
+  teardown.
+
+Still required for M1 exit:
+
+- ready-versus-cancel, double-take, double-release, late-completion teardown,
+  and multi-operator concurrency cases with deterministic outcomes;
+- a documented ordinary-browser MoonBit continuation, or an explicit decision
+  that release remains callback-based and experimental.
 
 Exit:
 
@@ -946,8 +1064,9 @@ an interactive development session wait idly.
 | Static ABI | exact Moon imports versus Rust exports, manifest schema, API snapshot |
 | Rust state model | task/cancel/late-completion/resource property cases |
 | Moon facade | type/error conversion and compile-contract fixtures |
-| Core Wasm | import/export inspection, no WASI/POSIX/thread surprises |
-| Browser runtime | real browser Window, delayed completion, responsive event loop |
+| Node core-Wasm smoke | `make wasm-canary`: synchronous ABI/bootstrap, repeated lifecycle, teardown |
+| Core Wasm | import/export inspection and size record; no WASI/POSIX/thread surprises |
+| Browser runtime | `make wasm-browser-canary`: real Chrome/Chromium, four forced-pending tasks, heartbeat, logical cancel suppression, cleanup |
 | Binary transfer | NUL/non-UTF-8, 16 MiB chunks, limits, memory growth |
 | OPFS | persistence, origin isolation, quota/permission, reload |
 | Packaging | fresh Mooncake consumer, no Rust/npm/checkout, relocatable output |
@@ -997,8 +1116,10 @@ Keep changes reviewable and preserve the native baseline:
 
 1. design and Mooncake delivery contract (PR #58);
 2. memory core-module canary (PR #59);
-3. task ABI and delayed-memory async engine;
-4. browser callback/continuation adapter;
+3. task ABI and delayed-memory async engine (initial canary implemented;
+   race/concurrency hardening remains);
+4. browser callback adapter (experimental `Operation` and Chrome proof
+   implemented; stable continuation decision remains);
 5. bulk-transfer ABI;
 6. artifact manifest, resolver, and `moonx` bundler;
 7. clean Mooncake preview consumer;
@@ -1007,17 +1128,20 @@ Keep changes reviewable and preserve the native baseline:
 10. optional browser S3 profile;
 11. streaming and WIT/component evaluation.
 
-The task-ABI, bundler skeleton, and upstream proposals can begin in parallel.
-OPFS implementation begins only after a forced-pending memory operation
-completes through the same public MoonBit path.
+The forced-pending memory operation now completes through the public MoonBit
+callback path in Chrome. Task-ABI hardening, the bundler skeleton, and upstream
+proposals can proceed in parallel. OPFS still waits for the remaining M1 race
+matrix, M2 transfer path, and M3 distribution gates; the Chrome result alone
+does not authorize a service support claim.
 
 ## Immediate next actions
 
-1. Freeze a draft task ABI v1 and error/completion ownership table.
-2. Replace poll-once with a delayed-memory task driven by the browser event
-   loop.
-3. Build the Moon continuation spike and decide stable async versus
-   preview-only callback surface.
+1. Review and freeze the implemented draft task ABI v1, status values, and
+   error/completion ownership table.
+2. Add ready/cancel races, double-take/release, late teardown, and concurrent
+   multi-operator browser cases.
+3. Continue the documented Moon continuation spike; keep the current callback
+   `Operation` API explicitly experimental meanwhile.
 4. Replace per-byte transfer with a bounded bulk-copy experiment.
 5. Define `wasm/artifacts-browser.json` and the `browser-local` archive layout.
 6. Scaffold the exact-version `cmd/wasm-bundle` package.

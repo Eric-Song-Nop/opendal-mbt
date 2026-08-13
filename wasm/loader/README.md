@@ -1,8 +1,15 @@
 # OpenDAL MoonBit Wasm loader canary
 
 `loadOpenDalMoonBit` initializes the wasm-bindgen-processed Rust OpenDAL bridge
-first and supplies its scalar exports as the `opendal_mbt_bridge` import module
-when instantiating a MoonBit Wasm consumer:
+first, then instantiates the MoonBit Wasm consumer with three repository-owned
+import groups:
+
+- the Rust scalar exports as `opendal_mbt_bridge`;
+- `opendal_mbt_host.wait_task` for later-turn task polling and callback
+  delivery;
+- `moonbit:ffi.make_closure` for MoonBit Wasm closure imports.
+
+The application does not construct this import table:
 
 ```js
 import { loadOpenDalMoonBit } from "./index.mjs";
@@ -18,6 +25,7 @@ const runtime = await loadOpenDalMoonBit({
 });
 
 const status = runtime.exports.opendal_mbt_wasm_canary_roundtrip();
+runtime.dispose();
 ```
 
 The bridge initializer is the default export produced by the exact pinned
@@ -26,7 +34,25 @@ URL objects directly in Node for the MoonBit module; the Node canary passes the
 bridge bytes to its initializer because Node does not fetch `file:` URLs. Bare
 local path strings are intentionally not interpreted as files.
 
+For callback operations, `wait_task` begins polling in a microtask. A pending
+task is polled again from a later zero-delay timer turn; a ready task receives
+its MoonBit callback. This keeps callback delivery out of the initiating
+MoonBit/Rust stack. `dispose()` is idempotent: it cancels loader timers and
+permanently tears down the Rust instance so late task completions are inert.
+Call it when the application instance is no longer used.
+
+The Node runner currently invokes only the synchronous round-trip export, so
+it is an ABI smoke test. The real Chrome/Chromium runner in
+`../canary/run-browser.mjs` is the evidence that forced-pending callback tasks
+reach ready state while a browser heartbeat remains responsive.
+
 This loader deliberately does not inspect either module's linear memory. The
-MoonBit facade and Rust bridge exchange only scalar handles and byte values.
-The loader remains repository-owned experimental glue until packaging chooses
-between core-module composition and WIT components.
+MoonBit facade and Rust bridge still transfer payload bytes through scalar
+buffer operations, and only the separate host callback import carries a
+MoonBit closure. Bounded cross-memory bulk transfer is a later milestone.
+
+The loader enables the experimental public callback `Operation` API; it does
+not make ordinary browser MoonBit `async fn` suspension portable. That remains
+limited by the officially supported MoonBit runtime. The loader stays
+repository-owned experimental glue until packaging and the long-term
+core-module/WIT boundary are decided.

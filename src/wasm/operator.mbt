@@ -19,6 +19,14 @@ pub fn live_handle_count() -> UInt {
 }
 
 ///|
+/// Return how many asynchronous canary tasks reached an actual pending poll.
+///
+/// This is a canary oracle and not a stable production metric.
+pub fn canary_forced_pending_poll_count() -> UInt {
+  bridge_canary_forced_pending_poll_count()
+}
+
+///|
 /// Create an OpenDAL in-memory operator.
 pub fn Operator::memory() -> Operator raise WasmError {
   ignore(bridge_last_error_clear())

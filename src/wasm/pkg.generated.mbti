@@ -10,6 +10,8 @@ pub fn bridge_features() -> UInt
 
 pub fn bridge_version() -> UInt
 
+pub fn canary_forced_pending_poll_count() -> UInt
+
 pub fn live_handle_count() -> UInt
 
 // Errors
@@ -26,14 +28,31 @@ pub struct Metadata {
   is_file : Bool
 } derive(Eq, @debug.Debug)
 
+pub struct Operation {
+  // private fields
+}
+pub fn Operation::cancel(Self) -> Unit
+pub fn Operation::close(Self) -> Unit
+pub fn Operation::state(Self) -> OperationState
+
+pub enum OperationState {
+  Pending
+  Completed
+  Cancelled
+  Closed
+} derive(Eq, @debug.Debug)
+
 pub struct Operator {
   // private fields
 }
 pub fn Operator::close(Self) -> Unit
 pub fn Operator::memory() -> Self raise WasmError
 pub fn Operator::read(Self, StringView) -> Bytes raise WasmError
+pub fn Operator::read_callback(Self, StringView, (Result[Bytes, WasmError]) -> Unit) -> Operation raise WasmError
 pub fn Operator::stat(Self, StringView) -> Metadata raise WasmError
+pub fn Operator::stat_callback(Self, StringView, (Result[Metadata, WasmError]) -> Unit) -> Operation raise WasmError
 pub fn Operator::write(Self, StringView, BytesView) -> Unit raise WasmError
+pub fn Operator::write_callback(Self, StringView, BytesView, (Result[Unit, WasmError]) -> Unit) -> Operation raise WasmError
 
 // Type aliases
 

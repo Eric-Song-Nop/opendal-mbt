@@ -2,7 +2,7 @@
 const EXPECTED_ABI_VERSION = 0x0001_0000U
 
 ///|
-const REQUIRED_FEATURE_FLAGS = 0x0000_000fU
+const REQUIRED_FEATURE_FLAGS = 0x0000_001fU
 
 ///|
 fn take_bridge_error(
@@ -13,18 +13,30 @@ fn take_bridge_error(
   if error == 0U {
     WasmError(fallback_code, fallback_message)
   } else {
-    let code = bridge_error_code(error).reinterpret_as_int()
-    let message_buffer = bridge_error_message(error)
-    let message = if message_buffer == 0U {
-      fallback_message
-    } else {
-      let bytes = copy_buffer_from_bridge_without_error_snapshot(message_buffer)
-      ignore(bridge_buffer_release(message_buffer))
-      @utf8.decode_lossy(bytes)
-    }
-    ignore(bridge_error_release(error))
-    WasmError(code, message)
+    take_owned_bridge_error(error, fallback_code, fallback_message)
   }
+}
+
+///|
+fn take_owned_bridge_error(
+  error : UInt,
+  fallback_code : Int,
+  fallback_message : String,
+) -> WasmError {
+  if error == 0U {
+    return WasmError(fallback_code, fallback_message)
+  }
+  let code = bridge_error_code(error).reinterpret_as_int()
+  let message_buffer = bridge_error_message(error)
+  let message = if message_buffer == 0U {
+    fallback_message
+  } else {
+    let bytes = copy_buffer_from_bridge_without_error_snapshot(message_buffer)
+    ignore(bridge_buffer_release(message_buffer))
+    @utf8.decode_lossy(bytes)
+  }
+  ignore(bridge_error_release(error))
+  WasmError(code, message)
 }
 
 ///|

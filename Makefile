@@ -39,7 +39,7 @@ MOON_TEST_FLAGS := --target native --frozen --warn-list '$(MOON_WARN_LIST)' --de
 .PHONY: native rust-test rust-lint moon-deps moon-check moon-test coverage abi-smoke c-example \
 	api-contract interface-contract package-contract packaged-consumer check \
 	test-profile native-artifact-test version-contract asan wasm-rust wasm-moon \
-	wasm-canary wasm-interface-contract
+	wasm-canary wasm-browser-canary wasm-interface-contract
 
 native:
 	cargo build --package opendal-mbt-native --locked $(CARGO_SERVICE_FLAGS) \
@@ -68,9 +68,15 @@ wasm-canary: wasm-rust wasm-moon
 	node wasm/canary/run.mjs "$(WASM_RUST_GLUE)" "$(WASM_RUST_TARGET)" \
 		"$(WASM_MOON_TARGET)"
 
+wasm-browser-canary: wasm-rust wasm-moon
+	node wasm/canary/run-browser.mjs "$(WASM_RUST_GLUE)" \
+		"$(WASM_RUST_TARGET)" "$(WASM_MOON_TARGET)"
+
 rust-test:
 	cargo test --package opendal-mbt-native --all-targets --locked \
 		$(CARGO_SERVICE_FLAGS) \
+		$(CARGO_PROFILE_FLAG)
+	cargo test --package opendal-mbt-wasm-bridge --all-targets --locked \
 		$(CARGO_PROFILE_FLAG)
 
 rust-lint:

@@ -51,6 +51,10 @@ async function main() {
   if (status !== 0) {
     throw new Error(`OpenDAL MoonBit Wasm canary failed with status ${status}`);
   }
+  runtime.dispose();
+  if (runtime.bridge.exports.opendal_mbt_wasm_live_handle_count() !== 0) {
+    throw new Error("bridge teardown left live resource handles");
+  }
 }
 
 await main();

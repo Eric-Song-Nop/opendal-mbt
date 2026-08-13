@@ -10,5 +10,7 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+gloo-timers = { version = "=0.3.0", features = ["futures"] }
 opendal = { version = "=0.58.1", default-features = false }
 thiserror = "=2.0.20"
+wasm-bindgen-futures = "=0.4.77"

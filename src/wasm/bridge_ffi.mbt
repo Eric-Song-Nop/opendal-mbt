@@ -8,6 +8,9 @@ fn bridge_feature_flags() -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_featu
 fn bridge_live_handle_count() -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_live_handle_count"
 
 ///|
+fn bridge_canary_forced_pending_poll_count() -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_canary_forced_pending_poll_count"
+
+///|
 fn bridge_buffer_new() -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_buffer_new"
 
 ///|
@@ -33,6 +36,52 @@ fn bridge_operator_read(operator : UInt, path : UInt) -> UInt = "opendal_mbt_bri
 
 ///|
 fn bridge_operator_stat(operator : UInt, path : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_operator_stat"
+
+///|
+fn bridge_operator_write_start(
+  operator : UInt,
+  path : UInt,
+  data : UInt,
+) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_operator_write_start"
+
+///|
+fn bridge_operator_read_start(operator : UInt, path : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_operator_read_start"
+
+///|
+fn bridge_operator_stat_start(operator : UInt, path : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_operator_stat_start"
+
+///|
+fn bridge_task_state(handle : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_task_state"
+
+///|
+fn bridge_task_take(handle : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_task_take"
+
+///|
+fn bridge_task_cancel(handle : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_task_cancel"
+
+///|
+fn bridge_task_release(handle : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_task_release"
+
+///|
+fn bridge_completion_kind(handle : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_completion_kind"
+
+///|
+fn bridge_completion_status(handle : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_completion_status"
+
+///|
+fn bridge_completion_take_buffer(handle : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_completion_take_buffer"
+
+///|
+fn bridge_completion_take_metadata(handle : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_completion_take_metadata"
+
+///|
+fn bridge_completion_take_error(handle : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_completion_take_error"
+
+///|
+fn bridge_completion_release(handle : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_completion_release"
+
+///|
+fn host_wait_task(handle : UInt, callback : (UInt) -> Unit) -> Unit = "opendal_mbt_host" "wait_task"
 
 ///|
 fn bridge_operator_release(handle : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_operator_release"

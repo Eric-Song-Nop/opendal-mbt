@@ -38,3 +38,22 @@ pub struct Metadata {
 pub struct Operator {
   priv mut handle : UInt
 }
+
+///|
+/// Observable state of an experimental callback operation.
+pub enum OperationState {
+  Pending
+  Completed
+  Cancelled
+  Closed
+} derive(Eq, Debug)
+
+///|
+/// A cancellable browser operation driven by the official loader.
+///
+/// This callback surface is experimental until MoonBit exposes a documented
+/// continuation API for ordinary browser Wasm hosts.
+pub struct Operation {
+  priv mut handle : UInt
+  priv mut state : OperationState
+}

@@ -1,4 +1,53 @@
 const DEFAULT_IMPORT_MODULE = "opendal_mbt_bridge";
+const DEFAULT_HOST_MODULE = "opendal_mbt_host";
+const MOONBIT_FFI_MODULE = "moonbit:ffi";
+const TASK_PENDING = 1;
+const TASK_READY = 2;
+
+function createTaskHost(bridgeExports) {
+  let disposed = false;
+  const timers = new Set();
+
+  function schedule(callback) {
+    const timer = setTimeout(() => {
+      timers.delete(timer);
+      callback();
+    }, 0);
+    timers.add(timer);
+  }
+
+  function waitTask(handle, callback) {
+    if (disposed) {
+      return;
+    }
+    if (typeof callback !== "function") {
+      throw new TypeError("task callback must be a function");
+    }
+    const poll = () => {
+      if (disposed) {
+        return;
+      }
+      const state = bridgeExports.opendal_mbt_wasm_task_state(handle);
+      if (state === TASK_PENDING) {
+        schedule(poll);
+      } else if (state === TASK_READY) {
+        callback(handle);
+      }
+    };
+    queueMicrotask(poll);
+  }
+
+  return {
+    imports: { wait_task: waitTask },
+    dispose() {
+      disposed = true;
+      for (const timer of timers) {
+        clearTimeout(timer);
+      }
+      timers.clear();
+    },
+  };
+}
 
 function isResponse(value) {
   return typeof Response !== "undefined" && value instanceof Response;
@@ -66,30 +115,58 @@ export async function loadOpenDalMoonBit({
   imports = {},
   bridgeImports = {},
   importModule = DEFAULT_IMPORT_MODULE,
+  hostModule = DEFAULT_HOST_MODULE,
 }) {
   const bridgeInstance = await instantiateBridge(
     bridge,
     bridgeImports,
     bridgeInitializer,
   );
-  const moonbitModule = await toModule(moonbit);
-  const existing = imports[importModule] ?? {};
-  const moonbitImports = {
-    ...imports,
-    [importModule]: {
-      ...existing,
-      ...bridgeInstance.exports,
-    },
-  };
-  const moonbitInstance = await WebAssembly.instantiate(
-    moonbitModule,
-    moonbitImports,
-  );
-  return {
-    exports: moonbitInstance.exports,
-    bridge: bridgeInstance,
-    moonbit: moonbitInstance,
-  };
+  let taskHost;
+  try {
+    const moonbitModule = await toModule(moonbit);
+    const existing = imports[importModule] ?? {};
+    const existingHost = imports[hostModule] ?? {};
+    const existingMoonBitFfi = imports[MOONBIT_FFI_MODULE] ?? {};
+    taskHost = createTaskHost(bridgeInstance.exports);
+    const moonbitImports = {
+      ...imports,
+      [importModule]: {
+        ...existing,
+        ...bridgeInstance.exports,
+      },
+      [hostModule]: {
+        ...existingHost,
+        ...taskHost.imports,
+      },
+      [MOONBIT_FFI_MODULE]: {
+        make_closure: (funcref, closure) => funcref.bind(null, closure),
+        ...existingMoonBitFfi,
+      },
+    };
+    const moonbitInstance = await WebAssembly.instantiate(
+      moonbitModule,
+      moonbitImports,
+    );
+    let disposed = false;
+    return {
+      exports: moonbitInstance.exports,
+      bridge: bridgeInstance,
+      moonbit: moonbitInstance,
+      dispose() {
+        if (disposed) {
+          return;
+        }
+        disposed = true;
+        taskHost.dispose();
+        bridgeInstance.exports.opendal_mbt_wasm_teardown();
+      },
+    };
+  } catch (error) {
+    taskHost?.dispose();
+    bridgeInstance.exports.opendal_mbt_wasm_teardown?.();
+    throw error;
+  }
 }
 
 export default loadOpenDalMoonBit;

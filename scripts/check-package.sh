@@ -19,7 +19,7 @@ for required_file in \
   tasks.mbt.md build.js src/moon.pkg src/README.mbt.md \
   src/getting-started.mbt.md src/connecting.mbt.md src/tasks.mbt.md \
   src/wasm/moon.pkg src/wasm/pkg.generated.mbti \
-  src/wasm/bridge_ffi.mbt src/wasm/operator.mbt \
+  src/wasm/bridge_ffi.mbt src/wasm/operation.mbt src/wasm/operator.mbt \
   src/wasm/transfer.mbt src/wasm/types.mbt \
   wasm/loader/index.mjs wasm/loader/package.json \
   wasm/README.md wasm/loader/README.md \
