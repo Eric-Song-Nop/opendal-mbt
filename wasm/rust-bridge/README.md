@@ -44,11 +44,12 @@ minimal dependency and feature set does not change native build profiles.
 
 ## ABI conventions
 
-- ABI version is `0x0001_0002` (major 1, minor 2).
-- Feature flags currently equal `0x0000_007f`: bit 0 memory service, bit 1
+- ABI version is `0x0001_0003` (major 1, minor 3).
+- Feature flags currently equal `0x0000_00ff`: bit 0 memory service, bit 1
   poll-once canary, bit 2 generation handles, bit 3 binary buffers, and bit 4
   task ABI, bit 5 generic operator construction and service inspection, and
-  bit 6 common create-dir/delete mutations.
+  bit 6 common create-dir/delete mutations, and bit 7 bounded streaming list
+  materialization.
 - Handles are positive signed 32-bit values as well as valid `u32` values; the
   generation field is 15 bits so MoonBit can carry them in an `Int` unchanged.
   A slot is permanently retired when that generation space is exhausted, so a
@@ -75,9 +76,11 @@ minimal dependency and feature set does not change native build profiles.
 
 Task state scalars are `1` pending, `2` ready, `3` cancelled, and `4`
 consumed. Completion kinds are `1` write, `2` read, `3` stat, `4` create-dir,
-and `5` delete. `task_take` moves a ready result into a separately owned
-completion exactly once. Read, metadata, and error take operations then consume
-that completion; successful unit completions are explicitly released.
+`5` delete, and `6` list. `task_take` moves a ready result into a separately
+owned completion exactly once. Read, metadata, entry-list, and error take
+operations then consume that completion; successful unit completions are
+explicitly released. Lists are streamed into owned snapshots and fail before
+publication above 65,536 entries or 16 MiB of path/name UTF-8 data.
 
 Task cancellation is **logical**. Cancelling pending work makes late completion
 inert; cancelling ready work wins over an unconsumed result. It does not abort
@@ -90,7 +93,8 @@ handle, `2` wrong resource type, `3` buffer too large, `4` index out of bounds,
 `5` invalid byte, `6` invalid UTF-8 path, `7` OpenDAL `NotFound`, `8` other
 OpenDAL error, `9` async operation became pending, `10` handle limit, and `11`
 scalar length overflow, `12` task not ready, `13` task already consumed, and
-`14` bridge instance torn down.
+`14` bridge instance torn down, `15` list materialization limit, `16`
+allocation failure, and `17` invalid scalar argument.
 
 The exported symbols all use the `opendal_mbt_wasm_` prefix. See `src/lib.rs`
 for the complete list and exact signatures.

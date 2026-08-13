@@ -90,6 +90,16 @@ fn bridge_operator_delete_start(
 ) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_operator_delete_start"
 
 ///|
+fn bridge_operator_list_start(
+  operator : UInt,
+  path : UInt,
+  recursive : Bool,
+  has_limit : Bool,
+  limit : UInt64,
+  start_after : UInt,
+) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_operator_list_start"
+
+///|
 fn bridge_task_state(handle : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_task_state"
 
 ///|
@@ -114,10 +124,31 @@ fn bridge_completion_take_buffer(handle : UInt) -> UInt = "opendal_mbt_bridge" "
 fn bridge_completion_take_metadata(handle : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_completion_take_metadata"
 
 ///|
+fn bridge_completion_take_entry_list(handle : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_completion_take_entry_list"
+
+///|
 fn bridge_completion_take_error(handle : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_completion_take_error"
 
 ///|
 fn bridge_completion_release(handle : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_completion_release"
+
+///|
+fn bridge_entry_list_len(handle : UInt) -> Int = "opendal_mbt_bridge" "opendal_mbt_wasm_entry_list_len"
+
+///|
+fn bridge_entry_list_path(handle : UInt, index : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_entry_list_path"
+
+///|
+fn bridge_entry_list_name(handle : UInt, index : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_entry_list_name"
+
+///|
+fn bridge_entry_list_mode(handle : UInt, index : UInt) -> Int = "opendal_mbt_bridge" "opendal_mbt_wasm_entry_list_mode"
+
+///|
+fn bridge_entry_list_content_length(handle : UInt, index : UInt) -> UInt64 = "opendal_mbt_bridge" "opendal_mbt_wasm_entry_list_content_length"
+
+///|
+fn bridge_entry_list_release(handle : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_entry_list_release"
 
 ///|
 fn host_wait_task(handle : UInt, callback : (UInt) -> Unit) -> Unit = "opendal_mbt_host" "wait_task"
@@ -132,7 +163,7 @@ fn bridge_metadata_content_length_low(handle : UInt) -> UInt = "opendal_mbt_brid
 fn bridge_metadata_content_length_high(handle : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_metadata_content_length_high"
 
 ///|
-fn bridge_metadata_is_file(handle : UInt) -> Int = "opendal_mbt_bridge" "opendal_mbt_wasm_metadata_is_file"
+fn bridge_metadata_mode(handle : UInt) -> Int = "opendal_mbt_bridge" "opendal_mbt_wasm_metadata_mode"
 
 ///|
 fn bridge_metadata_release(handle : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_metadata_release"

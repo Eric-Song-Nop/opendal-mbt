@@ -95,12 +95,12 @@ try {
 
   await waitFor(
     () => exports.opendal_mbt_wasm_canary_async_stage(),
-    8,
+    9,
     "asynchronous OpenDAL memory lifecycle",
   );
   assert(
-    exports.opendal_mbt_wasm_canary_pending_poll_count() === pendingBefore + 7,
-    "not every create/write/read/stat/delete/NotFound task observed Pending",
+    exports.opendal_mbt_wasm_canary_pending_poll_count() === pendingBefore + 8,
+    "not every create/write/read/stat/list/delete/NotFound task observed Pending",
   );
 
   assert(
@@ -126,7 +126,7 @@ try {
   );
   await report({
     ok: true,
-    pendingTasks: 7,
+    pendingTasks: 8,
     heartbeat: true,
     cancellation: "suppressed",
   });

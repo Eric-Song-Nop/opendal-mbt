@@ -4,7 +4,7 @@ import { pathToFileURL } from "node:url";
 
 import { loadOpenDalMoonBit } from "../loader/index.mjs";
 
-const expectedAbiVersion = 0x0001_0002;
+const expectedAbiVersion = 0x0001_0003;
 
 async function readProcessedBridge(path) {
   const bytes = await readFile(resolve(path));

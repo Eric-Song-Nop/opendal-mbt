@@ -27,11 +27,47 @@ pub fn WasmError::is_not_found(self : WasmError) -> Bool {
 }
 
 ///|
-/// The metadata subset proven by the first OpenDAL memory-service slice.
-pub struct Metadata {
-  content_length : UInt64
-  is_file : Bool
+/// Identifies whether a listed entry is a file, directory, or unknown kind.
+pub enum EntryMode {
+  File
+  Directory
+  Unknown
 } derive(Eq, Debug)
+
+///|
+/// The metadata subset currently materialized by the browser binding.
+pub struct Metadata {
+  mode : EntryMode
+  content_length : UInt64
+} derive(Eq, Debug)
+
+///|
+pub fn Metadata::is_file(self : Metadata) -> Bool {
+  self.mode is File
+}
+
+///|
+pub fn Metadata::is_dir(self : Metadata) -> Bool {
+  self.mode is Directory
+}
+
+///|
+/// An owned path and metadata snapshot returned by a bounded list operation.
+pub struct Entry {
+  path : String
+  name : String
+  metadata : Metadata
+} derive(Eq, Debug)
+
+///|
+pub fn Entry::is_file(self : Entry) -> Bool {
+  self.metadata.is_file()
+}
+
+///|
+pub fn Entry::is_dir(self : Entry) -> Bool {
+  self.metadata.is_dir()
+}
 
 ///|
 /// A portable snapshot of operations supported by one configured backend.

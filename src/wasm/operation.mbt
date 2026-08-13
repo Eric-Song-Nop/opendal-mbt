@@ -17,6 +17,9 @@ const COMPLETION_CREATE_DIR = 4U
 const COMPLETION_DELETE = 5U
 
 ///|
+const COMPLETION_LIST = 6U
+
+///|
 /// Return the local state of this experimental callback operation.
 pub fn Operation::state(self : Operation) -> OperationState {
   self.state
@@ -266,18 +269,18 @@ pub fn Operator::stat_callback(
             )
           } else {
             ignore(bridge_last_error_clear())
-            let is_file = bridge_metadata_is_file(metadata)
+            let mode = bridge_metadata_mode(metadata)
             let low = bridge_metadata_content_length_low(metadata)
             let high = bridge_metadata_content_length_high(metadata)
             let metadata_error = bridge_last_error_code()
             ignore(bridge_metadata_release(metadata))
-            if is_file < 0 || metadata_error != 0U {
+            if mode < 0 || mode > 2 || metadata_error != 0U {
               callback(Err(take_bridge_error(-1, "could not inspect metadata")))
             } else {
               callback(
                 Ok({
+                  mode: entry_mode_from_bridge_unchecked(mode),
                   content_length: combine_u64(low, high),
-                  is_file: is_file != 0,
                 }),
               )
             }
@@ -372,6 +375,140 @@ pub fn Operator::delete_callback(
       "delete",
       callback,
     )
+  })
+  operation
+}
+
+///|
+fn entry_mode_from_bridge(mode : Int) -> EntryMode raise WasmError {
+  if mode < 0 || mode > 2 {
+    raise WasmError(2, "bridge returned an invalid entry mode \{mode}")
+  }
+  entry_mode_from_bridge_unchecked(mode)
+}
+
+///|
+fn entry_mode_from_bridge_unchecked(mode : Int) -> EntryMode {
+  match mode {
+    1 => File
+    2 => Directory
+    _ => Unknown
+  }
+}
+
+///|
+fn materialize_entry_list(handle : UInt) -> Array[Entry] raise WasmError {
+  let length = bridge_entry_list_len(handle)
+  if length < 0 {
+    raise_last_bridge_error("could not query the entry-list length")
+  }
+  let entries : Array[Entry] = []
+  for index = 0; index < length; index = index + 1 {
+    let index = index.reinterpret_as_uint()
+    let path = take_utf8_buffer(
+      bridge_entry_list_path(handle, index),
+      "could not copy a listed path",
+    )
+    let name = take_utf8_buffer(
+      bridge_entry_list_name(handle, index),
+      "could not copy a listed name",
+    )
+    ignore(bridge_last_error_clear())
+    let mode = bridge_entry_list_mode(handle, index)
+    let content_length = bridge_entry_list_content_length(handle, index)
+    if mode < 0 || bridge_last_error_code() != 0U {
+      raise_last_bridge_error("could not inspect a listed entry")
+    }
+    entries.push({
+      path,
+      name,
+      metadata: { mode: entry_mode_from_bridge(mode), content_length },
+    })
+  }
+  entries
+}
+
+///|
+/// Start a callback-based bounded prefix listing.
+///
+/// `limit` is a backend request/page hint. Independently, the bridge enforces
+/// fixed total entry and UTF-8 byte ceilings before publishing any result.
+pub fn Operator::list_callback(
+  self : Operator,
+  path : StringView,
+  callback : (Result[Array[Entry], WasmError]) -> Unit,
+  recursive? : Bool = false,
+  limit? : UInt64,
+  start_after? : StringView,
+) -> Operation raise WasmError {
+  if self.handle == 0U {
+    raise WasmError(1, "operator is closed")
+  }
+  ignore(bridge_last_error_clear())
+  let path_handle = copy_path_to_bridge(path)
+  let start_after_handle = match start_after {
+    None => 0U
+    Some(start_after) =>
+      copy_path_to_bridge(start_after) catch {
+        error => {
+          ignore(bridge_buffer_release(path_handle))
+          raise error
+        }
+      }
+  }
+  let task = bridge_operator_list_start(
+    self.handle,
+    path_handle,
+    recursive,
+    limit is Some(_),
+    limit.unwrap_or(0UL),
+    start_after_handle,
+  )
+  if start_after_handle != 0U {
+    ignore(bridge_buffer_release(start_after_handle))
+  }
+  ignore(bridge_buffer_release(path_handle))
+  if task == 0U {
+    raise_last_bridge_error("could not start an asynchronous list")
+  }
+  let operation : Operation = { handle: task, state: Pending }
+  start_wait(operation, task => {
+    match operation.take_completion(task) {
+      None =>
+        callback(
+          Err(
+            take_bridge_error(12, "list task became ready without a completion"),
+          ),
+        )
+      Some(completion) => {
+        let kind = bridge_completion_kind(completion)
+        let status = bridge_completion_status(completion)
+        if kind != COMPLETION_LIST {
+          ignore(bridge_completion_release(completion))
+          callback(
+            Err(WasmError(2, "list task returned the wrong completion kind")),
+          )
+        } else if status != 0U {
+          callback(Err(completion_error(completion, status, "list failed")))
+        } else {
+          let entry_list = bridge_completion_take_entry_list(completion)
+          if entry_list == 0U {
+            ignore(bridge_completion_release(completion))
+            callback(
+              Err(take_bridge_error(11, "could not take the list result")),
+            )
+          } else {
+            let result = try materialize_entry_list(entry_list) catch {
+              error => Err(error)
+            } noraise {
+              entries => Ok(entries)
+            }
+            ignore(bridge_entry_list_release(entry_list))
+            callback(result)
+          }
+        }
+      }
+    }
   })
   operation
 }

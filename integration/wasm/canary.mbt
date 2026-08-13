@@ -38,16 +38,19 @@ const ASYNC_READ_PENDING = 3
 const ASYNC_STAT_PENDING = 4
 
 ///|
-const ASYNC_DELETE_PENDING = 5
+const ASYNC_LIST_PENDING = 5
 
 ///|
-const ASYNC_DELETE_AGAIN_PENDING = 6
+const ASYNC_DELETE_PENDING = 6
 
 ///|
-const ASYNC_MISSING_PENDING = 7
+const ASYNC_DELETE_AGAIN_PENDING = 7
 
 ///|
-const ASYNC_OK = 8
+const ASYNC_MISSING_PENDING = 8
+
+///|
+const ASYNC_OK = 9
 
 ///|
 const ASYNC_ERROR = -1
@@ -158,13 +161,53 @@ fn start_async_delete(operator : @opendal.Operator) -> Unit {
 }
 
 ///|
+fn start_async_list(operator : @opendal.Operator, payload : Bytes) -> Unit {
+  async_stage.val = ASYNC_LIST_PENDING
+  let operation = operator.list_callback(
+    "canary/async/",
+    result => {
+      match result {
+        Ok(entries) => {
+          let mut found_file = false
+          let mut found_directory = false
+          for entry in entries {
+            if entry.path == "canary/async/data.bin" &&
+              entry.name == "data.bin" &&
+              entry.is_file() &&
+              entry.metadata.content_length == payload.length().to_uint64() {
+              found_file = true
+            } else if entry.path == "canary/async/" && entry.is_dir() {
+              found_directory = true
+            }
+          }
+          if found_file && found_directory {
+            start_async_delete(operator)
+          } else {
+            fail_async_lifecycle()
+          }
+        }
+        Err(_) => fail_async_lifecycle()
+      }
+    },
+    recursive=true,
+    limit=2UL,
+  ) catch {
+    _ => {
+      fail_async_lifecycle()
+      return
+    }
+  }
+  async_operation.val = Some(operation)
+}
+
+///|
 fn start_async_stat(operator : @opendal.Operator, payload : Bytes) -> Unit {
   async_stage.val = ASYNC_STAT_PENDING
   let operation = operator.stat_callback("canary/async/data.bin", result => {
     match result {
-      Ok(metadata) if metadata.is_file &&
+      Ok(metadata) if metadata.is_file() &&
         metadata.content_length == payload.length().to_uint64() =>
-        start_async_delete(operator)
+        start_async_list(operator, payload)
       _ => fail_async_lifecycle()
     }
   }) catch {
@@ -348,7 +391,7 @@ fn run_one_lifecycle() -> Int {
       return CANARY_UNEXPECTED_ERROR
     }
   }
-  if !metadata.is_file ||
+  if !metadata.is_file() ||
     metadata.content_length != payload.length().to_uint64() {
     operator.close()
     return CANARY_METADATA_MISMATCH

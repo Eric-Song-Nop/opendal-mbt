@@ -277,8 +277,8 @@ pub fn Operator::stat(
     raise error
   }
   ignore(bridge_buffer_release(path_handle))
-  let is_file = bridge_metadata_is_file(metadata)
-  if is_file < 0 {
+  let mode = bridge_metadata_mode(metadata)
+  if mode < 0 {
     let error = take_bridge_error(-1, "could not inspect metadata")
     ignore(bridge_metadata_release(metadata))
     raise error
@@ -298,7 +298,7 @@ pub fn Operator::stat(
   }
   let content_length = combine_u64(content_length_low, content_length_high)
   ignore(bridge_metadata_release(metadata))
-  { content_length, is_file: is_file != 0 }
+  { mode: entry_mode_from_bridge(mode), content_length }
 }
 
 ///|

@@ -19,8 +19,8 @@ There are two deliberately different runners:
   teardown with zero live handles.
 - `make wasm-browser-canary` launches a real headless Chrome/Chromium page. It
   drives the callback task ABI through create-dir, write, read, `stat`,
-  idempotent recursive delete, and `NotFound`; forces all seven Rust futures
-  to return `Pending` on their first poll; proves
+  bounded list, idempotent recursive delete, and `NotFound`; forces all eight
+  Rust futures to return `Pending` on their first poll; proves
   that a previously queued browser heartbeat runs before completion; suppresses
   a cancel-before-ready callback; and verifies handle cleanup and instance
   teardown.
@@ -118,7 +118,7 @@ loopback HTTP, waits for the page to report, and prints a successful result of
 the following shape:
 
 ```json
-{"ok":true,"pendingTasks":7,"heartbeat":true,"cancellation":"suppressed"}
+{"ok":true,"pendingTasks":8,"heartbeat":true,"cancellation":"suppressed"}
 ```
 
 ## Package surface
@@ -132,16 +132,19 @@ The experimental `Eric-Song-Nop/opendal/wasm` package currently exposes:
 - `write_callback`, `read_callback`, `stat_callback`,
   `create_dir_callback`, and `delete_callback`, each returning an `Operation`
   with `Pending`, `Completed`, `Cancelled`, and `Closed` states;
+- `list_callback` with recursive, page-limit, and start-after options, returning
+  owned `Entry` snapshots under fixed total entry/UTF-8 byte ceilings;
 - idempotent `Operation::cancel` and `Operation::close`;
-- `Metadata` with `content_length` and `is_file`;
+- `Metadata` with `EntryMode`, `content_length`, `is_file`, and `is_dir`;
 - an owned `WasmError` snapshot with code, message, and `is_not_found`;
 - bridge version/features plus canary-only live-handle and forced-pending
   diagnostics.
 
-The bridge ABI is version `0x0001_0002`. Its current feature bitmap is
-`0x0000_007f`: memory service, poll-once synchronous canary, generation
+The bridge ABI is version `0x0001_0003`. Its current feature bitmap is
+`0x0000_00ff`: memory service, poll-once synchronous canary, generation
 handles, binary buffers, task ABI, generic operator construction through the
-compiled OpenDAL service registry, and common create-dir/delete mutations.
+compiled OpenDAL service registry, common create-dir/delete mutations, and
+bounded streaming list materialization.
 
 The native `Eric-Song-Nop/opendal` package and its C/static-library ABI are not
 changed or reused by this backend.
