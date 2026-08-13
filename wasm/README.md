@@ -43,10 +43,12 @@ Rust module first and supplies its exports to the MoonBit module.
 ## Build and run
 
 Prerequisites are the repository's pinned Rust and MoonBit toolchains, Node.js
-18 or newer, and the Rust `wasm32-unknown-unknown` target:
+18 or newer, the Rust `wasm32-unknown-unknown` target, and the wasm-bindgen CLI
+version locked by the bridge dependency graph:
 
 ```sh
 rustup target add wasm32-unknown-unknown
+cargo install wasm-bindgen-cli --version 0.2.127 --locked
 make wasm-canary
 ```
 
@@ -57,13 +59,27 @@ CARGO_PROFILE_RELEASE_PANIC=abort \
   cargo build --locked --package opendal-mbt-wasm-bridge \
   --target wasm32-unknown-unknown --release
 
+mkdir -p target/wasm-bindgen/release
+wasm-bindgen --target web --no-typescript \
+  --out-dir target/wasm-bindgen/release \
+  --out-name opendal_mbt_wasm_bridge \
+  target/wasm32-unknown-unknown/release/opendal_mbt_wasm_bridge.wasm
+mv target/wasm-bindgen/release/opendal_mbt_wasm_bridge.js \
+  target/wasm-bindgen/release/opendal_mbt_wasm_bridge.mjs
+
 OPENDAL_MBT_SKIP_NATIVE=1 \
   moon build --target wasm --release integration/wasm
 
 node wasm/canary/run.mjs \
-  target/wasm32-unknown-unknown/release/opendal_mbt_wasm_bridge.wasm \
+  target/wasm-bindgen/release/opendal_mbt_wasm_bridge.mjs \
+  target/wasm-bindgen/release/opendal_mbt_wasm_bridge_bg.wasm \
   _build/wasm/release/build/eric-song-nop/opendal-wasm-canary/opendal-wasm-canary.wasm
 ```
+
+The raw Cargo output is wasm-bindgen input, not a deployable bridge. OpenDAL's
+Wasm dependencies use JavaScript-backed time, UUID, and related support; the
+generated `.mjs` supplies those host imports and initializes the processed
+`_bg.wasm` module. The CLI version must match the Rust `wasm-bindgen` crate.
 
 `OPENDAL_MBT_SKIP_NATIVE=1` is currently explicit because the installed Moon
 prebuild protocol supplies environment and module paths, but not the selected
