@@ -65,6 +65,8 @@ jobs:
   wasm-canary:
     name: MoonBit / OpenDAL Wasm canary
     runs-on: ubuntu-24.04
+    env:
+      MOONBIT_VERSION: 0.10.7+bc794d341
     steps:
       - uses: actions/checkout@v6
       - name: Install Rust Wasm target
@@ -87,8 +89,8 @@ jobs:
           test -n "${browser_bin:-}"
           "$browser_bin" --version
           echo "OPENDAL_MBT_BROWSER_BIN=$browser_bin" >> "$GITHUB_ENV"
-      - name: Run the Node and browser Wasm memory canaries
-        run: make wasm-canary wasm-browser-canary
+      - name: Check the static contract and run the Wasm memory canaries
+        run: make wasm-static-contract wasm-canary wasm-browser-canary
 
   coverage:
     name: Coverage and C/MoonBit ASan

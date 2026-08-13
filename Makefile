@@ -39,7 +39,7 @@ MOON_TEST_FLAGS := --target native --frozen --warn-list '$(MOON_WARN_LIST)' --de
 .PHONY: native rust-test rust-lint moon-deps moon-check moon-test coverage abi-smoke c-example \
 	api-contract interface-contract package-contract packaged-consumer check \
 	test-profile native-artifact-test version-contract asan wasm-rust wasm-moon \
-	wasm-canary wasm-browser-canary wasm-interface-contract
+	wasm-canary wasm-browser-canary wasm-static-contract wasm-interface-contract
 
 native:
 	cargo build --package opendal-mbt-native --locked $(CARGO_SERVICE_FLAGS) \
@@ -71,6 +71,12 @@ wasm-canary: wasm-rust wasm-moon
 wasm-browser-canary: wasm-rust wasm-moon
 	node wasm/canary/run-browser.mjs "$(WASM_RUST_GLUE)" \
 		"$(WASM_RUST_TARGET)" "$(WASM_MOON_TARGET)"
+
+wasm-static-contract: wasm-rust wasm-moon
+	node --test scripts/check-wasm-contract.test.mjs
+	node scripts/check-wasm-contract.mjs "$(WASM_RUST_TARGET)" \
+		"$(WASM_RUST_GLUE)" "$(WASM_MOON_TARGET)" \
+		wasm/contract/browser-memory.json
 
 rust-test:
 	cargo test --package opendal-mbt-native --all-targets --locked \
