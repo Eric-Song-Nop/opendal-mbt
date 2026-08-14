@@ -3,7 +3,7 @@
 Status: accepted direction; backend-neutral callback binding implemented as an
 unpublished repository candidate
 
-Last reviewed: 2026-08-13
+Last reviewed: 2026-08-14
 
 Distribution and release plan:
 [`wasm-mooncake-delivery.md`](wasm-mooncake-delivery.md).
@@ -63,6 +63,9 @@ The current experimental `/wasm` facade exposes:
   `Operator::as_async()`;
 - `AsyncOperator` callback methods for create, write, read, stat, bounded
   list, and delete operations;
+- native-shaped `ByteRange`, `Timestamp`, and complete `Metadata` value types;
+- read range/version/conditions, stat version/conditions, and write append/
+  content headers/conditions, with write and stat returning `Metadata`;
 - `Task::state()`, logical `cancel()`, and `close()`;
 - owned native-shaped `OpenDalError`/`ErrorInfo`, `Metadata`, `Entry`,
   `OperatorInfo`, and `Capability` values;
@@ -88,6 +91,7 @@ The callback shape is explicit:
 ```moonbit
 let task = operator.as_async().read_callback(
   "notes/hello.txt",
+  range=@opendal.Range(offset=0UL, length=4096UL),
   callback=result => {
     match result {
       Ok(bytes) => consume(bytes)
@@ -101,6 +105,14 @@ let task = operator.as_async().read_callback(
 task.cancel()
 task.close()
 ```
+
+`read_callback` accepts an optional `ByteRange` (`Full`, `From`, `Range`, or
+`Suffix`), version, `if_match`, and `if_none_match`. `stat_callback` accepts
+the same version and condition values. `write_callback` accepts append, four
+content headers, and conditions; its success value is `Metadata`, not `Unit`.
+Suffix support is reported and accepted only when the base service implements
+native suffix reads, not when a completion layer could simulate one with an
+extra stat.
 
 This surface stays experimental until MoonBit provides a documented
 ordinary-browser continuation contract or the project explicitly chooses
@@ -149,7 +161,7 @@ The core-Wasm boundary follows these rules:
 - host copy calls transfer at most 256 KiB and re-read both memory buffers for
   every window so `memory.grow` cannot leave stale typed-array views;
 - bounded list materialization fails atomically above 65,536 entries or 16 MiB
-  of combined path/name UTF-8;
+  of combined path, name, and pre-encoded metadata snapshot bytes;
 - asynchronous OpenDAL errors are owned by their completion and copied into
   immutable MoonBit errors;
 - bridge teardown is permanent for one instance and late completion is inert.
@@ -161,11 +173,22 @@ the initiating operation, path, and destination from its owned callback
 context. Unknown future kind/status codes remain representable; malformed
 snapshots become `AbiMismatch` binding errors.
 
-The bridge ABI is `0x0001_0005`. It reports feature bitmap `0x0000_03ff`:
+Metadata uses an owned, versioned `ODM1` little-endian snapshot. Its 84-byte
+header carries schema and presence bits, mode/current/deleted scalars, content
+length, signed Unix seconds plus canonical nanoseconds, two reserved words,
+and seven string lengths. Strict UTF-8 payloads follow in cache-control,
+content-disposition, content-encoding, content-MD5, content-type, ETag, and
+version order. MoonBit validates the entire snapshot, including canonical
+absence and the 64 MiB limit, before constructing `Metadata`. Completion takes
+are failure-atomic and successful takes consume the snapshot. List entries use
+the same schema with the potentially partial metadata supplied by the lister;
+they do not cause per-entry stat calls.
+
+The bridge ABI is `0x0001_0006`. It reports feature bitmap `0x0000_07ff`:
 memory and poll-once fixture bits plus generation handles, binary buffers, task
 ABI, generic operator construction, common mutations, bounded list, bulk
-transfer, and structured errors. The public facade requires `0x0000_03fc`; it
-does not require the memory or poll-once fixtures.
+transfer, structured errors, and metadata/options. The public facade requires
+`0x0000_07fc`; it does not require the memory or poll-once fixtures.
 
 ## Task and callback semantics
 
@@ -207,8 +230,8 @@ The repository separates static, Node, and browser evidence:
 | Check | Claim |
 | --- | --- |
 | `make wasm-static-contract` | Exact imports/exports, independent memory shape, forbidden-import policy, Moon-to-Rust import resolution, and raw/gzip/Brotli size ceilings match the committed browser-memory snapshot |
-| `make wasm-canary` | Node can instantiate the modules, use the generic callback facade, transfer a 16 MiB value in bounded chunks, run the callback lifecycle twice, clean up, and tear down |
-| `make wasm-browser-canary` | Real Chrome/Chromium observes twelve explicitly forced pending tasks, browser heartbeat ordering, cancellation/race behavior, concurrent operators, and inert pending teardown |
+| `make wasm-canary` | Node can instantiate the modules, use the generic callback facade, transfer a 16 MiB value in bounded chunks, verify write headers and returned metadata, perform a ranged read, verify stat/list metadata, run the callback lifecycle twice, clean up, and tear down |
+| `make wasm-browser-canary` | Real Chrome/Chromium runs the same options/metadata lifecycle and observes twelve explicitly forced pending tasks, browser heartbeat ordering, cancellation/race behavior, concurrent operators, and inert pending teardown |
 
 Only Chrome is evidence for forced `Pending -> Ready` behavior and a responsive
 browser event loop. Node exercises real `spawn_local` tasks and callbacks but
@@ -225,9 +248,9 @@ compatibility with a different compiled-service profile.
 ### M0 — Core-module interoperability: implemented
 
 The MoonBit facade, loader, Rust bridge, version negotiation, generic memory
-operator, binary/error ownership, generation handles, repeated lifecycle, and
-teardown are exercised end to end. The static contract records the current
-module boundary.
+operator, binary/error/metadata ownership, generation handles, repeated
+lifecycle, and teardown are exercised end to end. The static contract records
+the current module boundary.
 
 M0 is not a distribution release. The modules are still built from this
 checkout.
@@ -235,9 +258,12 @@ checkout.
 ### M1 — Callback task lifecycle: implementation complete; public API experimental
 
 Create-dir, write, read, stat, list, and delete use owned tasks and
-per-completion results. Browser evidence covers later-turn delivery,
-cancel-before-ready, completion-before-cancel, terminal close, concurrent
-operators, close/teardown with work pending, and late-completion suppression.
+per-completion results. Read/stat/write expose the native-shaped option subset,
+write and stat return full-shaped metadata values, and list returns the
+lister's potentially partial metadata without per-entry stat. Browser evidence
+covers later-turn delivery, cancel-before-ready, completion-before-cancel,
+terminal close, concurrent operators, close/teardown with work pending, and
+late-completion suppression.
 
 The stable MoonBit continuation decision is not complete; the public callback
 surface remains experimental. This is an API-status gap, not an excuse to

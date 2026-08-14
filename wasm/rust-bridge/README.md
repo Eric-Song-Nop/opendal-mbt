@@ -52,13 +52,14 @@ feature profile does not alter the native package.
 
 ## ABI conventions
 
-- ABI version is `0x0001_0005` (major 1, minor 5).
-- The bridge reports feature flags `0x0000_03ff`: bit 0 memory fixture, bit 1
+- ABI version is `0x0001_0006` (major 1, minor 6).
+- The bridge reports feature flags `0x0000_07ff`: bit 0 memory fixture, bit 1
   poll-once fixture, bit 2 generation handles, bit 3 binary buffers, bit 4
   task ABI, bit 5 generic operator construction and inspection, bit 6 common
   create-dir/delete mutations, bit 7 bounded streaming list materialization,
-  bit 8 bounded cross-memory transfer, and bit 9 structured error snapshots.
-- The public facade requires `0x0000_03fc`; memory and poll-once are not generic
+  bit 8 bounded cross-memory transfer, bit 9 structured error snapshots, and
+  bit 10 metadata snapshots plus operation options.
+- The public facade requires `0x0000_07fc`; memory and poll-once are not generic
   facade requirements.
 - Handles are positive signed 32-bit values as well as valid `u32` values. The
   generation field is 15 bits so MoonBit can carry a handle in `Int` without
@@ -78,9 +79,9 @@ feature profile does not alter the native package.
   the bridge's sticky last-error slot only until `last_error_take` moves the
   error into an owned handle. MoonBit then consumes a structured snapshot and
   constructs an immutable `OpenDalError`.
-- Lists publish atomically only below 65,536 entries and 16 MiB of combined
-  path/name UTF-8. A backend request `limit` remains a service hint and does
-  not replace those binding limits.
+- Lists publish atomically only at or below 65,536 entries and 16 MiB of
+  combined path, name, and pre-encoded `ODM1` metadata bytes. A backend request
+  `limit` remains a service hint and does not replace those binding limits.
 
 Task states are `1` pending, `2` ready, `3` cancelled, and `4` consumed.
 Completion kinds are `1` write, `2` read, `3` stat, `4` create-dir, `5`
@@ -106,11 +107,65 @@ snapshots preserve the stable OpenDAL kinds `1..12`, binding kinds
 plus the OpenDAL kind name and diagnostic message. Unknown kind or status
 values fail open as `UnknownKind(code, name)` and `UnknownStatus(code)`.
 
-`opendal_mbt_wasm_error_snapshot_take` is the only ABI 1.5 export added to the
-bridge. Its versioned little-endian payload is `ODE1`, schema `1`, kind,
-status, kind-name length, message length, then strict UTF-8 kind-name and
-message bytes. A successful snapshot consumes the error handle; allocation or
-encoding failure leaves it intact.
+ABI 1.5 added `opendal_mbt_wasm_error_snapshot_take`. Its versioned
+little-endian payload is `ODE1`, schema `1`, kind, status, kind-name length,
+message length, then strict UTF-8 kind-name and message bytes. A successful
+snapshot consumes the error handle; allocation or encoding failure leaves it
+intact.
+
+## Metadata and operation options
+
+ABI 1.6 adds `operator_{read,stat,write}_options_start_v1`,
+`completion_take_metadata_snapshot`, and `entry_list_metadata_snapshot`. Every
+path, payload, version, condition, and content-header buffer is copied before
+the start call returns. Optional handle `0` means `None`; a non-zero empty
+buffer means `Some("")`. Append accepts only scalar `0` or `1`, and range
+scalars reject non-canonical combinations and offset-plus-length overflow.
+
+Read accepts full, from-offset, offset-plus-length, and suffix ranges plus
+version and conditional values. Suffix reads require
+`base_service().capability_dyn().read_with_suffix`; the facade capability bit
+and start guard deliberately ignore support synthesized by completion layers.
+Stat accepts version and conditions. Write accepts append, content type,
+content disposition, content encoding, cache control, and conditions, and a
+successful write completion owns the returned OpenDAL `Metadata`.
+
+Metadata uses a versioned little-endian `ODM1` snapshot with this fixed
+schema-1 layout:
+
+| Offset | Field |
+| --- | --- |
+| `0..4` | magic `ODM1` |
+| `4..8` | schema `u32` (`1`) |
+| `8..16` | presence bits `u64` |
+| `16..20` | mode `u32` (`0` unknown, `1` file, `2` directory) |
+| `20..24` | current flag `u32` |
+| `24..28` | deleted flag `u32` |
+| `28..32` | reserved zero |
+| `32..40` | content length `u64` |
+| `40..48` | last-modified Unix seconds `i64` |
+| `48..52` | last-modified nanoseconds `u32` |
+| `52..56` | reserved zero |
+| `56..84` | seven `u32` string lengths |
+| `84..` | concatenated strict UTF-8 payload |
+
+Presence bits are current, last-modified, cache control, content disposition,
+content encoding, content MD5, content type, ETag, and version in bits 0
+through 8. String lengths and payload order are cache control, content
+disposition, content encoding, content MD5, content type, ETag, and version.
+Absent values have canonical zero fields, booleans are `0` or `1`, and
+nanoseconds are below 1,000,000,000. Unknown bits, non-canonical fields,
+malformed lengths, trailing data, invalid UTF-8, or snapshots above 64 MiB are
+ABI mismatches.
+
+Taking a completion metadata snapshot is failure-atomic: encoding or handle
+capacity failure leaves the completion available for another take. A
+successful take consumes it. Each list entry owns one pre-encoded, single-take
+snapshot; the metadata can be partial because it is the lister's metadata and
+the bridge does not issue an extra stat. The list remains releasable after a
+failed or successful entry snapshot take. Legacy stat metadata-handle exports
+remain as append-only ABI compatibility operations; the public facade uses
+`ODM1` for stat and write.
 
 All exported symbols use the `opendal_mbt_wasm_` prefix. The committed static
 browser-memory contract records their exact current set, the module imports,

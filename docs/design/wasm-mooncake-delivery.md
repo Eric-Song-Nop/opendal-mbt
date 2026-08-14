@@ -4,7 +4,7 @@ Status: backend-neutral callback binding, M0–M2 repository evidence, and a
 static browser-memory contract are implemented; Mooncake distribution is not
 implemented and no Wasm release has been published
 
-Last reviewed: 2026-08-13
+Last reviewed: 2026-08-14
 
 Related design: [`wasm-integration.md`](wasm-integration.md)
 
@@ -137,6 +137,7 @@ uses the generic registry. The public MoonBit facade exposes:
   `Operator::as_async()`;
 - `AsyncOperator` callback methods for create, write, read, stat, bounded
   list, and delete operations;
+- native-shaped read ranges, timestamps, metadata, and operation options;
 - `Task` states `Pending`, `Completed`, `Cancelled`, and `Closed`;
 - logical cancellation, explicit close, owned errors, metadata, entries, and
   capabilities.
@@ -144,12 +145,12 @@ uses the generic registry. The public MoonBit facade exposes:
 It exposes no synchronous storage method, `Operator::memory`, raw bridge or
 task handle, ABI/feature accessor, leak counter, or forced-pending diagnostic.
 
-The bridge ABI is `0x0001_0005`. The bridge reports `0x0000_03ff`: bits 0 and
+The bridge ABI is `0x0001_0006`. The bridge reports `0x0000_07ff`: bits 0 and
 1 are memory and poll-once fixture capabilities, followed by generation
 handles, binary buffers, task ABI, generic operator construction, common
-mutations, bounded list, bulk transfer, and structured errors. The public
-facade requires `0x0000_03fc`; it is not coupled to the memory or poll-once
-fixture bits.
+mutations, bounded list, bulk transfer, structured errors, and metadata/
+options. The public facade requires `0x0000_07fc`; it is not coupled to the
+memory or poll-once fixture bits.
 
 Production task starts use `wasm_bindgen_futures::spawn_local` and await the
 OpenDAL future directly. A raw bridge-only test switch can wrap tasks started
@@ -180,10 +181,10 @@ The static gate checks the committed browser-memory snapshot for:
   canary.
 
 The Node canary constructs the operator through the public generic facade,
-exercises bounded bulk transfer, completes the callback storage lifecycle
-twice, checks owned success/error results and cleanup, and tears the instance
-down. It uses real tasks and callbacks, not the public synchronous methods
-that no longer exist.
+exercises bounded bulk transfer, write content options and returned metadata,
+a ranged read, stat/list metadata, two complete callback storage lifecycles,
+owned success/error results and cleanup, and final teardown. It uses real
+tasks and callbacks, not the public synchronous methods that no longer exist.
 
 The Chrome canary explicitly enables the forced-pending hook. It checks twelve
 observed pending tasks across the main lifecycle, completion-wins case,
@@ -228,6 +229,7 @@ let operator = @opendal.Operator::new(
 let async_operator = operator.as_async()
 let task = async_operator.read_callback(
   "hello.txt",
+  range=@opendal.Range(offset=0UL, length=4096UL),
   callback=result => {
     match result {
       Ok(bytes) => consume(bytes)
@@ -237,10 +239,15 @@ let task = async_operator.read_callback(
 )
 ```
 
-`create_dir_callback`, `write_callback`, `stat_callback`, `list_callback`, and
+`read_callback` accepts full/from/range/suffix selection, version, and
+conditions. `stat_callback` accepts version and conditions. `write_callback`
+accepts append, content type, content disposition, content encoding, cache
+control, and conditions, and returns `Metadata` on success. Suffix capability
+and acceptance reflect the base service's native support, not support simulated
+by a completion layer. `create_dir_callback`, `list_callback`, and
 `delete_callback` follow the same lifecycle. `Task::cancel()` and
-`Task::close()` are idempotent. Cancellation suppresses callback delivery
-and discards a late result; it does not claim to abort the underlying OpenDAL
+`Task::close()` are idempotent. Cancellation suppresses callback delivery and
+discards a late result; it does not claim to abort the underlying OpenDAL
 future or browser API.
 
 `AsyncOperator::close()` is a Wasm lifecycle extension that releases the
@@ -334,6 +341,23 @@ The current contract guarantees:
 It does not yet provide underlying host-promise abort, streaming readers or
 writers, backpressure, or portable MoonBit `async fn` suspension.
 
+### Metadata snapshots
+
+Stat and write completions move metadata through the versioned little-endian
+`ODM1` format. Its 84-byte header contains schema and presence bits,
+mode/current/deleted fields, content length, signed Unix seconds and canonical
+nanoseconds, reserved zeroes, and seven string lengths. Strict UTF-8 payloads
+carry cache control, content disposition, content encoding, content MD5,
+content type, ETag, and version in that order. The public `Metadata` and
+`Timestamp` shapes match the native binding.
+
+MoonBit rejects unknown bits, non-canonical booleans or absent fields, invalid
+nanoseconds, bad lengths, trailing bytes, invalid UTF-8, and snapshots above
+64 MiB as `AbiMismatch`. A failed completion snapshot take preserves the
+completion; success consumes it exactly once. List entries use the same format
+for the potentially partial metadata returned by the lister and never trigger
+an implicit stat per entry.
+
 ### Bulk transfer
 
 Rust and MoonBit export independent memories. The loader sees both and copies
@@ -351,9 +375,11 @@ exports remain low-level fixture oracles and are not imported by the facade.
 
 `list_callback` streams the OpenDAL lister into owned snapshots before
 publishing a completion. It fails atomically above 65,536 entries or 16 MiB of
-combined path/name UTF-8. Optional `limit` and `start_after` values are sent to
-the selected backend; they do not weaken the binding's total materialization
-limits.
+combined path, name, and pre-encoded `ODM1` metadata bytes. Optional `limit`
+and `start_after` values are sent to the selected backend; they do not weaken
+the binding's total materialization limits. Each entry metadata snapshot can
+be taken once, and the list remains releasable whether the take succeeds or
+fails.
 
 ## Artifact and trust contract
 
@@ -490,9 +516,9 @@ root action.
 ### M0 — Core-module interoperability: implemented
 
 Implemented evidence includes the MoonBit facade, Rust bridge, official loader,
-generic memory operator, version negotiation, owned binary/error values,
-generation handles, two callback lifecycle rounds in Node, teardown, and the
-committed static module contract.
+generic memory operator, version negotiation, owned binary/error/metadata
+values, generation handles, two callback lifecycle rounds in Node, teardown,
+and the committed static module contract.
 
 M0 proves the language/module boundary. It does not prove a registry consumer
 or browser scheduling.
@@ -501,8 +527,10 @@ or browser scheduling.
 
 Implemented evidence includes task/completion ownership, later-turn callback
 delivery, per-completion errors, logical cancellation, create-dir/write/read/
-stat/list/delete, ready-versus-cancel, concurrent operators, close/teardown
-while pending, double-take/release state tests, and inert late completion.
+stat/list/delete, native-shaped read/stat/write options, write/stat metadata,
+partial list metadata without per-entry stat, ready-versus-cancel, concurrent
+operators, close/teardown while pending, double-take/release state tests, and
+inert late completion.
 
 Chrome explicitly checks twelve forced-pending tasks and browser heartbeat
 ordering. The remaining M1 product decision is whether a documented MoonBit
@@ -576,10 +604,10 @@ transfer, and service behavior.
 | Layer | Current or required evidence |
 | --- | --- |
 | Static module contract | Current: exact imports/exports, independent memories, safe imports, import resolution, and size ceilings |
-| Rust state model | Current: task/cancel/late-completion/resource unit cases |
-| Moon facade | Current: generic constructor, callback operations, value/error conversion, generated public interface |
-| Node runtime | Current: callback tasks, bulk transfer, two lifecycle rounds, cleanup, teardown |
-| Browser runtime | Current: twelve explicitly forced pending tasks, heartbeat, races/concurrency, pending teardown |
+| Rust state model | Current: task/cancel/late-completion/resource, options ownership/scalars, metadata codec, and failure-atomic snapshot cases |
+| Moon facade | Current: generic constructor, native-shaped callback options, value/error/metadata conversion, generated public interface |
+| Node runtime | Current: callback tasks, write headers/metadata, ranged read, stat/list metadata, bulk transfer, two lifecycle rounds, cleanup, teardown |
+| Browser runtime | Current: the same options/metadata lifecycle, twelve explicitly forced pending tasks, heartbeat, races/concurrency, pending teardown |
 | Binary transfer | Current: NUL/non-UTF-8, 16 MiB chunks, limits, non-zero slice, memory growth |
 | Service profiles | Pending beyond memory: exact schemes plus service-specific runtime/security cases |
 | Packaging | Pending: clean Mooncake consumer with no Rust/npm/checkout and relocatable output |
