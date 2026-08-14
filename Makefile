@@ -39,7 +39,8 @@ MOON_TEST_FLAGS := --target native --frozen --warn-list '$(MOON_WARN_LIST)' --de
 .PHONY: native rust-test rust-lint moon-deps moon-check moon-test coverage abi-smoke c-example \
 	api-contract interface-contract package-contract packaged-consumer check \
 	test-profile native-artifact-test version-contract asan wasm-rust wasm-moon \
-	wasm-canary wasm-browser-canary wasm-static-contract wasm-interface-contract
+	wasm-canary wasm-browser-canary wasm-static-contract wasm-interface-contract \
+	cross-target-api-contract
 
 native:
 	cargo build --package opendal-mbt-native --locked $(CARGO_SERVICE_FLAGS) \
@@ -138,6 +139,10 @@ interface-contract:
 wasm-interface-contract:
 	sh scripts/check-wasm-api.sh
 
+cross-target-api-contract:
+	python3 scripts/test-cross-target-api.py
+	python3 scripts/check-cross-target-api.py
+
 package-contract:
 	sh scripts/check-package.sh
 
@@ -162,8 +167,9 @@ native-artifact-test:
 	node --check scripts/prepare-test-native-cache.js
 	node --test scripts/test-native-resolver.js
 
-check: api-contract interface-contract wasm-interface-contract package-contract \
-	native-artifact-test version-contract
+check: api-contract interface-contract wasm-interface-contract \
+	cross-target-api-contract package-contract native-artifact-test \
+	version-contract
 	cargo fmt --all -- --check
 	$(MAKE) rust-lint
 	$(MAKE) moon-check
