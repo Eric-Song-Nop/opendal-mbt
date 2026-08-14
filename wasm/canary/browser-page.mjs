@@ -59,12 +59,12 @@ try {
   const exports = runtime.exports;
   const bridge = runtime.bridge.exports;
   assert(
-    bridge.opendal_mbt_wasm_abi_version() === 0x0001_0006,
-    "bridge ABI is not 1.6",
+    bridge.opendal_mbt_wasm_abi_version() === 0x0001_0007,
+    "bridge ABI is not 1.7",
   );
   assert(
-    bridge.opendal_mbt_wasm_feature_flags() === 0x0000_07ff,
-    "bridge feature bitmap is not the complete 1.6 contract",
+    bridge.opendal_mbt_wasm_feature_flags() === 0x0000_0fff,
+    "bridge feature bitmap is not the complete 1.7 contract",
   );
   const pendingPollCount = () =>
     bridge.opendal_mbt_wasm_canary_forced_pending_poll_count();
@@ -186,12 +186,12 @@ try {
 
   await waitFor(
     () => exports.opendal_mbt_wasm_canary_async_stage(),
-    9,
+    13,
     "asynchronous OpenDAL memory lifecycle",
   );
   assert(
-    pendingPollCount() === pendingBefore + 8,
-    "not every create/write/read/stat/list/delete/NotFound task observed Pending",
+    pendingPollCount() === pendingBefore + 12,
+    "not every core async lifecycle task observed Pending",
   );
   assert(
     bridge.opendal_mbt_wasm_live_handle_count() === asyncLiveBefore,
@@ -343,7 +343,7 @@ try {
   );
   await report({
     ok: true,
-    pendingTasks: 12,
+    pendingTasks: 16,
     heartbeat: true,
     cancellation: "suppressed",
     diagnostics: "isolated",

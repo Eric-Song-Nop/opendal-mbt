@@ -5,7 +5,7 @@
 pub(crate) type Status = u32;
 
 pub(crate) const ABI_MAJOR: u32 = 1;
-pub(crate) const ABI_MINOR: u32 = 7;
+pub(crate) const ABI_MINOR: u32 = 8;
 pub(crate) const ABI_PATCH: u32 = 0;
 pub(crate) const STRUCT_VERSION: u32 = 1;
 
@@ -63,6 +63,7 @@ pub(crate) const FEATURE_CONCURRENCY_LIMIT: u64 = 1 << 10;
 pub(crate) const FEATURE_BATCH_DELETE: u64 = 1 << 11;
 pub(crate) const FEATURE_COPIER: u64 = 1 << 12;
 pub(crate) const FEATURE_ASYNC: u64 = 1 << 13;
+pub(crate) const FEATURE_ASYNC_CORE: u64 = 1 << 14;
 
 pub(crate) const CAP_STAT: u64 = 1 << 0;
 pub(crate) const CAP_READ: u64 = 1 << 1;
@@ -430,6 +431,7 @@ pub(crate) struct ListerV1 {
 
 pub(crate) enum ListerStateV1 {
     Open(opendal::blocking::Lister),
+    Materialized(std::collections::VecDeque<EntryV1>),
     Exhausted,
     Closed,
 }
@@ -791,6 +793,68 @@ pub(crate) type AsyncTaskTakeWriterFn =
 pub(crate) type AsyncTaskTakeUnitFn =
     unsafe extern "C" fn(*mut AsyncTaskV1, *mut *mut ErrorV1) -> Status;
 pub(crate) type AsyncTaskFreeFn = unsafe extern "C" fn(*mut AsyncTaskV1);
+pub(crate) type AsyncOperatorCheckStartFn =
+    unsafe extern "C" fn(*mut OperatorV1, i32, *mut *mut AsyncTaskV1, *mut *mut ErrorV1) -> Status;
+pub(crate) type AsyncOperatorExistsStartFn = unsafe extern "C" fn(
+    *mut OperatorV1,
+    *const BytesViewV1,
+    i32,
+    *mut *mut AsyncTaskV1,
+    *mut *mut ErrorV1,
+) -> Status;
+pub(crate) type AsyncOperatorStatStartFn = unsafe extern "C" fn(
+    *mut OperatorV1,
+    *const BytesViewV1,
+    *const StatOptionsV1,
+    i32,
+    *mut *mut AsyncTaskV1,
+    *mut *mut ErrorV1,
+) -> Status;
+pub(crate) type AsyncOperatorWriteStartFn = unsafe extern "C" fn(
+    *mut OperatorV1,
+    *const BytesViewV1,
+    *const BytesViewV1,
+    *const WriteOptionsV1,
+    i32,
+    *mut *mut AsyncTaskV1,
+    *mut *mut ErrorV1,
+) -> Status;
+pub(crate) type AsyncOperatorCreateDirStartFn = unsafe extern "C" fn(
+    *mut OperatorV1,
+    *const BytesViewV1,
+    i32,
+    *mut *mut AsyncTaskV1,
+    *mut *mut ErrorV1,
+) -> Status;
+pub(crate) type AsyncOperatorDeleteStartFn = unsafe extern "C" fn(
+    *mut OperatorV1,
+    *const BytesViewV1,
+    *const DeleteOptionsV1,
+    i32,
+    *mut *mut AsyncTaskV1,
+    *mut *mut ErrorV1,
+) -> Status;
+pub(crate) type AsyncOperatorListStartFn = unsafe extern "C" fn(
+    *mut OperatorV1,
+    *const BytesViewV1,
+    *const ListOptionsV1,
+    i32,
+    *mut *mut AsyncTaskV1,
+    *mut *mut ErrorV1,
+) -> Status;
+pub(crate) type AsyncOperatorCopyStartFn = unsafe extern "C" fn(
+    *mut OperatorV1,
+    *const BytesViewV1,
+    *const BytesViewV1,
+    i32,
+    *mut *mut AsyncTaskV1,
+    *mut *mut ErrorV1,
+) -> Status;
+pub(crate) type AsyncOperatorRenameStartFn = AsyncOperatorCopyStartFn;
+pub(crate) type AsyncTaskTakeBoolFn =
+    unsafe extern "C" fn(*mut AsyncTaskV1, *mut u32, *mut *mut ErrorV1) -> Status;
+pub(crate) type AsyncTaskTakeListerFn =
+    unsafe extern "C" fn(*mut AsyncTaskV1, *mut *mut ListerV1, *mut *mut ErrorV1) -> Status;
 
 #[repr(C)]
 pub(crate) struct ApiV1 {
@@ -876,6 +940,17 @@ pub(crate) struct ApiV1 {
     pub(crate) async_task_take_writer: Option<AsyncTaskTakeWriterFn>,
     pub(crate) async_task_take_unit: Option<AsyncTaskTakeUnitFn>,
     pub(crate) async_task_free: Option<AsyncTaskFreeFn>,
+    pub(crate) async_operator_check_start: Option<AsyncOperatorCheckStartFn>,
+    pub(crate) async_operator_exists_start: Option<AsyncOperatorExistsStartFn>,
+    pub(crate) async_operator_stat_start: Option<AsyncOperatorStatStartFn>,
+    pub(crate) async_operator_write_start: Option<AsyncOperatorWriteStartFn>,
+    pub(crate) async_operator_create_dir_start: Option<AsyncOperatorCreateDirStartFn>,
+    pub(crate) async_operator_delete_start: Option<AsyncOperatorDeleteStartFn>,
+    pub(crate) async_operator_list_start: Option<AsyncOperatorListStartFn>,
+    pub(crate) async_operator_copy_start: Option<AsyncOperatorCopyStartFn>,
+    pub(crate) async_operator_rename_start: Option<AsyncOperatorRenameStartFn>,
+    pub(crate) async_task_take_bool: Option<AsyncTaskTakeBoolFn>,
+    pub(crate) async_task_take_lister: Option<AsyncTaskTakeListerFn>,
 }
 
 pub(crate) const API_INPUT_SIZE: usize =
@@ -920,7 +995,9 @@ const _: () = {
     assert!(core::mem::offset_of!(ApiV1, copier_free) == 488);
     assert!(core::mem::offset_of!(ApiV1, async_operator_read_start) == 496);
     assert!(core::mem::offset_of!(ApiV1, async_task_free) == 624);
-    assert!(core::mem::size_of::<ApiV1>() == 632);
+    assert!(core::mem::offset_of!(ApiV1, async_operator_check_start) == 632);
+    assert!(core::mem::offset_of!(ApiV1, async_task_take_lister) == 712);
+    assert!(core::mem::size_of::<ApiV1>() == 720);
     assert!(API_INPUT_SIZE == 8);
     assert!(API_PREFIX_SIZE == 40);
 };

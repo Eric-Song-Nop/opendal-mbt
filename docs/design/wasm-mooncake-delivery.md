@@ -135,8 +135,10 @@ uses the generic registry. The public MoonBit facade exposes:
 - `available_schemes()`;
 - `Operator::new(scheme, config)`, `Operator::info()`, and
   `Operator::as_async()`;
-- `AsyncOperator` callback methods for create, write, read, stat, bounded
-  list, and delete operations;
+- `AsyncOperator::{check_callback, exists_callback, read_callback,
+  stat_callback, write_callback, create_dir_callback, delete_callback,
+  list_callback, copy_callback, rename_callback}` for the ten common
+  whole-object operations, with bounded list materialization;
 - native-shaped read ranges, timestamps, metadata, and operation options;
 - `Task` states `Pending`, `Completed`, `Cancelled`, and `Closed`;
 - logical cancellation, explicit close, owned errors, metadata, entries, and
@@ -145,12 +147,12 @@ uses the generic registry. The public MoonBit facade exposes:
 It exposes no synchronous storage method, `Operator::memory`, raw bridge or
 task handle, ABI/feature accessor, leak counter, or forced-pending diagnostic.
 
-The bridge ABI is `0x0001_0006`. The bridge reports `0x0000_07ff`: bits 0 and
-1 are memory and poll-once fixture capabilities, followed by generation
+The bridge ABI is 1.7 (`0x00010007`). The bridge reports `0x00000fff`: bits 0
+and 1 are memory and poll-once fixture capabilities, followed by generation
 handles, binary buffers, task ABI, generic operator construction, common
-mutations, bounded list, bulk transfer, structured errors, and metadata/
-options. The public facade requires `0x0000_07fc`; it is not coupled to the
-memory or poll-once fixture bits.
+mutations, bounded list, bulk transfer, structured errors, metadata/options,
+and bit 11 for core async parity. The public facade requires `0x00000ffc`; it
+is not coupled to the memory or poll-once fixture bits.
 
 Production task starts use `wasm_bindgen_futures::spawn_local` and await the
 OpenDAL future directly. A raw bridge-only test switch can wrap tasks started
@@ -182,15 +184,18 @@ The static gate checks the committed browser-memory snapshot for:
 
 The Node canary constructs the operator through the public generic facade,
 exercises bounded bulk transfer, write content options and returned metadata,
-a ranged read, stat/list metadata, two complete callback storage lifecycles,
-owned success/error results and cleanup, and final teardown. It uses real
-tasks and callbacks, not the public synchronous methods that no longer exist.
+a ranged read, stat/list metadata, check/exists, copy/rename `Unsupported`
+errors with source/destination context, two complete callback storage
+lifecycles, owned success/error results and cleanup, and final teardown. It
+uses real tasks and callbacks, not the public synchronous methods that no
+longer exist.
 
-The Chrome canary explicitly enables the forced-pending hook. It checks twelve
-observed pending tasks across the main lifecycle, completion-wins case,
-concurrent operators, and pending disposal. It also checks browser heartbeat
-ordering, cancel-before-ready suppression, terminal close, scheduler
-diagnostic isolation, and inert late completion after teardown.
+The Chrome canary explicitly enables the forced-pending hook. It checks that
+16 non-cancelled tasks enter the forced `Pending` state across the core
+operation lifecycle, completion-wins case, concurrent operators, and pending
+disposal. It also checks browser heartbeat ordering, cancel-before-ready
+suppression, terminal close, scheduler diagnostic isolation, and inert late
+completion after teardown.
 
 Only Chrome is evidence for forced `Pending -> Ready` and browser event-loop
 responsiveness. Node validates the task and callback path but does not enable
@@ -239,16 +244,21 @@ let task = async_operator.read_callback(
 )
 ```
 
-`read_callback` accepts full/from/range/suffix selection, version, and
-conditions. `stat_callback` accepts version and conditions. `write_callback`
-accepts append, content type, content disposition, content encoding, cache
-control, and conditions, and returns `Metadata` on success. Suffix capability
-and acceptance reflect the base service's native support, not support simulated
-by a completion layer. `create_dir_callback`, `list_callback`, and
-`delete_callback` follow the same lifecycle. `Task::cancel()` and
-`Task::close()` are idempotent. Cancellation suppresses callback delivery and
-discards a late result; it does not claim to abort the underlying OpenDAL
-future or browser API.
+The operation set is exactly `check_callback`, `exists_callback`,
+`read_callback`, `stat_callback`, `write_callback`, `create_dir_callback`,
+`delete_callback`, `list_callback`, `copy_callback`, and `rename_callback`.
+Check returns `Unit`, while exists returns `Bool`. Read accepts
+full/from/range/suffix selection, version, and conditions; stat accepts version
+and conditions; write accepts
+append, content type, content disposition, content encoding, cache control,
+and conditions and returns `Metadata`. Copy returns the metadata supplied by
+OpenDAL, while rename returns `Unit`; both preserve source and destination
+context on failure. Suffix capability and acceptance reflect the base
+service's native support, not support simulated by a completion layer. All ten
+callbacks follow the same lifecycle. `Task::cancel()` and `Task::close()` are
+idempotent. Cancellation suppresses callback delivery and discards a late
+result; it does not claim to abort the underlying OpenDAL future or browser
+API.
 
 `AsyncOperator::close()` is a Wasm lifecycle extension that releases the
 shared operator when only the async view is retained. Closing either view is
@@ -526,16 +536,17 @@ or browser scheduling.
 ### M1 — Callback task engine: implementation complete; public API experimental
 
 Implemented evidence includes task/completion ownership, later-turn callback
-delivery, per-completion errors, logical cancellation, create-dir/write/read/
-stat/list/delete, native-shaped read/stat/write options, write/stat metadata,
-partial list metadata without per-entry stat, ready-versus-cancel, concurrent
-operators, close/teardown while pending, double-take/release state tests, and
-inert late completion.
+delivery, per-completion errors, logical cancellation, check/exists/read/stat/
+write/create-dir/delete/list/copy/rename, native-shaped read/stat/write options,
+write/stat/copy metadata, partial list metadata without per-entry stat,
+source/destination error context, ready-versus-cancel, concurrent operators,
+close/teardown while pending, double-take/release state tests, and inert late
+completion.
 
-Chrome explicitly checks twelve forced-pending tasks and browser heartbeat
-ordering. The remaining M1 product decision is whether a documented MoonBit
-ordinary-browser continuation permits a stable `async fn` facade. Until then,
-callbacks remain experimental.
+Chrome explicitly checks the forced-`Pending` state for 16 non-cancelled tasks
+and browser heartbeat ordering. The remaining M1 product decision is whether a
+documented MoonBit ordinary-browser continuation permits a stable `async fn`
+facade. Until then, callbacks remain experimental.
 
 ### M2 — Bounded bulk binary ABI: implemented
 
@@ -606,8 +617,8 @@ transfer, and service behavior.
 | Static module contract | Current: exact imports/exports, independent memories, safe imports, import resolution, and size ceilings |
 | Rust state model | Current: task/cancel/late-completion/resource, options ownership/scalars, metadata codec, and failure-atomic snapshot cases |
 | Moon facade | Current: generic constructor, native-shaped callback options, value/error/metadata conversion, generated public interface |
-| Node runtime | Current: callback tasks, write headers/metadata, ranged read, stat/list metadata, bulk transfer, two lifecycle rounds, cleanup, teardown |
-| Browser runtime | Current: the same options/metadata lifecycle, twelve explicitly forced pending tasks, heartbeat, races/concurrency, pending teardown |
+| Node runtime | Current: all ten callback operations, write headers/metadata, ranged read, stat/list metadata, bulk transfer, source/destination error context, two lifecycle rounds, cleanup, teardown |
+| Browser runtime | Current: the same core-operation lifecycle, 16 checked non-cancelled forced-`Pending` tasks, heartbeat, races/concurrency, pending teardown |
 | Binary transfer | Current: NUL/non-UTF-8, 16 MiB chunks, limits, non-zero slice, memory growth |
 | Service profiles | Pending beyond memory: exact schemes plus service-specific runtime/security cases |
 | Packaging | Pending: clean Mooncake consumer with no Rust/npm/checkout and relocatable output |

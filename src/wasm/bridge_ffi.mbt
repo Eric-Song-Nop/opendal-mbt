@@ -80,6 +80,26 @@ fn bridge_operator_stat_options_start_v1(
 ) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_operator_stat_options_start_v1"
 
 ///|
+fn bridge_operator_check_start(operator : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_operator_check_start"
+
+///|
+fn bridge_operator_exists_start(operator : UInt, path : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_operator_exists_start"
+
+///|
+fn bridge_operator_copy_start(
+  operator : UInt,
+  source : UInt,
+  destination : UInt,
+) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_operator_copy_start"
+
+///|
+fn bridge_operator_rename_start(
+  operator : UInt,
+  source : UInt,
+  destination : UInt,
+) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_operator_rename_start"
+
+///|
 fn bridge_operator_create_dir_start(operator : UInt, path : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_operator_create_dir_start"
 
 ///|
@@ -120,6 +140,9 @@ fn bridge_completion_take_buffer(handle : UInt) -> UInt = "opendal_mbt_bridge" "
 
 ///|
 fn bridge_completion_take_metadata_snapshot(handle : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_completion_take_metadata_snapshot"
+
+///|
+fn bridge_completion_take_bool(handle : UInt) -> Int = "opendal_mbt_bridge" "opendal_mbt_wasm_completion_take_bool"
 
 ///|
 fn bridge_completion_take_entry_list(handle : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_completion_take_entry_list"

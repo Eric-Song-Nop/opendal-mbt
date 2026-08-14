@@ -52,14 +52,15 @@ feature profile does not alter the native package.
 
 ## ABI conventions
 
-- ABI version is `0x0001_0006` (major 1, minor 6).
-- The bridge reports feature flags `0x0000_07ff`: bit 0 memory fixture, bit 1
+- ABI version is `0x0001_0007` (major 1, minor 7).
+- The bridge reports feature flags `0x0000_0fff`: bit 0 memory fixture, bit 1
   poll-once fixture, bit 2 generation handles, bit 3 binary buffers, bit 4
   task ABI, bit 5 generic operator construction and inspection, bit 6 common
   create-dir/delete mutations, bit 7 bounded streaming list materialization,
   bit 8 bounded cross-memory transfer, bit 9 structured error snapshots, and
-  bit 10 metadata snapshots plus operation options.
-- The public facade requires `0x0000_07fc`; memory and poll-once are not generic
+  bit 10 metadata snapshots plus operation options, and bit 11 core async
+  parity.
+- The public facade requires `0x0000_0ffc`; memory and poll-once are not generic
   facade requirements.
 - Handles are positive signed 32-bit values as well as valid `u32` values. The
   generation field is 15 bits so MoonBit can carry a handle in `Int` without
@@ -85,7 +86,9 @@ feature profile does not alter the native package.
 
 Task states are `1` pending, `2` ready, `3` cancelled, and `4` consumed.
 Completion kinds are `1` write, `2` read, `3` stat, `4` create-dir, `5`
-delete, and `6` list. `task_take` moves a ready completion exactly once.
+delete, `6` list, `7` check, `8` exists, `9` copy, and `10` rename.
+`task_take` moves a ready completion exactly once. The typed boolean take
+returns only `0` or `1` and preserves the completion on failure.
 
 Cancellation is logical. Cancelling pending work suppresses publication to the
 MoonBit callback path; cancelling a ready task drops its unconsumed result. It
@@ -166,6 +169,12 @@ the bridge does not issue an extra stat. The list remains releasable after a
 failed or successful entry snapshot take. Legacy stat metadata-handle exports
 remain as append-only ABI compatibility operations; the public facade uses
 `ODM1` for stat and write.
+
+ABI 1.7 adds asynchronous check, exists, copy, and rename task starts plus the
+typed boolean completion take. Copy is admitted only when the base OpenDAL
+service reports native copy capability; it is not emulated as read plus write.
+All source and destination paths are copied before a start returns, and copy
+metadata uses the same failure-atomic `ODM1` path as write and stat.
 
 All exported symbols use the `opendal_mbt_wasm_` prefix. The committed static
 browser-memory contract records their exact current set, the module imports,

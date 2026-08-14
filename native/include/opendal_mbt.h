@@ -44,7 +44,7 @@ extern "C" {
 #endif
 
 #define OPENDAL_MBT_ABI_V1_MAJOR UINT32_C(1)
-#define OPENDAL_MBT_ABI_V1_MINOR UINT32_C(7)
+#define OPENDAL_MBT_ABI_V1_MINOR UINT32_C(8)
 #define OPENDAL_MBT_ABI_V1_PATCH UINT32_C(0)
 #define OPENDAL_MBT_STRUCT_VERSION_V1 UINT32_C(1)
 #define OPENDAL_MBT_EXTENSIBLE_CODE_MAX UINT32_C(0x7fffffff)
@@ -132,6 +132,7 @@ typedef uint32_t opendal_mbt_range_kind_t;
 #define OPENDAL_MBT_FEATURE_BATCH_DELETE (UINT64_C(1) << 11)
 #define OPENDAL_MBT_FEATURE_COPIER (UINT64_C(1) << 12)
 #define OPENDAL_MBT_FEATURE_ASYNC (UINT64_C(1) << 13)
+#define OPENDAL_MBT_FEATURE_ASYNC_CORE (UINT64_C(1) << 14)
 
 /* Capability bit positions. */
 #define OPENDAL_MBT_CAP_STAT (UINT64_C(1) << 0)
@@ -909,6 +910,73 @@ typedef struct opendal_mbt_api_v1 {
       opendal_mbt_error_v1_t **out_error);
   void(OPENDAL_MBT_CALL *async_task_free)(
       opendal_mbt_async_task_v1_t *task);
+
+  /*
+   * OPENDAL_MBT_FEATURE_ASYNC_CORE: appended in ABI v1.8 and dependent on
+   * BASE, WHOLE_OBJECT, LISTING, and ASYNC. These starts copy every borrowed
+   * input before returning and use the same completion/cancellation contract
+   * as the v1.7 async group. List materialization snapshots only ABI-visible
+   * metadata and is bounded to 65,536 entries and 16 MiB of owned data before
+   * a lister is published.
+   */
+  opendal_mbt_status_t(OPENDAL_MBT_CALL *async_operator_check_start)(
+      opendal_mbt_operator_v1_t *operator_, int32_t completion_fd,
+      opendal_mbt_async_task_v1_t **out_task,
+      opendal_mbt_error_v1_t **out_error);
+  opendal_mbt_status_t(OPENDAL_MBT_CALL *async_operator_exists_start)(
+      opendal_mbt_operator_v1_t *operator_,
+      const opendal_mbt_bytes_view_v1_t *path, int32_t completion_fd,
+      opendal_mbt_async_task_v1_t **out_task,
+      opendal_mbt_error_v1_t **out_error);
+  opendal_mbt_status_t(OPENDAL_MBT_CALL *async_operator_stat_start)(
+      opendal_mbt_operator_v1_t *operator_,
+      const opendal_mbt_bytes_view_v1_t *path,
+      const opendal_mbt_stat_options_v1_t *options, int32_t completion_fd,
+      opendal_mbt_async_task_v1_t **out_task,
+      opendal_mbt_error_v1_t **out_error);
+  opendal_mbt_status_t(OPENDAL_MBT_CALL *async_operator_write_start)(
+      opendal_mbt_operator_v1_t *operator_,
+      const opendal_mbt_bytes_view_v1_t *path,
+      const opendal_mbt_bytes_view_v1_t *data,
+      const opendal_mbt_write_options_v1_t *options, int32_t completion_fd,
+      opendal_mbt_async_task_v1_t **out_task,
+      opendal_mbt_error_v1_t **out_error);
+  opendal_mbt_status_t(OPENDAL_MBT_CALL *async_operator_create_dir_start)(
+      opendal_mbt_operator_v1_t *operator_,
+      const opendal_mbt_bytes_view_v1_t *path, int32_t completion_fd,
+      opendal_mbt_async_task_v1_t **out_task,
+      opendal_mbt_error_v1_t **out_error);
+  opendal_mbt_status_t(OPENDAL_MBT_CALL *async_operator_delete_start)(
+      opendal_mbt_operator_v1_t *operator_,
+      const opendal_mbt_bytes_view_v1_t *path,
+      const opendal_mbt_delete_options_v1_t *options, int32_t completion_fd,
+      opendal_mbt_async_task_v1_t **out_task,
+      opendal_mbt_error_v1_t **out_error);
+  opendal_mbt_status_t(OPENDAL_MBT_CALL *async_operator_list_start)(
+      opendal_mbt_operator_v1_t *operator_,
+      const opendal_mbt_bytes_view_v1_t *path,
+      const opendal_mbt_list_options_v1_t *options, int32_t completion_fd,
+      opendal_mbt_async_task_v1_t **out_task,
+      opendal_mbt_error_v1_t **out_error);
+  opendal_mbt_status_t(OPENDAL_MBT_CALL *async_operator_copy_start)(
+      opendal_mbt_operator_v1_t *operator_,
+      const opendal_mbt_bytes_view_v1_t *source,
+      const opendal_mbt_bytes_view_v1_t *destination,
+      int32_t completion_fd, opendal_mbt_async_task_v1_t **out_task,
+      opendal_mbt_error_v1_t **out_error);
+  opendal_mbt_status_t(OPENDAL_MBT_CALL *async_operator_rename_start)(
+      opendal_mbt_operator_v1_t *operator_,
+      const opendal_mbt_bytes_view_v1_t *source,
+      const opendal_mbt_bytes_view_v1_t *destination,
+      int32_t completion_fd, opendal_mbt_async_task_v1_t **out_task,
+      opendal_mbt_error_v1_t **out_error);
+  opendal_mbt_status_t(OPENDAL_MBT_CALL *async_task_take_bool)(
+      opendal_mbt_async_task_v1_t *task, opendal_mbt_bool_t *out_value,
+      opendal_mbt_error_v1_t **out_error);
+  opendal_mbt_status_t(OPENDAL_MBT_CALL *async_task_take_lister)(
+      opendal_mbt_async_task_v1_t *task,
+      opendal_mbt_lister_v1_t **out_lister,
+      opendal_mbt_error_v1_t **out_error);
 } opendal_mbt_api_v1_t;
 
 /* End offset of one complete table field; never read a partially covered one. */

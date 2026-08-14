@@ -12,6 +12,116 @@ priv type NativeAsyncReadStream
 priv type NativeAsyncWriter
 
 ///|
+/// Start checking the configured backend.
+#borrow(operator)
+extern "C" fn native_async_operator_check_start(
+  operator : Operator,
+  completion_fd : Int,
+) -> NativeResult = "moonbit_opendal_async_operator_check_start"
+
+///|
+/// Start checking whether one path exists.
+#borrow(operator, path)
+extern "C" fn native_async_operator_exists_start(
+  operator : Operator,
+  path : String,
+  completion_fd : Int,
+) -> NativeResult = "moonbit_opendal_async_operator_exists_start"
+
+///|
+/// Start fetching one owned metadata snapshot.
+#borrow(operator, path, version, if_match, if_none_match)
+extern "C" fn native_async_operator_stat_start(
+  operator : Operator,
+  path : String,
+  has_version : Bool,
+  version : String,
+  has_if_match : Bool,
+  if_match : String,
+  has_if_none_match : Bool,
+  if_none_match : String,
+  completion_fd : Int,
+) -> NativeResult = "moonbit_opendal_async_operator_stat_start"
+
+///|
+/// Start writing one complete owned byte view.
+#borrow(operator, path, data, content_type, content_disposition, content_encoding, cache_control, if_match, if_none_match)
+extern "C" fn native_async_operator_write_start(
+  operator : Operator,
+  path : String,
+  data : Bytes,
+  append : Bool,
+  has_content_type : Bool,
+  content_type : String,
+  has_content_disposition : Bool,
+  content_disposition : String,
+  has_content_encoding : Bool,
+  content_encoding : String,
+  has_cache_control : Bool,
+  cache_control : String,
+  has_if_match : Bool,
+  if_match : String,
+  has_if_none_match : Bool,
+  if_none_match : String,
+  completion_fd : Int,
+) -> NativeResult = "moonbit_opendal_async_operator_write_start"
+
+///|
+/// Start recursively creating one directory path.
+#borrow(operator, path)
+extern "C" fn native_async_operator_create_dir_start(
+  operator : Operator,
+  path : String,
+  completion_fd : Int,
+) -> NativeResult = "moonbit_opendal_async_operator_create_dir_start"
+
+///|
+/// Start deleting one path.
+#borrow(operator, path, version)
+extern "C" fn native_async_operator_delete_start(
+  operator : Operator,
+  path : String,
+  has_version : Bool,
+  version : String,
+  recursive : Bool,
+  completion_fd : Int,
+) -> NativeResult = "moonbit_opendal_async_operator_delete_start"
+
+///|
+/// Start one bounded, materialized listing.
+#borrow(operator, path, start_after)
+extern "C" fn native_async_operator_list_start(
+  operator : Operator,
+  path : String,
+  recursive : Bool,
+  has_limit : Bool,
+  limit : UInt64,
+  has_start_after : Bool,
+  start_after : String,
+  completion_fd : Int,
+) -> NativeResult = "moonbit_opendal_async_operator_list_start"
+
+///|
+/// Start one backend-native copy.
+#borrow(operator, source, destination)
+extern "C" fn native_async_operator_copy_start(
+  operator : Operator,
+  source : String,
+  destination : String,
+  completion_fd : Int,
+) -> NativeResult = "moonbit_opendal_async_operator_copy_start"
+
+///|
+/// Start one backend-native rename.
+#borrow(operator, source, destination)
+extern "C" fn native_async_operator_rename_start(
+  operator : Operator,
+  source : String,
+  destination : String,
+  completion_fd : Int,
+) -> NativeResult = "moonbit_opendal_async_operator_rename_start"
+
+///|
 /// Start one whole-object read. Every string and byte view is copied before
 /// this call returns, and `completion_fd` is duplicated before the caller
 /// closes its pipe endpoint.

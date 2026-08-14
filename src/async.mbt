@@ -44,6 +44,7 @@ async fn await_native_result(
   start : (Int) -> NativeResult,
   operation : Operation,
   path : String?,
+  destination_path? : String,
 ) -> NativeResult {
   let (wake_read, wake_write) = @pipe.pipe() catch {
     _ =>
@@ -52,18 +53,18 @@ async fn await_native_result(
         operation,
         "could not create async completion pipe",
         path,
-        None,
+        destination_path,
       )
   }
   defer wake_read.close()
   let started = start(wake_write.fd())
   wake_write.close()
   if native_result_status(started) != 0U {
-    raise error_from_native_result(started, operation, path, None)
+    raise error_from_native_result(started, operation, path, destination_path)
   }
   let task = native_result_take_async_task(started)
   if native_result_status(started) != 0U {
-    raise error_from_native_result(started, operation, path, None)
+    raise error_from_native_result(started, operation, path, destination_path)
   }
   native_result_release(started)
   // This defer is the cancellation bridge. After a successful take it is a
@@ -77,7 +78,7 @@ async fn await_native_result(
         operation,
         "native async completion channel failed",
         path,
-        None,
+        destination_path,
       )
   }
   match wake {
@@ -88,9 +89,353 @@ async fn await_native_result(
         operation,
         "native async task ended without a completion signal",
         path,
-        None,
+        destination_path,
       )
   }
+}
+
+///|
+/// Verify that the configured backend can perform its native check operation
+/// without blocking the MoonBit scheduler.
+pub async fn AsyncOperator::check(self : AsyncOperator) -> Unit {
+  let result = await_native_result(
+    completion_fd => {
+      native_async_operator_check_start(self.native, completion_fd)
+    },
+    Check,
+    None,
+  )
+  if native_result_status(result) != 0U {
+    raise error_from_native_result(result, Check, None, None)
+  }
+  native_result_release(result)
+}
+
+///|
+/// Check whether a path exists. Only NotFound becomes false; all other
+/// failures remain errors.
+pub async fn AsyncOperator::exists(
+  self : AsyncOperator,
+  path : StringView,
+) -> Bool {
+  let path = path.to_owned()
+  let result = await_native_result(
+    completion_fd => {
+      native_async_operator_exists_start(self.native, path, completion_fd)
+    },
+    Exists,
+    Some(path),
+  )
+  if native_result_status(result) != 0U {
+    raise error_from_native_result(result, Exists, Some(path), None)
+  }
+  let exists = native_result_take_bool(result)
+  if native_result_status(result) != 0U {
+    raise error_from_native_result(result, Exists, Some(path), None)
+  }
+  native_result_release(result)
+  exists
+}
+
+///|
+/// Fetch metadata for one path without blocking the MoonBit scheduler.
+pub async fn AsyncOperator::stat(
+  self : AsyncOperator,
+  path : StringView,
+  version? : StringView,
+  if_match? : StringView,
+  if_none_match? : StringView,
+) -> Metadata {
+  let path = path.to_owned()
+  let (has_version, version) = normalize_optional_text(version)
+  let (has_if_match, if_match) = normalize_optional_text(if_match)
+  let (has_if_none_match, if_none_match) = normalize_optional_text(
+    if_none_match,
+  )
+  let result = await_native_result(
+    completion_fd => {
+      native_async_operator_stat_start(
+        self.native,
+        path,
+        has_version,
+        version,
+        has_if_match,
+        if_match,
+        has_if_none_match,
+        if_none_match,
+        completion_fd,
+      )
+    },
+    Stat,
+    Some(path),
+  )
+  if native_result_status(result) != 0U {
+    raise error_from_native_result(result, Stat, Some(path), None)
+  }
+  let metadata = native_result_take_metadata(result)
+  if native_result_status(result) != 0U {
+    raise error_from_native_result(result, Stat, Some(path), None)
+  }
+  native_result_release(result)
+  metadata_from_native(metadata, Stat, Some(path))
+}
+
+///|
+/// Write an entire byte view through OpenDAL's asynchronous whole-object API.
+pub async fn AsyncOperator::write(
+  self : AsyncOperator,
+  path : StringView,
+  data : BytesView,
+  append? : Bool = false,
+  content_type? : StringView,
+  content_disposition? : StringView,
+  content_encoding? : StringView,
+  cache_control? : StringView,
+  if_match? : StringView,
+  if_none_match? : StringView,
+) -> Metadata {
+  let path = path.to_owned()
+  let data = data.to_owned()
+  let (has_content_type, content_type) = normalize_optional_text(content_type)
+  let (has_content_disposition, content_disposition) = normalize_optional_text(
+    content_disposition,
+  )
+  let (has_content_encoding, content_encoding) = normalize_optional_text(
+    content_encoding,
+  )
+  let (has_cache_control, cache_control) = normalize_optional_text(
+    cache_control,
+  )
+  let (has_if_match, if_match) = normalize_optional_text(if_match)
+  let (has_if_none_match, if_none_match) = normalize_optional_text(
+    if_none_match,
+  )
+  let result = await_native_result(
+    completion_fd => {
+      native_async_operator_write_start(
+        self.native,
+        path,
+        data,
+        append,
+        has_content_type,
+        content_type,
+        has_content_disposition,
+        content_disposition,
+        has_content_encoding,
+        content_encoding,
+        has_cache_control,
+        cache_control,
+        has_if_match,
+        if_match,
+        has_if_none_match,
+        if_none_match,
+        completion_fd,
+      )
+    },
+    Write,
+    Some(path),
+  )
+  if native_result_status(result) != 0U {
+    raise error_from_native_result(result, Write, Some(path), None)
+  }
+  let metadata = native_result_take_metadata(result)
+  if native_result_status(result) != 0U {
+    raise error_from_native_result(result, Write, Some(path), None)
+  }
+  native_result_release(result)
+  metadata_from_native(metadata, Write, Some(path))
+}
+
+///|
+/// Create a directory recursively. A directory path must end with /.
+pub async fn AsyncOperator::create_dir(
+  self : AsyncOperator,
+  path : StringView,
+) -> Unit {
+  let path = path.to_owned()
+  let result = await_native_result(
+    completion_fd => {
+      native_async_operator_create_dir_start(self.native, path, completion_fd)
+    },
+    CreateDir,
+    Some(path),
+  )
+  if native_result_status(result) != 0U {
+    raise error_from_native_result(result, CreateDir, Some(path), None)
+  }
+  native_result_release(result)
+}
+
+///|
+/// Delete a path asynchronously. Deleting a missing path is successful.
+pub async fn AsyncOperator::delete(
+  self : AsyncOperator,
+  path : StringView,
+  version? : StringView,
+  recursive? : Bool = false,
+) -> Unit {
+  let path = path.to_owned()
+  let (has_version, version) = normalize_optional_text(version)
+  let result = await_native_result(
+    completion_fd => {
+      native_async_operator_delete_start(
+        self.native,
+        path,
+        has_version,
+        version,
+        recursive,
+        completion_fd,
+      )
+    },
+    Delete,
+    Some(path),
+  )
+  if native_result_status(result) != 0U {
+    raise error_from_native_result(result, Delete, Some(path), None)
+  }
+  native_result_release(result)
+}
+
+///|
+/// Materialize one bounded asynchronous prefix listing. The optional limit is
+/// a backend request hint rather than a total-result bound.
+pub async fn AsyncOperator::list(
+  self : AsyncOperator,
+  path : StringView,
+  recursive? : Bool = false,
+  limit? : UInt64,
+  start_after? : StringView,
+) -> Array[Entry] {
+  let path = path.to_owned()
+  let has_limit = limit is Some(_)
+  let limit = limit.unwrap_or(0UL)
+  let (has_start_after, start_after) = normalize_optional_text(start_after)
+  let result = await_native_result(
+    completion_fd => {
+      native_async_operator_list_start(
+        self.native,
+        path,
+        recursive,
+        has_limit,
+        limit,
+        has_start_after,
+        start_after,
+        completion_fd,
+      )
+    },
+    List,
+    Some(path),
+  )
+  if native_result_status(result) != 0U {
+    raise error_from_native_result(result, List, Some(path), None)
+  }
+  let native = native_result_take_lister(result)
+  if native_result_status(result) != 0U {
+    raise error_from_native_result(result, List, Some(path), None)
+  }
+  native_result_release(result)
+  let lister : Lister = { native, path }
+  let entries : Array[Entry] = []
+  try {
+    for ;; {
+      match lister.next() {
+        Some(entry) => entries.push(entry)
+        None => break
+      }
+    }
+    lister.close()
+    entries
+  } catch {
+    error => {
+      lister.close()
+      raise error
+    }
+  } noraise {
+    value => value
+  }
+}
+
+///|
+/// Copy one object with the backend's native asynchronous copy operation and
+/// return the destination metadata. This is never emulated with read/write.
+pub async fn AsyncOperator::copy(
+  self : AsyncOperator,
+  source : StringView,
+  destination : StringView,
+) -> Metadata {
+  let source = source.to_owned()
+  let destination = destination.to_owned()
+  let result = await_native_result(
+    completion_fd => {
+      native_async_operator_copy_start(
+        self.native,
+        source,
+        destination,
+        completion_fd,
+      )
+    },
+    Copy,
+    Some(source),
+    destination_path=destination,
+  )
+  if native_result_status(result) != 0U {
+    raise error_from_native_result(
+      result,
+      Copy,
+      Some(source),
+      Some(destination),
+    )
+  }
+  let metadata = native_result_take_metadata(result)
+  if native_result_status(result) != 0U {
+    raise error_from_native_result(
+      result,
+      Copy,
+      Some(source),
+      Some(destination),
+    )
+  }
+  native_result_release(result)
+  metadata_from_native(
+    metadata,
+    Copy,
+    Some(source),
+    destination_path=destination,
+  )
+}
+
+///|
+/// Rename one object with the backend's native asynchronous rename operation.
+/// This is never emulated with copy/delete.
+pub async fn AsyncOperator::rename(
+  self : AsyncOperator,
+  source : StringView,
+  destination : StringView,
+) -> Unit {
+  let source = source.to_owned()
+  let destination = destination.to_owned()
+  let result = await_native_result(
+    completion_fd => {
+      native_async_operator_rename_start(
+        self.native,
+        source,
+        destination,
+        completion_fd,
+      )
+    },
+    Rename,
+    Some(source),
+    destination_path=destination,
+  )
+  if native_result_status(result) != 0U {
+    raise error_from_native_result(
+      result,
+      Rename,
+      Some(source),
+      Some(destination),
+    )
+  }
+  native_result_release(result)
 }
 
 ///|

@@ -12,10 +12,11 @@ use std::task::{Context, Poll, Waker};
 
 use futures_util::TryStreamExt;
 use opendal::{
-    BytesRange, ErrorKind, Metadata, Operator, OperatorRegistry, options, services::Memory,
+    BytesRange, Capability, ErrorKind, Metadata, Operator, OperatorRegistry, options,
+    services::Memory,
 };
 
-const ABI_VERSION: u32 = 0x0001_0006;
+const ABI_VERSION: u32 = 0x0001_0007;
 const FEATURE_MEMORY_SERVICE: u32 = 1 << 0;
 const FEATURE_POLL_ONCE_CANARY: u32 = 1 << 1;
 const FEATURE_GENERATION_HANDLES: u32 = 1 << 2;
@@ -27,6 +28,7 @@ const FEATURE_BOUNDED_LIST: u32 = 1 << 7;
 const FEATURE_BULK_TRANSFER: u32 = 1 << 8;
 const FEATURE_STRUCTURED_ERRORS: u32 = 1 << 9;
 const FEATURE_METADATA_OPTIONS: u32 = 1 << 10;
+const FEATURE_CORE_ASYNC_PARITY: u32 = 1 << 11;
 const MAX_SLOTS: usize = u16::MAX as usize;
 const MAX_GENERATION: u16 = i16::MAX as u16;
 const MAX_BUFFER_LENGTH: usize = 64 * 1024 * 1024;
@@ -93,6 +95,10 @@ const COMPLETION_STAT: u32 = 3;
 const COMPLETION_CREATE_DIR: u32 = 4;
 const COMPLETION_DELETE: u32 = 5;
 const COMPLETION_LIST: u32 = 6;
+const COMPLETION_CHECK: u32 = 7;
+const COMPLETION_EXISTS: u32 = 8;
+const COMPLETION_COPY: u32 = 9;
+const COMPLETION_RENAME: u32 = 10;
 
 const ENTRY_MODE_UNKNOWN: u32 = 0;
 const ENTRY_MODE_FILE: u32 = 1;
@@ -527,6 +533,10 @@ enum Completion {
     CreateDir(Result<(), BridgeError>),
     Delete(Result<(), BridgeError>),
     List(Result<Vec<EntrySnapshot>, BridgeError>),
+    Check(Result<(), BridgeError>),
+    Exists(Result<bool, BridgeError>),
+    Copy(Result<Box<Metadata>, BridgeError>),
+    Rename(Result<(), BridgeError>),
 }
 
 impl Completion {
@@ -538,6 +548,10 @@ impl Completion {
             Self::CreateDir(_) => COMPLETION_CREATE_DIR,
             Self::Delete(_) => COMPLETION_DELETE,
             Self::List(_) => COMPLETION_LIST,
+            Self::Check(_) => COMPLETION_CHECK,
+            Self::Exists(_) => COMPLETION_EXISTS,
+            Self::Copy(_) => COMPLETION_COPY,
+            Self::Rename(_) => COMPLETION_RENAME,
         }
     }
 
@@ -548,13 +562,21 @@ impl Completion {
             | Self::Stat(Err(error))
             | Self::CreateDir(Err(error))
             | Self::Delete(Err(error))
-            | Self::List(Err(error)) => Some(error),
+            | Self::List(Err(error))
+            | Self::Check(Err(error))
+            | Self::Exists(Err(error))
+            | Self::Copy(Err(error))
+            | Self::Rename(Err(error)) => Some(error),
             Self::Write(Ok(_))
             | Self::Read(Ok(_))
             | Self::Stat(Ok(_))
             | Self::CreateDir(Ok(()))
             | Self::Delete(Ok(()))
-            | Self::List(Ok(_)) => None,
+            | Self::List(Ok(_))
+            | Self::Check(Ok(()))
+            | Self::Exists(Ok(_))
+            | Self::Copy(Ok(_))
+            | Self::Rename(Ok(())) => None,
         }
     }
 }
@@ -954,6 +976,24 @@ fn path_and_operator(
     })
 }
 
+fn paths_and_operator(
+    operator_handle: u32,
+    source_handle: u32,
+    destination_handle: u32,
+) -> Result<(Operator, String, String), BridgeError> {
+    STATE.with(|state| {
+        let state = state.borrow();
+        let operator = state.arena.operator(operator_handle)?.clone();
+        let source = std::str::from_utf8(state.arena.buffer(source_handle)?)
+            .map_err(|_| BridgeError::InvalidUtf8)
+            .and_then(try_owned_string)?;
+        let destination = std::str::from_utf8(state.arena.buffer(destination_handle)?)
+            .map_err(|_| BridgeError::InvalidUtf8)
+            .and_then(try_owned_string)?;
+        Ok((operator, source, destination))
+    })
+}
+
 fn owned_utf8_buffer(handle: u32) -> Result<String, BridgeError> {
     STATE.with(|state| {
         let state = state.borrow();
@@ -1059,6 +1099,16 @@ fn ensure_suffix_is_native(operator: &Operator, range: &BytesRange) -> Result<()
         return Err(BridgeError::from(opendal::Error::new(
             ErrorKind::Unsupported,
             "suffix reads require native backend range support",
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_copy_is_native(native_copy: bool) -> Result<(), BridgeError> {
+    if !native_copy {
+        return Err(BridgeError::from(opendal::Error::new(
+            ErrorKind::Unsupported,
+            "copy requires native backend support",
         )));
     }
     Ok(())
@@ -1331,7 +1381,21 @@ fn build_operator(builder: OperatorBuilder) -> Result<Operator, BridgeError> {
 
 fn capability_word(operator: &Operator, word: u32) -> Result<u64, BridgeError> {
     let capability = operator.info().capability();
-    let native_read_with_suffix = operator.base_service().capability_dyn().read_with_suffix;
+    let base_capability = operator.base_service().capability_dyn();
+    capability_word_from(
+        &capability,
+        base_capability.read_with_suffix,
+        base_capability.copy,
+        word,
+    )
+}
+
+fn capability_word_from(
+    capability: &Capability,
+    native_read_with_suffix: bool,
+    native_copy: bool,
+    word: u32,
+) -> Result<u64, BridgeError> {
     match word {
         0 => {
             let mut value = 0;
@@ -1341,7 +1405,7 @@ fn capability_word(operator: &Operator, word: u32) -> Result<u64, BridgeError> {
             value |= u64::from(capability.create_dir) * CAP_CREATE_DIR;
             value |= u64::from(capability.delete) * CAP_DELETE;
             value |= u64::from(capability.list) * CAP_LIST;
-            value |= u64::from(capability.copy) * CAP_COPY;
+            value |= u64::from(native_copy) * CAP_COPY;
             value |= u64::from(capability.rename) * CAP_RENAME;
             value |= u64::from(native_read_with_suffix) * CAP_READ_SUFFIX;
             value |= u64::from(capability.write_can_append) * CAP_WRITE_APPEND;
@@ -1403,6 +1467,7 @@ pub extern "C" fn opendal_mbt_wasm_feature_flags() -> u32 {
         | FEATURE_BULK_TRANSFER
         | FEATURE_STRUCTURED_ERRORS
         | FEATURE_METADATA_OPTIONS
+        | FEATURE_CORE_ASYNC_PARITY
 }
 
 /// Returns how many forced-delay tasks reached an actual pending poll.
@@ -1862,6 +1927,85 @@ pub extern "C" fn opendal_mbt_wasm_operator_stat_options_start_v1(
     )
 }
 
+/// Starts an asynchronous connectivity check.
+#[unsafe(no_mangle)]
+pub extern "C" fn opendal_mbt_wasm_operator_check_start(operator_handle: u32) -> u32 {
+    let operator = STATE.with(|state| {
+        let state = state.borrow();
+        Ok(state.arena.operator(operator_handle)?.clone())
+    });
+    let result = operator.and_then(|operator| {
+        start_task(
+            async move { Completion::Check(operator.check().await.map_err(BridgeError::from)) },
+        )
+    });
+    handle_or_record_error(result)
+}
+
+/// Starts an asynchronous existence check for one path.
+#[unsafe(no_mangle)]
+pub extern "C" fn opendal_mbt_wasm_operator_exists_start(
+    operator_handle: u32,
+    path_handle: u32,
+) -> u32 {
+    let result = path_and_operator(operator_handle, path_handle).and_then(|(operator, path)| {
+        start_task(async move {
+            Completion::Exists(operator.exists(&path).await.map_err(BridgeError::from))
+        })
+    });
+    handle_or_record_error(result)
+}
+
+/// Starts an asynchronous native copy and returns destination metadata.
+///
+/// The base-service capability is captured before the task starts so an
+/// effective or simulated capability cannot enable copy on its own.
+#[unsafe(no_mangle)]
+pub extern "C" fn opendal_mbt_wasm_operator_copy_start(
+    operator_handle: u32,
+    source_handle: u32,
+    destination_handle: u32,
+) -> u32 {
+    let result = paths_and_operator(operator_handle, source_handle, destination_handle).and_then(
+        |(operator, source, destination)| {
+            let native_copy = operator.base_service().capability_dyn().copy;
+            start_task(async move {
+                Completion::Copy(match ensure_copy_is_native(native_copy) {
+                    Ok(()) => operator
+                        .copy(&source, &destination)
+                        .await
+                        .map(Box::new)
+                        .map_err(BridgeError::from),
+                    Err(error) => Err(error),
+                })
+            })
+        },
+    );
+    handle_or_record_error(result)
+}
+
+/// Starts an asynchronous rename.
+#[unsafe(no_mangle)]
+pub extern "C" fn opendal_mbt_wasm_operator_rename_start(
+    operator_handle: u32,
+    source_handle: u32,
+    destination_handle: u32,
+) -> u32 {
+    let result = paths_and_operator(operator_handle, source_handle, destination_handle).and_then(
+        |(operator, source, destination)| {
+            start_task(async move {
+                Completion::Rename(
+                    operator
+                        .rename(&source, &destination)
+                        .await
+                        .map_err(BridgeError::from),
+                )
+            })
+        },
+    );
+    handle_or_record_error(result)
+}
+
 /// Starts an asynchronous recursive directory creation.
 #[unsafe(no_mangle)]
 pub extern "C" fn opendal_mbt_wasm_operator_create_dir_start(
@@ -2048,6 +2192,10 @@ pub extern "C" fn opendal_mbt_wasm_completion_status(handle: u32) -> u32 {
             Completion::CreateDir(result) => result.as_ref().map_or_else(BridgeError::code, |_| 0),
             Completion::Delete(result) => result.as_ref().map_or_else(BridgeError::code, |_| 0),
             Completion::List(result) => result.as_ref().map_or_else(BridgeError::code, |_| 0),
+            Completion::Check(result) => result.as_ref().map_or_else(BridgeError::code, |_| 0),
+            Completion::Exists(result) => result.as_ref().map_or_else(BridgeError::code, |_| 0),
+            Completion::Copy(result) => result.as_ref().map_or_else(BridgeError::code, |_| 0),
+            Completion::Rename(result) => result.as_ref().map_or_else(BridgeError::code, |_| 0),
         })
     });
     match result {
@@ -2085,7 +2233,7 @@ pub extern "C" fn opendal_mbt_wasm_completion_take_metadata(handle: u32) -> u32 
     handle_or_record_error(result)
 }
 
-/// Atomically replaces a successful stat/write completion with an ODM1 buffer.
+/// Atomically replaces a successful stat/write/copy completion with an ODM1 buffer.
 ///
 /// Any encoding or replacement failure leaves the completion valid.
 #[unsafe(no_mangle)]
@@ -2094,10 +2242,12 @@ pub extern "C" fn opendal_mbt_wasm_completion_take_metadata_snapshot(handle: u32
         let mut state = state.borrow_mut();
         let completion = state.arena.completion(handle)?;
         let snapshot = match completion {
-            Completion::Write(Ok(metadata)) | Completion::Stat(Ok(metadata)) => {
-                metadata_snapshot_bytes(metadata)?
-            }
-            Completion::Write(Err(error)) | Completion::Stat(Err(error)) => {
+            Completion::Write(Ok(metadata))
+            | Completion::Stat(Ok(metadata))
+            | Completion::Copy(Ok(metadata)) => metadata_snapshot_bytes(metadata)?,
+            Completion::Write(Err(error))
+            | Completion::Stat(Err(error))
+            | Completion::Copy(Err(error)) => {
                 return Err(error.clone());
             }
             completion => {
@@ -2109,6 +2259,9 @@ pub extern "C" fn opendal_mbt_wasm_completion_take_metadata_snapshot(handle: u32
                         COMPLETION_CREATE_DIR => "create-dir completion",
                         COMPLETION_DELETE => "delete completion",
                         COMPLETION_LIST => "list completion",
+                        COMPLETION_CHECK => "check completion",
+                        COMPLETION_EXISTS => "exists completion",
+                        COMPLETION_RENAME => "rename completion",
                         _ => "completion",
                     },
                 });
@@ -2119,7 +2272,9 @@ pub extern "C" fn opendal_mbt_wasm_completion_take_metadata_snapshot(handle: u32
             .ensure_insert_capacity_after_take(handle, ResourceKind::Completion)?;
         let resource = state.arena.take(handle, ResourceKind::Completion)?;
         match resource {
-            Resource::Completion(Completion::Write(Ok(_)) | Completion::Stat(Ok(_))) => {}
+            Resource::Completion(
+                Completion::Write(Ok(_)) | Completion::Stat(Ok(_)) | Completion::Copy(Ok(_)),
+            ) => {}
             _ => unreachable!("metadata completion was checked before removal"),
         }
         match state.arena.insert(Resource::Buffer(snapshot)) {
@@ -2130,6 +2285,40 @@ pub extern "C" fn opendal_mbt_wasm_completion_take_metadata_snapshot(handle: u32
         }
     });
     handle_or_record_error(result)
+}
+
+/// Consumes a successful exists completion and returns `0` or `1`.
+///
+/// `-1` indicates failure and leaves the completion valid, matching the
+/// bridge's other scalar getters.
+#[unsafe(no_mangle)]
+pub extern "C" fn opendal_mbt_wasm_completion_take_bool(handle: u32) -> i32 {
+    let result = STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let completion = state.arena.completion(handle)?;
+        if completion.kind() != COMPLETION_EXISTS {
+            return Err(wrong_completion_type(
+                handle,
+                COMPLETION_EXISTS,
+                completion.kind(),
+            ));
+        }
+        if let Some(error) = completion.error() {
+            return Err(error.clone());
+        }
+        let resource = state.arena.take(handle, ResourceKind::Completion)?;
+        let Resource::Completion(Completion::Exists(Ok(value))) = resource else {
+            unreachable!("exists completion kind and status checked before removal")
+        };
+        Ok(i32::from(value))
+    });
+    match result {
+        Ok(value) => value,
+        Err(error) => {
+            record_error(error);
+            SCALAR_ERROR
+        }
+    }
 }
 
 /// Moves a successful list result into an owned entry-list handle.
@@ -2184,6 +2373,10 @@ fn wrong_completion_type(handle: u32, expected: u32, actual: u32) -> BridgeError
         COMPLETION_CREATE_DIR => "create-dir completion",
         COMPLETION_DELETE => "delete completion",
         COMPLETION_LIST => "list completion",
+        COMPLETION_CHECK => "check completion",
+        COMPLETION_EXISTS => "exists completion",
+        COMPLETION_COPY => "copy completion",
+        COMPLETION_RENAME => "rename completion",
         _ => "completion",
     };
     BridgeError::WrongResourceType {
@@ -2206,6 +2399,10 @@ pub extern "C" fn opendal_mbt_wasm_completion_take_error(handle: u32) -> u32 {
             Completion::CreateDir(result) => result.is_err(),
             Completion::Delete(result) => result.is_err(),
             Completion::List(result) => result.is_err(),
+            Completion::Check(result) => result.is_err(),
+            Completion::Exists(result) => result.is_err(),
+            Completion::Copy(result) => result.is_err(),
+            Completion::Rename(result) => result.is_err(),
         };
         if !is_error {
             return Err(BridgeError::WrongResourceType {
@@ -2227,13 +2424,21 @@ pub extern "C" fn opendal_mbt_wasm_completion_take_error(handle: u32) -> u32 {
             | Completion::Stat(Err(error))
             | Completion::CreateDir(Err(error))
             | Completion::Delete(Err(error))
-            | Completion::List(Err(error)) => error,
+            | Completion::List(Err(error))
+            | Completion::Check(Err(error))
+            | Completion::Exists(Err(error))
+            | Completion::Copy(Err(error))
+            | Completion::Rename(Err(error)) => error,
             Completion::Write(Ok(_))
             | Completion::Read(Ok(_))
             | Completion::Stat(Ok(_))
             | Completion::CreateDir(Ok(()))
             | Completion::Delete(Ok(()))
-            | Completion::List(Ok(_)) => unreachable!("success checked before removal"),
+            | Completion::List(Ok(_))
+            | Completion::Check(Ok(()))
+            | Completion::Exists(Ok(_))
+            | Completion::Copy(Ok(_))
+            | Completion::Rename(Ok(())) => unreachable!("success checked before removal"),
         };
         state.arena.insert(Resource::Error(error))
     });
@@ -2935,13 +3140,16 @@ mod tests {
     }
 
     #[test]
-    fn metadata_completion_snapshot_take_supports_write_and_stat() {
+    fn metadata_completion_snapshot_take_supports_write_stat_and_copy() {
         for completion in [
             Completion::Write(Ok(Box::new(
                 Metadata::new(opendal::EntryMode::FILE).with_content_length(3),
             ))),
             Completion::Stat(Ok(Box::new(
                 Metadata::new(opendal::EntryMode::DIR).with_content_length(4),
+            ))),
+            Completion::Copy(Ok(Box::new(
+                Metadata::new(opendal::EntryMode::FILE).with_content_length(5),
             ))),
         ] {
             reset_state();
@@ -2970,7 +3178,7 @@ mod tests {
                 .map(|index| Slot {
                     generation: if index == 0 { MAX_GENERATION } else { 0 },
                     resource: (index == 0).then(|| {
-                        Resource::Completion(Completion::Stat(Ok(Box::new(Metadata::new(
+                        Resource::Completion(Completion::Copy(Ok(Box::new(Metadata::new(
                             opendal::EntryMode::FILE,
                         )))))
                     }),
@@ -2985,7 +3193,7 @@ mod tests {
         );
         assert_eq!(
             opendal_mbt_wasm_completion_kind(completion),
-            COMPLETION_STAT
+            COMPLETION_COPY
         );
         reset_state();
     }
@@ -3219,6 +3427,24 @@ mod tests {
     }
 
     #[test]
+    fn copy_capability_and_guard_ignore_effective_layer_claims() {
+        let effective = Capability {
+            copy: true,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            capability_word_from(&effective, false, false, 0).unwrap() & CAP_COPY,
+            0
+        );
+        assert_eq!(
+            ensure_copy_is_native(false).unwrap_err().kind(),
+            ERROR_UNSUPPORTED
+        );
+        assert!(ensure_copy_is_native(true).is_ok());
+    }
+
+    #[test]
     fn generic_builder_rejects_duplicate_and_unbounded_config() {
         reset_state();
         let scheme = insert_test_buffer(b"memory");
@@ -3287,6 +3513,8 @@ mod tests {
         for (completion, expected_kind) in [
             (Completion::CreateDir(Ok(())), COMPLETION_CREATE_DIR),
             (Completion::Delete(Ok(())), COMPLETION_DELETE),
+            (Completion::Check(Ok(())), COMPLETION_CHECK),
+            (Completion::Rename(Ok(())), COMPLETION_RENAME),
         ] {
             let task = insert_test_resource(Resource::Task(Task::Ready(Box::new(completion))));
             let completion = opendal_mbt_wasm_task_take(task);
@@ -3295,6 +3523,116 @@ mod tests {
             assert_eq!(opendal_mbt_wasm_completion_status(completion), STATUS_OK);
             assert_eq!(opendal_mbt_wasm_completion_release(completion), STATUS_OK);
             assert_eq!(opendal_mbt_wasm_task_release(task), STATUS_OK);
+        }
+        assert_eq!(opendal_mbt_wasm_live_handle_count(), 0);
+        reset_state();
+    }
+
+    #[test]
+    fn exists_completion_take_bool_is_typed_single_use_and_capacity_independent() {
+        reset_state();
+        for value in [false, true] {
+            let completion =
+                insert_test_resource(Resource::Completion(Completion::Exists(Ok(value))));
+            assert_eq!(
+                opendal_mbt_wasm_completion_take_bool(completion),
+                i32::from(value)
+            );
+            assert_eq!(
+                opendal_mbt_wasm_completion_take_bool(completion),
+                SCALAR_ERROR
+            );
+            assert_eq!(opendal_mbt_wasm_last_error_code(), 1);
+            assert_eq!(opendal_mbt_wasm_last_error_clear(), STATUS_OK);
+        }
+
+        let completion = encode_handle(0, MAX_GENERATION);
+        STATE.with(|state| {
+            let mut state = state.borrow_mut();
+            state.arena.slots = (0..MAX_SLOTS)
+                .map(|index| Slot {
+                    generation: if index == 0 { MAX_GENERATION } else { 0 },
+                    resource: (index == 0)
+                        .then(|| Resource::Completion(Completion::Exists(Ok(true)))),
+                })
+                .collect();
+            state.arena.live = 1;
+        });
+        assert_eq!(opendal_mbt_wasm_completion_take_bool(completion), 1);
+        assert_eq!(opendal_mbt_wasm_live_handle_count(), 0);
+        reset_state();
+    }
+
+    #[test]
+    fn exists_completion_take_bool_failure_preserves_the_completion() {
+        reset_state();
+        let wrong_kind = insert_test_resource(Resource::Completion(Completion::Check(Ok(()))));
+        assert_eq!(
+            opendal_mbt_wasm_completion_take_bool(wrong_kind),
+            SCALAR_ERROR
+        );
+        assert_eq!(opendal_mbt_wasm_last_error_code(), 2);
+        assert_eq!(opendal_mbt_wasm_last_error_clear(), STATUS_OK);
+        assert_eq!(
+            opendal_mbt_wasm_completion_kind(wrong_kind),
+            COMPLETION_CHECK
+        );
+        assert_eq!(opendal_mbt_wasm_completion_release(wrong_kind), STATUS_OK);
+
+        let failed = insert_test_resource(Resource::Completion(Completion::Exists(Err(
+            BridgeError::from(opendal::Error::new(ErrorKind::PermissionDenied, "denied")),
+        ))));
+        assert_eq!(opendal_mbt_wasm_completion_take_bool(failed), SCALAR_ERROR);
+        assert_eq!(opendal_mbt_wasm_last_error_code(), 8);
+        assert_eq!(opendal_mbt_wasm_last_error_clear(), STATUS_OK);
+        assert_eq!(opendal_mbt_wasm_completion_kind(failed), COMPLETION_EXISTS);
+        let error = opendal_mbt_wasm_completion_take_error(failed);
+        assert_ne!(error, 0);
+        assert_eq!(opendal_mbt_wasm_error_release(error), STATUS_OK);
+        assert_eq!(opendal_mbt_wasm_live_handle_count(), 0);
+        reset_state();
+    }
+
+    #[test]
+    fn core_async_parity_failures_are_typed_and_owned() {
+        reset_state();
+        for (completion, expected_kind) in [
+            (
+                Completion::Check(Err(BridgeError::from(opendal::Error::new(
+                    ErrorKind::Unsupported,
+                    "check",
+                )))),
+                COMPLETION_CHECK,
+            ),
+            (
+                Completion::Exists(Err(BridgeError::from(opendal::Error::new(
+                    ErrorKind::Unsupported,
+                    "exists",
+                )))),
+                COMPLETION_EXISTS,
+            ),
+            (
+                Completion::Copy(Err(BridgeError::from(opendal::Error::new(
+                    ErrorKind::Unsupported,
+                    "copy",
+                )))),
+                COMPLETION_COPY,
+            ),
+            (
+                Completion::Rename(Err(BridgeError::from(opendal::Error::new(
+                    ErrorKind::Unsupported,
+                    "rename",
+                )))),
+                COMPLETION_RENAME,
+            ),
+        ] {
+            let completion = insert_test_resource(Resource::Completion(completion));
+            assert_eq!(opendal_mbt_wasm_completion_kind(completion), expected_kind);
+            assert_eq!(opendal_mbt_wasm_completion_status(completion), 8);
+            let error = opendal_mbt_wasm_completion_take_error(completion);
+            assert_ne!(error, 0);
+            assert_eq!(opendal_mbt_wasm_error_code(error), 8);
+            assert_eq!(opendal_mbt_wasm_error_release(error), STATUS_OK);
         }
         assert_eq!(opendal_mbt_wasm_live_handle_count(), 0);
         reset_state();

@@ -1,0 +1,109 @@
+{
+  "schema": 1,
+  "operations": {
+    "check": {
+      "arguments": [],
+      "result": "Unit",
+      "error_operation": "Check"
+    },
+    "exists": {
+      "arguments": ["StringView"],
+      "result": "Bool",
+      "error_operation": "Exists"
+    },
+    "read": {
+      "arguments": [
+        "StringView",
+        "range? : ByteRange",
+        "version? : StringView",
+        "if_match? : StringView",
+        "if_none_match? : StringView"
+      ],
+      "result": "Bytes",
+      "error_operation": "Read"
+    },
+    "stat": {
+      "arguments": [
+        "StringView",
+        "version? : StringView",
+        "if_match? : StringView",
+        "if_none_match? : StringView"
+      ],
+      "result": "Metadata",
+      "error_operation": "Stat"
+    },
+    "write": {
+      "arguments": [
+        "StringView",
+        "BytesView",
+        "append? : Bool",
+        "content_type? : StringView",
+        "content_disposition? : StringView",
+        "content_encoding? : StringView",
+        "cache_control? : StringView",
+        "if_match? : StringView",
+        "if_none_match? : StringView"
+      ],
+      "result": "Metadata",
+      "error_operation": "Write"
+    },
+    "create_dir": {
+      "arguments": ["StringView"],
+      "result": "Unit",
+      "error_operation": "CreateDir"
+    },
+    "delete": {
+      "arguments": [
+        "StringView",
+        "version? : StringView",
+        "recursive? : Bool"
+      ],
+      "result": "Unit",
+      "error_operation": "Delete"
+    },
+    "list": {
+      "arguments": [
+        "StringView",
+        "recursive? : Bool",
+        "limit? : UInt64",
+        "start_after? : StringView"
+      ],
+      "result": "Array[Entry]",
+      "error_operation": "List"
+    },
+    "copy": {
+      "arguments": ["StringView", "StringView"],
+      "result": "Metadata",
+      "error_operation": "Copy"
+    },
+    "rename": {
+      "arguments": ["StringView", "StringView"],
+      "result": "Unit",
+      "error_operation": "Rename"
+    }
+  },
+  "shared_types": [
+    "ByteRange",
+    "Entry",
+    "EntryMode",
+    "ErrorInfo",
+    "ErrorKind",
+    "ErrorStatus",
+    "Metadata",
+    "OpenDalError",
+    "Operation",
+    "OperatorInfo",
+    "Timestamp"
+  ],
+  "shared_method_owners": [
+    "Capability",
+    "Entry",
+    "Metadata",
+    "OpenDalError"
+  ],
+  "shared_operator_methods": [
+    "pub fn Operator::as_async(Self) -> AsyncOperator",
+    "pub fn Operator::info(Self) -> OperatorInfo",
+    "pub fn Operator::new(StringView, config? : Map[String, String]) -> Self raise OpenDalError"
+  ]
+}
