@@ -7,7 +7,8 @@ the task-oriented guides: it identifies the exact portable slice, the
 additional browser surface, and the target-specific reference commands without
 duplicating implementation source.
 
-For a runnable program shared by native and a real browser, see the
+For a runnable program shared by native and a real browser, including a
+cross-origin S3 non-blocking proof, see the
 [portable async example](../../examples/browser/README.md).
 
 Applications import the normal root package:

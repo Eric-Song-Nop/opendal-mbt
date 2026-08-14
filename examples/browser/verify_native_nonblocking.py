@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify that native OpenDAL I/O yields to MoonBit's async scheduler."""
+"""Run the shared delayed-I/O proof with the native OpenDAL backend."""
 
 from __future__ import annotations
 
@@ -13,13 +13,22 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
 DELAY_SECONDS = 0.75
-SUCCESS_MARKER = "OPENDAL_NATIVE_NONBLOCKING_OK:"
+EXPECTED_PATH = "/probe-bucket/delayed-missing.txt"
+SUCCESS_MARKER = "OPENDAL_ASYNC_IO_NONBLOCKING_OK:"
 
 
 class DelayedS3Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def do_GET(self) -> None:  # noqa: N802 - HTTP handler API
+        if self.path != EXPECTED_PATH:
+            body = b"unexpected S3 request path"
+            self.send_response(400)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         time.sleep(DELAY_SECONDS)
         body = (
             b'<?xml version="1.0" encoding="UTF-8"?>'
@@ -66,7 +75,7 @@ def main() -> int:
         "--target",
         "native",
         "--release",
-        "nonblocking_probe",
+        ".",
     ]
     try:
         completed = subprocess.run(
@@ -80,7 +89,7 @@ def main() -> int:
             timeout=60,
         )
     except subprocess.TimeoutExpired:
-        print("native non-blocking probe timed out after 60 seconds", file=sys.stderr)
+        print("native shared non-blocking proof timed out after 60 seconds", file=sys.stderr)
         return 1
     finally:
         server.shutdown()
@@ -94,7 +103,7 @@ def main() -> int:
     if completed.returncode != 0:
         return completed.returncode
     if SUCCESS_MARKER not in completed.stdout:
-        print("native non-blocking probe did not print its success marker", file=sys.stderr)
+        print("native shared non-blocking proof did not print its success marker", file=sys.stderr)
         return 1
     return 0
 

@@ -67,6 +67,10 @@ features. They are not part of the production required mask. Applications
 discover the actual compiled services through `Runtime::available_schemes()`;
 the current artifact registers `memory`, `opfs`, and `s3`.
 
+Generic operator construction calls OpenDAL's facade-level default installer,
+not only the service registry initializer. This installs the browser-compatible
+default HTTP transport required when S3 first performs network I/O.
+
 The machine-readable
 [`contract.json`](https://github.com/Eric-Song-Nop/opendal-mbt/blob/v0.2.0/wasm/browser-runtime/contract.json) is the release and
 canary mirror for values owned elsewhere. Keep these sources aligned:
@@ -294,9 +298,11 @@ make packaged-browser
 `browser-js-canary` serves the module-form bridge and runs task, cancellation,
 snapshot, bounds, and ownership assertions in real Chrome. `browser-demo` runs
 the embedded MoonBit consumer in Chrome. `portable-async-example-browser` runs
-the same application-facing MoonBit function used by native inside real
-Chrome. `packaged-browser` repeats the demo from a freshly packed module while
-hiding Cargo, Rust, wasm-bindgen, npm, and common bundlers.
+the same application-facing MoonBit code used by native, then uses an
+independent cross-origin S3 fixture to require CORS and SigV4-shaped request
+headers and prove that a Moon heartbeat resumes before the delayed read
+completes. `packaged-browser` repeats the demo from a freshly packed module
+while hiding Cargo, Rust, wasm-bindgen, npm, and common bundlers.
 
 See the [Wasm maintainer index](https://github.com/Eric-Song-Nop/opendal-mbt/blob/v0.2.0/wasm/README.md) for file ownership and the
 [release procedure](../releasing.md) for the pre-tag checklist.

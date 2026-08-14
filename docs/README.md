@@ -28,7 +28,7 @@ both native and JavaScript targets.
 Component-specific documentation lives beside the component:
 
 - [Browser bridge and embedded runtime](https://github.com/Eric-Song-Nop/opendal-mbt/blob/v0.2.0/wasm/README.md)
-- [Portable native/browser async example](../examples/browser/README.md)
+- [Native/browser async and non-blocking I/O example](../examples/browser/README.md)
 - [C examples](https://github.com/Eric-Song-Nop/opendal-mbt/blob/v0.2.0/examples/c/README.md)
 
 ## API reference

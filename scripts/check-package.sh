@@ -27,9 +27,7 @@ for required_file in \
   examples/browser/README.md examples/browser/launcher.mbt \
   examples/browser/main.js.mbt examples/browser/main.native.mbt \
   examples/browser/moon.mod examples/browser/moon.pkg \
-  examples/browser/run.mbt \
-  examples/browser/nonblocking_probe/main.mbt \
-  examples/browser/nonblocking_probe/moon.pkg \
+  examples/browser/nonblocking.mbt examples/browser/run.mbt \
   examples/browser/verify_native_nonblocking.py \
   docs/README.md docs/design/browser-runtime.md \
   docs/design/c-abi.md docs/design/native-distribution.md \

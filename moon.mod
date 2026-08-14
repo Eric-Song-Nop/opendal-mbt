@@ -43,7 +43,6 @@ options(
     "examples/browser/_build",
     "examples/browser/__pycache__",
     "examples/browser/pkg.generated.mbti",
-    "examples/browser/nonblocking_probe/pkg.generated.mbti",
     "tests",
     "scripts",
     "skills-lock.json",
