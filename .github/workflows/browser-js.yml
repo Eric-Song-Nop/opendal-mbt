@@ -85,3 +85,11 @@ jobs:
         run: |
           make browser-embed-check
           make packaged-browser
+      - name: Upload embedded distribution diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: browser-embed-diagnostics
+          path: target/browser-embed/release/*_bg.wasm
+          if-no-files-found: ignore
+          retention-days: 1
