@@ -1,8 +1,6 @@
 ///|
 async fn run_browser_demo() -> String {
-  let runtime = @opendal.Runtime::new()
-  let operator = runtime.operator("memory")
-  let asynchronous = operator.as_async()
+  let asynchronous = @opendal.AsyncOperator::new("memory")
   let payload = b"moonbit browser opendal"
   let writer = asynchronous.open_writer("demo/source.bin")
   writer.write(b"moonbit ")
@@ -35,8 +33,7 @@ async fn run_browser_demo() -> String {
     fail("streaming lister did not return the written object")
   }
   asynchronous.delete("demo/source.bin")
-  operator.close()
-  runtime.close()
+  asynchronous.close()
   "opendal browser demo ok: \{byte_count} bytes, \{entry_count} entry"
 }
 

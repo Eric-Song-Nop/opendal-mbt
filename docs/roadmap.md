@@ -675,13 +675,20 @@ reports finish or abort success.
 
 #### Phase 5E: Public MoonBit async API
 
-Status: the first public async slice is included in the pinned but unpublished
-`v0.2.0` candidate; full blocking API parity is intentionally deferred.
+Status: the first portable public async slice is included in the pinned but
+unpublished `v0.2.0` candidate; full native blocking-API parity is
+intentionally deferred.
 
-`Operator::as_async()` creates a lightweight view. The current async surface
-contains whole/ranged `read`, bounded `open_read_stream`/`next`/`close`, and
+The root package is selected at compile time for native or JavaScript, with
+native as the default and explicit `--target js` for browsers.
+`AsyncOperator::new` is the shared constructor; `AsyncOperator::close` is
+idempotent and non-raising. `Operator::as_async()` remains a lightweight native
+view. The portable surface contains whole `write`, whole/ranged `read`, bounded
+`open_read_stream`/`next`/`close`, and
 `open_writer`/`write`/`finish`/`abort`. It uses ordinary MoonBit `async fn`
-methods, not public callbacks or native task handles.
+methods, not public callbacks or native task handles. Native whole writes are
+composed from the true async Writer and never run the synchronous API on an
+executor thread.
 
 Each native operation owns copied inputs and its result. A worker publishes
 the result, then writes one byte to a private pipe watched by MoonBit's async
@@ -699,8 +706,10 @@ output-bounded `Bytes` value. Neither guarantee bounds one raw buffer allocated
 inside OpenDAL or the backend.
 
 Async stat, list/lister, delete, copy/Copier, presign, and separate public task
-handles are not part of this first slice. Callers can configure an immutable
-Operator first and then obtain its async view.
+handles are not part of the portable native slice. The JavaScript target has
+additional capability-checked Promise operations and `AsyncLister`; portable
+parity for those operations requires corresponding non-blocking native ABI
+operations in a later slice.
 
 ##### 5E exit criteria
 

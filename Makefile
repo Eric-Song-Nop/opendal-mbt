@@ -149,10 +149,10 @@ moon-check:
 	moon check --target native --frozen --warn-list '$(MOON_WARN_LIST)' --deny-warn
 
 moon-browser-check:
-	moon check $(MOON_BROWSER_FLAGS) src/browser src/browser_demo
+	moon check $(MOON_BROWSER_FLAGS) src src/browser src/browser_demo
 
 moon-browser-test:
-	moon test $(MOON_BROWSER_FLAGS) src/browser
+	moon test $(MOON_BROWSER_FLAGS) src src/browser
 
 browser-demo: moon-deps
 	moon run --target js --release src/browser_demo

@@ -16,9 +16,7 @@ on:
       - "scripts/check-packaged-browser.sh"
       - "scripts/generate-browser-embed.mjs"
       - "scripts/test-native-resolver.js"
-      - "src/README.mbt.md"
-      - "src/browser/**"
-      - "src/browser_demo/**"
+      - "src/**"
       - "wasm/**"
   push:
     branches:
@@ -37,9 +35,7 @@ on:
       - "scripts/check-packaged-browser.sh"
       - "scripts/generate-browser-embed.mjs"
       - "scripts/test-native-resolver.js"
-      - "src/README.mbt.md"
-      - "src/browser/**"
-      - "src/browser_demo/**"
+      - "src/**"
       - "wasm/**"
 
 permissions:

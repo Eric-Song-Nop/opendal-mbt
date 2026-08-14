@@ -34,6 +34,7 @@ are rejected before crossing the native boundary.
 
 ```mbt check
 ///|
+#cfg(target="native")
 test "connecting: memory operator" {
   let operator = @opendal.Operator::new("memory")
   operator.check()
@@ -55,6 +56,7 @@ The `root` is the boundary beneath which OpenDAL resolves operation paths:
 
 ```mbt check
 ///|
+#cfg(target="native")
 test "connecting: filesystem operator" {
   guard @env.current_dir() is Some(cwd) else {
     fail("current working directory is unavailable")
@@ -90,6 +92,7 @@ S3-compatible endpoint but performs no network request:
 
 ```mbt check
 ///|
+#cfg(target="native")
 test "connecting: typed S3 operator" {
   let auth = @opendal.S3Auth::static_credentials(
     access_key_id="example-access-key",
@@ -114,6 +117,7 @@ policies are explicit and opaque—none derives `Debug` or `Show`:
 
 ```mbt check
 ///|
+#cfg(target="native")
 test "connecting: typed S3 authentication policies" {
   let default_chain = @opendal.S3Auth::default_chain(disable_ec2_metadata=true)
   let session = @opendal.S3Auth::static_credentials(
@@ -171,6 +175,7 @@ that vary by backend or configuration:
 
 ```mbt check
 ///|
+#cfg(target="native")
 test "connecting: inspect capabilities" {
   let operator = @opendal.Operator::new("memory")
   let capability = operator.info().capability

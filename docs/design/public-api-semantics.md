@@ -491,14 +491,21 @@ permit is retained for the body lifetime. The optional
 until the HTTP response body is dropped. Both limits must be positive; there
 is no implicit or environment-selected limit.
 
-## Initial async facade
+## Portable async facade
 
-`Operator::as_async()` creates a lightweight `AsyncOperator` retaining the
-same configured Operator; it performs no I/O. Callers first construct and layer
-an Operator, then obtain its async view. The initial async surface deliberately
-contains only:
+The root `Eric-Song-Nop/opendal` package supports native and JavaScript. Target
+selection happens at compile time: native is the module default, while browser
+builds pass `--target js`. Both targets expose the same portable entry point;
+the JavaScript implementation lazily initializes its embedded OpenDAL Wasm
+runtime and the native implementation constructs the native operator directly.
+
+`Operator::as_async()` remains available when native callers first construct
+or layer a synchronous Operator. The portable async surface is:
 
 ```moonbit nocheck
+async fn AsyncOperator::new(...) -> AsyncOperator
+fn AsyncOperator::close() -> Unit
+async fn AsyncOperator::write(...) -> Metadata
 async fn AsyncOperator::read(...) -> Bytes
 async fn AsyncOperator::open_read_stream(...) -> AsyncReadStream
 async fn AsyncReadStream::next() -> Bytes?
@@ -509,11 +516,15 @@ async fn AsyncWriter::finish() -> Metadata
 async fn AsyncWriter::abort() -> Unit
 ```
 
-Every operation except `AsyncReadStream::close` is an ordinary MoonBit
-`async fn`; async functions carry their raising effect implicitly, and MoonBit
-has no `await` keyword. No native task handle or callback enters the public
-API. Native workers own copied inputs and results, signal readiness through a
-private pipe, and never call MoonBit from a foreign thread.
+Every operation except resource `close` is an ordinary MoonBit `async fn`;
+async functions carry their raising effect implicitly, and MoonBit has no
+`await` keyword. Close is idempotent, does not raise, and releases the selected
+operator early. `AsyncOperator::write` uses the stateful async Writer rather
+than calling the blocking native whole-write operation. No native task handle
+or callback enters the public API. Native workers own copied inputs and
+results, signal readiness through a private pipe, and never call MoonBit from a
+foreign thread. JavaScript operations wait on Promises and connect MoonBit
+cancellation to the browser bridge.
 
 An AsyncReadStream and AsyncWriter admit one in-flight operation. Cancelling
 `next`, `write`, `finish`, or `abort` makes that resource terminal because
@@ -523,7 +534,20 @@ time and do not poll upstream while a locally split remainder is pending. The
 same one-raw-buffer caveat as synchronous streams applies. Whole/ranged async
 `read` still materializes one output-bounded `Bytes` value. Async stat,
 list/lister, delete, copy/Copier, presign, and public task handles remain
-outside this first slice.
+outside the portable native slice. The JavaScript target exposes additional
+capability-checked async operations and `AsyncLister` as target extensions.
+
+Whole-object values in the portable facade are limited to 64 MiB. Read-stream
+outputs and individual Writer inputs are limited to 256 KiB, and native whole
+writes split larger accepted inputs into bounded Writer calls. Async catch
+clauses receive MoonBit's general `Error`; `OpenDalError::from_error` recovers
+the structured OpenDAL value with the same API on either target.
+
+Callers close or finish child streams and writers and await in-flight calls
+before closing their AsyncOperator. Whether already-open children complete or
+become terminal after a parent is closed is deliberately outside the portable
+contract because the native handle and browser runtime have different
+ownership trees.
 
 ## Check semantics
 
@@ -533,7 +557,8 @@ comprehensive health, credential, read/write, or consistency check.
 
 ## Current non-goals
 
-- async parity beyond read, bounded streams, and chunked Writers;
+- portable native async parity beyond whole writes/reads, bounded streams, and
+  chunked Writers;
 - callback adapters and public native task handles;
 - presigned delete or methods beyond read/write/stat;
 - ordered per-path batch results or transactional rollback;

@@ -42,6 +42,7 @@ pub struct Operator {
   priv runtime : Runtime
   priv info_snapshot : OperatorInfo
   priv mut closed : Bool
+  priv mut owns_runtime : Bool
 }
 
 ///|
@@ -252,7 +253,37 @@ pub fn Runtime::operator(
   let info_snapshot = operator_info_from_js(
     outcome_value(js.info(), outcome => outcome.operator_info_value(), context),
   )
-  { js, runtime: self, info_snapshot, closed: false }
+  { js, runtime: self, info_snapshot, closed: false, owns_runtime: false }
+}
+
+///|
+/// Construct a browser operator with an automatically managed embedded
+/// runtime. Closing the returned operator also closes its private runtime.
+async fn new_embedded_operator(
+  scheme : StringView,
+  config? : Map[String, String] = Map([]),
+) -> Operator {
+  let runtime = Runtime::new()
+  let operator = runtime.operator(scheme, config~) catch {
+    error => {
+      runtime.close() catch {
+        _ => ()
+      }
+      raise error
+    }
+  }
+  operator.owns_runtime = true
+  operator
+}
+
+///|
+/// Construct the target's OpenDAL operator behind one portable asynchronous
+/// entry point.
+pub async fn AsyncOperator::new(
+  scheme : StringView,
+  config? : Map[String, String] = Map([]),
+) -> AsyncOperator {
+  new_embedded_operator(scheme, config~).as_async()
 }
 
 ///|
@@ -281,15 +312,23 @@ pub fn Operator::as_async(self : Operator) -> AsyncOperator {
 
 ///|
 /// Release this operator early. Closing more than once is harmless.
-pub fn Operator::close(self : Operator) -> Unit raise OpenDalError {
+pub fn Operator::close(self : Operator) -> Unit {
   if !self.closed {
     self.closed = true
-    outcome_unit(self.js.close(), error_context(Check))
+    if self.owns_runtime {
+      self.runtime.close() catch {
+        _ => ()
+      }
+    } else {
+      ignore(self.js.close())
+    }
   }
 }
 
 ///|
 /// Release the shared operator through its asynchronous view.
-pub fn AsyncOperator::close(self : AsyncOperator) -> Unit raise OpenDalError {
+/// Finish or close every child resource and await in-flight calls first;
+/// behavior of outstanding work after parent close is not portable.
+pub fn AsyncOperator::close(self : AsyncOperator) -> Unit {
   self.native.close()
 }

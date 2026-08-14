@@ -12,6 +12,8 @@ readme = "README.mbt.md"
 
 preferred_target = "native"
 
+supported_targets = "+native+js"
+
 description = "MoonBit bindings for Apache OpenDAL"
 
 import {
