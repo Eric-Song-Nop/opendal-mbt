@@ -58,7 +58,7 @@ jobs:
           moon version --all
       - name: Check MoonBit browser API
         run: |
-          moon update
+          make moon-deps
           make moon-browser-check
           make moon-browser-test
       - name: Check browser bridge
