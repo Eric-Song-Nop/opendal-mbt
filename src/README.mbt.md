@@ -144,7 +144,9 @@ must allow WebAssembly compilation, normally by including
 `script-src 'wasm-unsafe-eval'`; the published demo sets this policy itself.
 See [Using OpenDAL in a browser](browser-guide.mbt.md) for OPFS and browser S3
 configuration, CORS and hosting requirements, JS-only operations, runtime
-ownership, cancellation, and hard bridge limits.
+ownership, cancellation, and hard bridge limits. The
+[`examples/browser`](../examples/browser/README.md) program runs one shared
+portable async source file on native and in real Chrome.
 
 ## First operation
 

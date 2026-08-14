@@ -41,6 +41,18 @@ and `wasm-gc` targets are not supported or treated as browser aliases. The
 browser architecture is a JavaScript-target Moon application hosting the
 embedded OpenDAL core Wasm runtime.
 
+The runnable [`examples/browser`](../examples/browser/README.md) program keeps
+its storage logic in one `run.mbt` file and executes that file unchanged as a
+native executable or inside real Chrome:
+
+```sh
+moon -C examples/browser run --target native --release .
+moon -C examples/browser run --target js --release .
+```
+
+The example also contains a delayed local S3 fixture that proves native I/O
+yields to MoonBit's scheduler while the OpenDAL future is pending.
+
 The portable API has the same async calling convention but different
 target-native execution engines:
 

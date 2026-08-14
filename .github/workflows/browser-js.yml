@@ -10,9 +10,13 @@ on:
       - "Cargo.toml"
       - "Makefile"
       - "build.js"
+      - "docs/**"
+      - "examples/browser/**"
       - "moon.mod"
+      - "moon.work"
       - "rust-toolchain.toml"
       - "scripts/check-package.sh"
+      - "scripts/check-docs.mjs"
       - "scripts/check-packaged-browser.sh"
       - "scripts/generate-browser-embed.mjs"
       - "scripts/test-native-resolver.js"
@@ -29,9 +33,13 @@ on:
       - "Cargo.toml"
       - "Makefile"
       - "build.js"
+      - "docs/**"
+      - "examples/browser/**"
       - "moon.mod"
+      - "moon.work"
       - "rust-toolchain.toml"
       - "scripts/check-package.sh"
+      - "scripts/check-docs.mjs"
       - "scripts/check-packaged-browser.sh"
       - "scripts/generate-browser-embed.mjs"
       - "scripts/test-native-resolver.js"
@@ -71,6 +79,8 @@ jobs:
           make moon-deps
           make moon-browser-check
           make moon-browser-test
+      - name: Run the portable async example in Chrome
+        run: make portable-async-example-browser
       - name: Check browser bridge
         run: make browser-rust-check
       - name: Test bridge state machines and snapshots

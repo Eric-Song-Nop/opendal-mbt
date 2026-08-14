@@ -1,0 +1,22 @@
+supported_targets = "+native+js"
+
+// `js_async` is referenced only by files selected for the JavaScript target.
+
+warnings = "-unused_package"
+
+import {
+  "Eric-Song-Nop/opendal",
+  "moonbitlang/async",
+  "moonbitlang/async/js_async",
+}
+
+pkgtype(kind: "executable")
+
+options(
+  link: { "js": { "format": "iife" } },
+  targets: {
+    "launcher.mbt": [ "js" ],
+    "main.js.mbt": [ "js" ],
+    "main.native.mbt": [ "native" ],
+  },
+)

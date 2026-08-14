@@ -53,7 +53,8 @@ BROWSER_EMBED_SOURCE_ARGS := \
 	browser-rust-check browser-rust-test browser-js-canary \
 	moon-browser-check moon-browser-test \
 	browser-embed-bridge browser-embed-generate browser-embed-check \
-	browser-demo packaged-browser
+	browser-demo packaged-browser portable-async-example-browser \
+	portable-async-example-native native-async-nonblocking docs-check
 
 native:
 	cargo build --package opendal-mbt-native --locked $(CARGO_SERVICE_FLAGS) \
@@ -157,6 +158,23 @@ moon-browser-test:
 browser-demo: moon-deps
 	moon run --target js --release src/browser_demo
 
+portable-async-example-browser:
+	moon -C examples/browser run --target js --release \
+		--warn-list '$(MOON_WARN_LIST)' --deny-warn .
+
+portable-async-example-native: native
+	MOONBIT_ASYNC_CHECK_FD_LEAK=1 \
+		OPENDAL_MBT_NATIVE_LIB="$(MOON_NATIVE_LIB)" \
+		OPENDAL_MBT_SOURCE_PROFILE="$(NATIVE_SERVICE_PROFILE)" \
+		moon -C examples/browser run --target native $(MOON_PROFILE_FLAG) \
+			--warn-list '$(MOON_WARN_LIST)' --deny-warn .
+
+native-async-nonblocking: portable-async-example-native
+	MOONBIT_ASYNC_CHECK_FD_LEAK=1 \
+		OPENDAL_MBT_NATIVE_LIB="$(MOON_NATIVE_LIB)" \
+		OPENDAL_MBT_SOURCE_PROFILE="$(NATIVE_SERVICE_PROFILE)" \
+		python3 examples/browser/verify_native_nonblocking.py
+
 packaged-browser: moon-deps
 	sh scripts/check-packaged-browser.sh
 
@@ -198,6 +216,9 @@ interface-contract:
 package-contract:
 	sh scripts/check-package.sh
 
+docs-check:
+	node scripts/check-docs.mjs
+
 packaged-consumer: moon-deps
 	test -n "$(NATIVE_ARTIFACT)"
 	@if [ -n "$(NATIVE_ARTIFACT_TABLE)" ]; then \
@@ -219,7 +240,7 @@ native-artifact-test:
 	node --check scripts/prepare-test-native-cache.js
 	node --test scripts/test-native-resolver.js
 
-check: api-contract interface-contract package-contract native-artifact-test \
+check: api-contract interface-contract package-contract docs-check native-artifact-test \
 	version-contract
 	cargo fmt --all -- --check
 	cargo clippy --package opendal-mbt-native --all-targets --all-features \
@@ -227,7 +248,7 @@ check: api-contract interface-contract package-contract native-artifact-test \
 	$(MAKE) moon-check
 	$(MAKE) abi-smoke
 
-test-profile: rust-test moon-test
+test-profile: rust-test moon-test native-async-nonblocking
 
 asan:
 	$(MAKE) native RUST_PROFILE=debug
