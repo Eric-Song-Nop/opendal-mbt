@@ -165,7 +165,24 @@ try {
     "/opendal_mbt_browser_bridge_bg.wasm",
     location.href,
   );
+  const contractResponse = await fetch("/browser-contract.json");
+  assert(contractResponse.ok, "browser contract could not be loaded");
+  const contract = await contractResponse.json();
   bridge = await initializeBridge({ module_or_path: bridgeWasm });
+  assert(
+    bridge.opendal_mbt_wasm_abi_version() === contract.abiVersion,
+    "browser contract ABI version drifted from the bridge",
+  );
+  assert(
+    (bridge.opendal_mbt_wasm_feature_flags() & contract.requiredFeatureFlags) ===
+      contract.requiredFeatureFlags,
+    "browser contract feature flags drifted from the bridge",
+  );
+  assert(
+    contract.limits?.transferChunkBytes === SCALAR_CHUNK_BYTES &&
+      contract.localErrorKinds?.resourceBusy === 0x1006,
+    "browser contract scalar limits or local error kinds drifted",
+  );
   runtime = await loadOpenDalBrowser({ bridge });
 
   assert(
