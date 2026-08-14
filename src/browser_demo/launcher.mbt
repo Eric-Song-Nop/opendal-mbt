@@ -3,6 +3,13 @@ extern "js" fn is_node() -> Bool =
   #| () => typeof process !== "undefined" && process.versions?.node !== undefined
 
 ///|
+extern "js" fn report_node_failure(message : String) -> Unit =
+  #| (message) => {
+  #|   console.error(message)
+  #|   process.exitCode = 1
+  #| }
+
+///|
 extern "js" fn install_browser_failure_reporter() -> Unit =
   #| () => {
   #|   const report = (message) => {
@@ -124,6 +131,14 @@ extern "js" fn launch_chrome() -> @js_async.Promise[String] =
   #|       candidates.push(
   #|         "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
   #|         "/Applications/Chromium.app/Contents/MacOS/Chromium",
+  #|       )
+  #|     }
+  #|     if (process.platform === "linux") {
+  #|       candidates.push(
+  #|         "/opt/google/chrome/chrome",
+  #|         "/opt/google/chrome/google-chrome",
+  #|         "/usr/lib/chromium/chromium",
+  #|         "/usr/lib/chromium-browser/chromium-browser",
   #|       )
   #|     }
   #|     if (process.platform === "win32") {

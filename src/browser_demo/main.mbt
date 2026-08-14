@@ -43,10 +43,12 @@ async fn run_browser_demo() -> String {
 ///|
 async fn main {
   if is_node() {
-    let result = launch_chrome().wait() catch {
-      error => fail("could not run the OpenDAL browser demo: \{error}")
+    try launch_chrome().wait() catch {
+      error =>
+        report_node_failure("could not run the OpenDAL browser demo: \{error}")
+    } noraise {
+      result => println(result)
     }
-    println(result)
   } else {
     install_browser_failure_reporter()
     let result = try run_browser_demo() catch {
