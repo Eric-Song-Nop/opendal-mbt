@@ -1,11 +1,11 @@
 ///|
-const EXPECTED_ABI_VERSION = 0x0001_0005U
+const EXPECTED_ABI_VERSION = 0x0001_0006U
 
 ///|
 // The public facade requires the resource, task, generic-operator, mutation,
-// listing, and bulk-transfer features. Memory and the poll-once adapter are
-// fixture-only bridge capabilities, not requirements of the generic facade.
-const REQUIRED_FEATURE_FLAGS = 0x0000_03fcU
+// listing, bulk-transfer, structured-error, and metadata/options features.
+// Memory and the poll-once adapter remain fixture-only bridge capabilities.
+const REQUIRED_FEATURE_FLAGS = 0x0000_07fcU
 
 ///|
 const ERROR_SNAPSHOT_HEADER_LENGTH = 24
@@ -370,9 +370,4 @@ fn copy_path_to_bridge(
     raise local_error(InvalidArgument, "path contains invalid UTF-16", context)
   }
   copy_bytes_to_bridge(@utf8.encode(path), context)
-}
-
-///|
-fn combine_u64(low : UInt, high : UInt) -> UInt64 {
-  (high.to_uint64() << 32) | low.to_uint64()
 }

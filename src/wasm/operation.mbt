@@ -147,7 +147,151 @@ fn finish_unit_operation(
 }
 
 ///|
-/// Start a callback-based asynchronous write.
+fn release_bridge_inputs(handles : Array[UInt]) -> Unit {
+  for handle in handles {
+    ignore(bridge_buffer_release(handle))
+  }
+}
+
+///|
+fn copy_bridge_input(
+  value : StringView,
+  handles : Array[UInt],
+  context : ErrorContext,
+) -> UInt raise OpenDalError {
+  let handle = copy_path_to_bridge(value, context)
+  handles.push(handle)
+  handle
+}
+
+///|
+fn copy_optional_bridge_input(
+  value : StringView?,
+  handles : Array[UInt],
+  context : ErrorContext,
+) -> UInt raise OpenDalError {
+  match value {
+    None => 0U
+    Some(value) => copy_bridge_input(value, handles, context)
+  }
+}
+
+///|
+fn ByteRange::bridge_parts(
+  self : ByteRange,
+  capability : Capability,
+  context : ErrorContext,
+) -> (UInt, UInt64, UInt64) raise OpenDalError {
+  match self {
+    Full => (0U, 0UL, 0UL)
+    From(offset~) => (1U, offset, 0UL)
+    Range(offset~, length~) => {
+      if length > 18446744073709551615UL - offset {
+        raise local_error(
+          InvalidArgument,
+          "byte range offset plus length exceeds UInt64",
+          context,
+        )
+      }
+      (2U, offset, length)
+    }
+    Suffix(length~) => {
+      if !capability.can_read_suffix() {
+        raise local_error(
+          Unsupported,
+          "suffix reads require native backend range support",
+          context,
+        )
+      }
+      (3U, 0UL, length)
+    }
+  }
+}
+
+///|
+fn take_metadata_completion(
+  completion : UInt,
+  context : ErrorContext,
+) -> Metadata raise OpenDalError {
+  let buffer = bridge_completion_take_metadata_snapshot(completion)
+  if buffer == 0U {
+    ignore(bridge_completion_release(completion))
+    raise_last_bridge_error(
+      Unexpected,
+      "could not take the metadata result",
+      context,
+    )
+  }
+  let snapshot = copy_buffer_from_bridge(buffer, context) catch {
+    error => {
+      ignore(bridge_buffer_release(buffer))
+      raise error
+    }
+  }
+  ignore(bridge_buffer_release(buffer))
+  parse_metadata_snapshot(snapshot, context)
+}
+
+///|
+fn finish_metadata_operation(
+  operation : Task,
+  task : UInt,
+  expected_kind : UInt,
+  name : String,
+  context : ErrorContext,
+  callback : (Result[Metadata, OpenDalError]) -> Unit,
+) -> Unit {
+  match operation.take_completion(task) {
+    CompletionLocalMismatch =>
+      callback(
+        Err(
+          local_error(
+            ResourceClosed,
+            "\{name} task no longer owns the pending callback",
+            context,
+          ),
+        ),
+      )
+    CompletionBridgeFailure =>
+      callback(
+        Err(
+          take_bridge_error(
+            ResourceClosed,
+            "\{name} task became ready without a completion",
+            context,
+          ),
+        ),
+      )
+    CompletionTaken(completion) => {
+      let kind = bridge_completion_kind(completion)
+      let status = bridge_completion_status(completion)
+      if kind != expected_kind {
+        ignore(bridge_completion_release(completion))
+        callback(
+          Err(
+            local_error(
+              AbiMismatch,
+              "\{name} task returned the wrong completion kind",
+              context,
+            ),
+          ),
+        )
+      } else if status != 0U {
+        callback(Err(completion_error(completion, "\{name} failed", context)))
+      } else {
+        let result = try take_metadata_completion(completion, context) catch {
+          error => Err(error)
+        } noraise {
+          metadata => Ok(metadata)
+        }
+        callback(result)
+      }
+    }
+  }
+}
+
+///|
+/// Start a callback-based asynchronous write and return its metadata.
 ///
 /// The callback is delivered from a later microtask or timer turn, never from
 /// the initiating call stack.
@@ -155,7 +299,14 @@ pub fn AsyncOperator::write_callback(
   self : AsyncOperator,
   path : StringView,
   data : BytesView,
-  callback~ : (Result[Unit, OpenDalError]) -> Unit,
+  append? : Bool = false,
+  content_type? : StringView,
+  content_disposition? : StringView,
+  content_encoding? : StringView,
+  cache_control? : StringView,
+  if_match? : StringView,
+  if_none_match? : StringView,
+  callback~ : (Result[Metadata, OpenDalError]) -> Unit,
 ) -> Task raise OpenDalError {
   let path = path.to_owned()
   let context = error_context(Write, path~)
@@ -163,20 +314,39 @@ pub fn AsyncOperator::write_callback(
     raise local_error(ResourceClosed, "operator is closed", context)
   }
   ignore(bridge_last_error_clear())
-  let path_handle = copy_path_to_bridge(path, context)
-  let data_handle = copy_bytes_to_bridge(data, context) catch {
-    error => {
-      ignore(bridge_buffer_release(path_handle))
-      raise error
-    }
-  }
-  let task = bridge_operator_write_start(
+  let handles : Array[UInt] = []
+  defer release_bridge_inputs(handles)
+  let path_handle = copy_bridge_input(path, handles, context)
+  let data_handle = copy_bytes_to_bridge(data, context)
+  handles.push(data_handle)
+  let content_type_handle = copy_optional_bridge_input(
+    content_type, handles, context,
+  )
+  let content_disposition_handle = copy_optional_bridge_input(
+    content_disposition, handles, context,
+  )
+  let content_encoding_handle = copy_optional_bridge_input(
+    content_encoding, handles, context,
+  )
+  let cache_control_handle = copy_optional_bridge_input(
+    cache_control, handles, context,
+  )
+  let if_match_handle = copy_optional_bridge_input(if_match, handles, context)
+  let if_none_match_handle = copy_optional_bridge_input(
+    if_none_match, handles, context,
+  )
+  let task = bridge_operator_write_options_start_v1(
     self.native.handle,
     path_handle,
     data_handle,
+    append,
+    content_type_handle,
+    content_disposition_handle,
+    content_encoding_handle,
+    cache_control_handle,
+    if_match_handle,
+    if_none_match_handle,
   )
-  ignore(bridge_buffer_release(data_handle))
-  ignore(bridge_buffer_release(path_handle))
   if task == 0U {
     raise_last_bridge_error(
       Unexpected,
@@ -186,7 +356,7 @@ pub fn AsyncOperator::write_callback(
   }
   let operation : Task = { handle: task, state: Pending }
   start_wait(operation, task => {
-    finish_unit_operation(
+    finish_metadata_operation(
       operation,
       task,
       COMPLETION_WRITE,
@@ -199,13 +369,17 @@ pub fn AsyncOperator::write_callback(
 }
 
 ///|
-/// Start a callback-based asynchronous whole-object read.
+/// Start a callback-based asynchronous whole-object or ranged read.
 ///
 /// The callback is delivered from a later microtask or timer turn, never from
 /// the initiating call stack.
 pub fn AsyncOperator::read_callback(
   self : AsyncOperator,
   path : StringView,
+  range? : ByteRange = Full,
+  version? : StringView,
+  if_match? : StringView,
+  if_none_match? : StringView,
   callback~ : (Result[Bytes, OpenDalError]) -> Unit,
 ) -> Task raise OpenDalError {
   let path = path.to_owned()
@@ -213,10 +387,29 @@ pub fn AsyncOperator::read_callback(
   if self.native.handle == 0U {
     raise local_error(ResourceClosed, "operator is closed", context)
   }
+  let (range_kind, range_offset, range_length) = range.bridge_parts(
+    self.native.info_snapshot.capability,
+    context,
+  )
   ignore(bridge_last_error_clear())
-  let path_handle = copy_path_to_bridge(path, context)
-  let task = bridge_operator_read_start(self.native.handle, path_handle)
-  ignore(bridge_buffer_release(path_handle))
+  let handles : Array[UInt] = []
+  defer release_bridge_inputs(handles)
+  let path_handle = copy_bridge_input(path, handles, context)
+  let version_handle = copy_optional_bridge_input(version, handles, context)
+  let if_match_handle = copy_optional_bridge_input(if_match, handles, context)
+  let if_none_match_handle = copy_optional_bridge_input(
+    if_none_match, handles, context,
+  )
+  let task = bridge_operator_read_options_start_v1(
+    self.native.handle,
+    path_handle,
+    range_kind,
+    range_offset,
+    range_length,
+    version_handle,
+    if_match_handle,
+    if_none_match_handle,
+  )
   if task == 0U {
     raise_last_bridge_error(
       Unexpected,
@@ -300,6 +493,9 @@ pub fn AsyncOperator::read_callback(
 pub fn AsyncOperator::stat_callback(
   self : AsyncOperator,
   path : StringView,
+  version? : StringView,
+  if_match? : StringView,
+  if_none_match? : StringView,
   callback~ : (Result[Metadata, OpenDalError]) -> Unit,
 ) -> Task raise OpenDalError {
   let path = path.to_owned()
@@ -308,9 +504,21 @@ pub fn AsyncOperator::stat_callback(
     raise local_error(ResourceClosed, "operator is closed", context)
   }
   ignore(bridge_last_error_clear())
-  let path_handle = copy_path_to_bridge(path, context)
-  let task = bridge_operator_stat_start(self.native.handle, path_handle)
-  ignore(bridge_buffer_release(path_handle))
+  let handles : Array[UInt] = []
+  defer release_bridge_inputs(handles)
+  let path_handle = copy_bridge_input(path, handles, context)
+  let version_handle = copy_optional_bridge_input(version, handles, context)
+  let if_match_handle = copy_optional_bridge_input(if_match, handles, context)
+  let if_none_match_handle = copy_optional_bridge_input(
+    if_none_match, handles, context,
+  )
+  let task = bridge_operator_stat_options_start_v1(
+    self.native.handle,
+    path_handle,
+    version_handle,
+    if_match_handle,
+    if_none_match_handle,
+  )
   if task == 0U {
     raise_last_bridge_error(
       Unexpected,
@@ -320,96 +528,14 @@ pub fn AsyncOperator::stat_callback(
   }
   let operation : Task = { handle: task, state: Pending }
   start_wait(operation, task => {
-    match operation.take_completion(task) {
-      CompletionLocalMismatch =>
-        callback(
-          Err(
-            local_error(
-              ResourceClosed,
-              "stat task no longer owns the pending callback",
-              context,
-            ),
-          ),
-        )
-      CompletionBridgeFailure =>
-        callback(
-          Err(
-            take_bridge_error(
-              ResourceClosed,
-              "stat task became ready without a completion",
-              context,
-            ),
-          ),
-        )
-      CompletionTaken(completion) => {
-        let kind = bridge_completion_kind(completion)
-        let status = bridge_completion_status(completion)
-        if kind != COMPLETION_STAT {
-          ignore(bridge_completion_release(completion))
-          callback(
-            Err(
-              local_error(
-                AbiMismatch,
-                "stat task returned the wrong completion kind",
-                context,
-              ),
-            ),
-          )
-        } else if status != 0U {
-          callback(Err(completion_error(completion, "stat failed", context)))
-        } else {
-          let metadata = bridge_completion_take_metadata(completion)
-          if metadata == 0U {
-            ignore(bridge_completion_release(completion))
-            callback(
-              Err(
-                take_bridge_error(
-                  Unexpected,
-                  "could not take the stat result",
-                  context,
-                ),
-              ),
-            )
-          } else {
-            ignore(bridge_last_error_clear())
-            let mode = bridge_metadata_mode(metadata)
-            let low = bridge_metadata_content_length_low(metadata)
-            let high = bridge_metadata_content_length_high(metadata)
-            let metadata_error = bridge_last_error_take()
-            ignore(bridge_metadata_release(metadata))
-            if metadata_error != 0U {
-              callback(
-                Err(
-                  take_owned_bridge_error(
-                    metadata_error,
-                    Unexpected,
-                    "could not inspect metadata",
-                    context,
-                  ),
-                ),
-              )
-            } else if mode < 0 || mode > 2 {
-              callback(
-                Err(
-                  local_error(
-                    AbiMismatch,
-                    "bridge returned an invalid metadata mode",
-                    context,
-                  ),
-                ),
-              )
-            } else {
-              callback(
-                Ok({
-                  mode: entry_mode_from_bridge_unchecked(mode),
-                  content_length: combine_u64(low, high),
-                }),
-              )
-            }
-          }
-        }
-      }
-    }
+    finish_metadata_operation(
+      operation,
+      task,
+      COMPLETION_STAT,
+      "stat",
+      context,
+      callback,
+    )
   })
   operation
 }
@@ -516,21 +642,6 @@ pub fn AsyncOperator::delete_callback(
 }
 
 ///|
-fn entry_mode_from_bridge(
-  mode : Int,
-  context : ErrorContext,
-) -> EntryMode raise OpenDalError {
-  if mode < 0 || mode > 2 {
-    raise local_error(
-      AbiMismatch,
-      "bridge returned an invalid entry mode \{mode}",
-      context,
-    )
-  }
-  entry_mode_from_bridge_unchecked(mode)
-}
-
-///|
 fn entry_mode_from_bridge_unchecked(mode : Int) -> EntryMode {
   match mode {
     1 => File
@@ -565,30 +676,23 @@ fn materialize_entry_list(
       "could not copy a listed name",
       context,
     )
-    ignore(bridge_last_error_clear())
-    let mode = bridge_entry_list_mode(handle, index)
-    let content_length = bridge_entry_list_content_length(handle, index)
-    let entry_error = bridge_last_error_take()
-    if entry_error != 0U {
-      raise take_owned_bridge_error(
-        entry_error,
+    let metadata_buffer = bridge_entry_list_metadata_snapshot(handle, index)
+    if metadata_buffer == 0U {
+      raise_last_bridge_error(
         Unexpected,
-        "could not inspect a listed entry",
+        "could not take listed metadata",
         context,
       )
     }
-    if mode < 0 || mode > 2 {
-      raise local_error(
-        AbiMismatch,
-        "bridge returned an invalid listed entry mode",
-        context,
-      )
+    let snapshot = copy_buffer_from_bridge(metadata_buffer, context) catch {
+      error => {
+        ignore(bridge_buffer_release(metadata_buffer))
+        raise error
+      }
     }
-    entries.push({
-      path,
-      name,
-      metadata: { mode: entry_mode_from_bridge(mode, context), content_length },
-    })
+    ignore(bridge_buffer_release(metadata_buffer))
+    let metadata = parse_metadata_snapshot(snapshot, context)
+    entries.push({ path, name, metadata })
   }
   entries
 }
