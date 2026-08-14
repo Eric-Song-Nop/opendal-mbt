@@ -11,9 +11,11 @@ use std::pin::{Pin, pin};
 use std::task::{Context, Poll, Waker};
 
 use futures_util::TryStreamExt;
-use opendal::{ErrorKind, Metadata, Operator, OperatorRegistry, services::Memory};
+use opendal::{
+    BytesRange, ErrorKind, Metadata, Operator, OperatorRegistry, options, services::Memory,
+};
 
-const ABI_VERSION: u32 = 0x0001_0005;
+const ABI_VERSION: u32 = 0x0001_0006;
 const FEATURE_MEMORY_SERVICE: u32 = 1 << 0;
 const FEATURE_POLL_ONCE_CANARY: u32 = 1 << 1;
 const FEATURE_GENERATION_HANDLES: u32 = 1 << 2;
@@ -24,6 +26,7 @@ const FEATURE_CORE_MUTATIONS: u32 = 1 << 6;
 const FEATURE_BOUNDED_LIST: u32 = 1 << 7;
 const FEATURE_BULK_TRANSFER: u32 = 1 << 8;
 const FEATURE_STRUCTURED_ERRORS: u32 = 1 << 9;
+const FEATURE_METADATA_OPTIONS: u32 = 1 << 10;
 const MAX_SLOTS: usize = u16::MAX as usize;
 const MAX_GENERATION: u16 = i16::MAX as u16;
 const MAX_BUFFER_LENGTH: usize = 64 * 1024 * 1024;
@@ -60,6 +63,24 @@ const ERROR_STATUS_PERSISTENT: u32 = 3;
 const ERROR_SNAPSHOT_MAGIC: [u8; 4] = *b"ODE1";
 const ERROR_SNAPSHOT_SCHEMA: u32 = 1;
 const ERROR_SNAPSHOT_HEADER_LENGTH: usize = 24;
+
+const METADATA_SNAPSHOT_MAGIC: [u8; 4] = *b"ODM1";
+const METADATA_SNAPSHOT_SCHEMA: u32 = 1;
+const METADATA_SNAPSHOT_HEADER_LENGTH: usize = 84;
+const METADATA_IS_CURRENT_PRESENT: u64 = 1 << 0;
+const METADATA_LAST_MODIFIED_PRESENT: u64 = 1 << 1;
+const METADATA_CACHE_CONTROL_PRESENT: u64 = 1 << 2;
+const METADATA_CONTENT_DISPOSITION_PRESENT: u64 = 1 << 3;
+const METADATA_CONTENT_ENCODING_PRESENT: u64 = 1 << 4;
+const METADATA_CONTENT_MD5_PRESENT: u64 = 1 << 5;
+const METADATA_CONTENT_TYPE_PRESENT: u64 = 1 << 6;
+const METADATA_ETAG_PRESENT: u64 = 1 << 7;
+const METADATA_VERSION_PRESENT: u64 = 1 << 8;
+
+const RANGE_FULL: u32 = 0;
+const RANGE_FROM: u32 = 1;
+const RANGE_OFFSET_LENGTH: u32 = 2;
+const RANGE_SUFFIX: u32 = 3;
 
 const TASK_PENDING: u32 = 1;
 const TASK_READY: u32 = 2;
@@ -289,6 +310,131 @@ fn error_snapshot_bytes(error: &BridgeError) -> Result<Vec<u8>, BridgeError> {
     Ok(snapshot)
 }
 
+struct MetadataSnapshotView<'a> {
+    present_bits: u64,
+    mode: u32,
+    is_current: u32,
+    is_deleted: u32,
+    content_length: u64,
+    last_modified_seconds: i64,
+    last_modified_nanoseconds: u32,
+    strings: [Option<&'a str>; 7],
+    lengths: [u32; 7],
+    encoded_length: usize,
+}
+
+impl<'a> MetadataSnapshotView<'a> {
+    fn new(metadata: &'a Metadata) -> Result<Self, BridgeError> {
+        let mode = match metadata.mode() {
+            opendal::EntryMode::FILE => ENTRY_MODE_FILE,
+            opendal::EntryMode::DIR => ENTRY_MODE_DIRECTORY,
+            opendal::EntryMode::Unknown => ENTRY_MODE_UNKNOWN,
+        };
+        let (is_current, current_present) = match metadata.is_current() {
+            Some(value) => (u32::from(value), true),
+            None => (0, false),
+        };
+        let (last_modified_seconds, last_modified_nanoseconds, modified_present) =
+            match metadata.last_modified() {
+                Some(value) => {
+                    let value = value.into_inner();
+                    let mut seconds = value.as_second();
+                    let subseconds = value.subsec_nanosecond();
+                    let nanoseconds = if subseconds < 0 {
+                        seconds = seconds.checked_sub(1).ok_or(BridgeError::LengthOverflow)?;
+                        u32::try_from(1_000_000_000_i32 + subseconds)
+                            .map_err(|_| BridgeError::LengthOverflow)?
+                    } else {
+                        u32::try_from(subseconds).map_err(|_| BridgeError::LengthOverflow)?
+                    };
+                    (seconds, nanoseconds, true)
+                }
+                None => (0, 0, false),
+            };
+        let strings = [
+            metadata.cache_control(),
+            metadata.content_disposition(),
+            metadata.content_encoding(),
+            metadata.content_md5(),
+            metadata.content_type(),
+            metadata.etag(),
+            metadata.version(),
+        ];
+        let mut present_bits = 0;
+        if current_present {
+            present_bits |= METADATA_IS_CURRENT_PRESENT;
+        }
+        if modified_present {
+            present_bits |= METADATA_LAST_MODIFIED_PRESENT;
+        }
+        let string_bits = [
+            METADATA_CACHE_CONTROL_PRESENT,
+            METADATA_CONTENT_DISPOSITION_PRESENT,
+            METADATA_CONTENT_ENCODING_PRESENT,
+            METADATA_CONTENT_MD5_PRESENT,
+            METADATA_CONTENT_TYPE_PRESENT,
+            METADATA_ETAG_PRESENT,
+            METADATA_VERSION_PRESENT,
+        ];
+        let mut lengths = [0; 7];
+        let mut encoded_length = METADATA_SNAPSHOT_HEADER_LENGTH;
+        for (index, value) in strings.iter().enumerate() {
+            if let Some(value) = value {
+                present_bits |= string_bits[index];
+                lengths[index] =
+                    u32::try_from(value.len()).map_err(|_| BridgeError::BufferTooLarge)?;
+                encoded_length = encoded_length
+                    .checked_add(value.len())
+                    .filter(|length| *length <= MAX_BUFFER_LENGTH)
+                    .ok_or(BridgeError::BufferTooLarge)?;
+            }
+        }
+        Ok(Self {
+            present_bits,
+            mode,
+            is_current,
+            is_deleted: u32::from(metadata.is_deleted()),
+            content_length: metadata.content_length(),
+            last_modified_seconds,
+            last_modified_nanoseconds,
+            strings,
+            lengths,
+            encoded_length,
+        })
+    }
+
+    fn encode(&self) -> Result<Vec<u8>, BridgeError> {
+        let mut snapshot = Vec::new();
+        snapshot
+            .try_reserve_exact(self.encoded_length)
+            .map_err(|_| BridgeError::AllocationFailed)?;
+        snapshot.extend_from_slice(&METADATA_SNAPSHOT_MAGIC);
+        snapshot.extend_from_slice(&METADATA_SNAPSHOT_SCHEMA.to_le_bytes());
+        snapshot.extend_from_slice(&self.present_bits.to_le_bytes());
+        snapshot.extend_from_slice(&self.mode.to_le_bytes());
+        snapshot.extend_from_slice(&self.is_current.to_le_bytes());
+        snapshot.extend_from_slice(&self.is_deleted.to_le_bytes());
+        snapshot.extend_from_slice(&0_u32.to_le_bytes());
+        snapshot.extend_from_slice(&self.content_length.to_le_bytes());
+        snapshot.extend_from_slice(&self.last_modified_seconds.to_le_bytes());
+        snapshot.extend_from_slice(&self.last_modified_nanoseconds.to_le_bytes());
+        snapshot.extend_from_slice(&0_u32.to_le_bytes());
+        for length in self.lengths {
+            snapshot.extend_from_slice(&length.to_le_bytes());
+        }
+        debug_assert_eq!(snapshot.len(), METADATA_SNAPSHOT_HEADER_LENGTH);
+        for value in self.strings.iter().flatten() {
+            snapshot.extend_from_slice(value.as_bytes());
+        }
+        debug_assert_eq!(snapshot.len(), self.encoded_length);
+        Ok(snapshot)
+    }
+}
+
+fn metadata_snapshot_bytes(metadata: &Metadata) -> Result<Vec<u8>, BridgeError> {
+    MetadataSnapshotView::new(metadata)?.encode()
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ResourceKind {
     Buffer,
@@ -327,6 +473,7 @@ struct EntrySnapshot {
     name: String,
     mode: u32,
     content_length: u64,
+    metadata_snapshot: Vec<u8>,
 }
 
 #[derive(Clone, Copy)]
@@ -374,7 +521,7 @@ enum Task {
 }
 
 enum Completion {
-    Write(Result<(), BridgeError>),
+    Write(Result<Box<Metadata>, BridgeError>),
     Read(Result<Vec<u8>, BridgeError>),
     Stat(Result<Box<Metadata>, BridgeError>),
     CreateDir(Result<(), BridgeError>),
@@ -402,7 +549,7 @@ impl Completion {
             | Self::CreateDir(Err(error))
             | Self::Delete(Err(error))
             | Self::List(Err(error)) => Some(error),
-            Self::Write(Ok(()))
+            Self::Write(Ok(_))
             | Self::Read(Ok(_))
             | Self::Stat(Ok(_))
             | Self::CreateDir(Ok(()))
@@ -576,6 +723,17 @@ impl Arena {
 
     fn entry_list(&self, handle: u32) -> Result<&[EntrySnapshot], BridgeError> {
         match self.resource(handle)? {
+            Resource::EntryList(entries) => Ok(entries),
+            resource => Err(wrong_resource_type(
+                handle,
+                ResourceKind::EntryList,
+                resource,
+            )),
+        }
+    }
+
+    fn entry_list_mut(&mut self, handle: u32) -> Result<&mut [EntrySnapshot], BridgeError> {
+        match self.resource_mut(handle)? {
             Resource::EntryList(entries) => Ok(entries),
             resource => Err(wrong_resource_type(
                 handle,
@@ -831,6 +989,139 @@ fn optional_list_limit(has_limit: u32, limit: u64) -> Result<Option<usize>, Brid
     Ok(Some(limit as usize))
 }
 
+fn byte_range(kind: u32, offset: u64, length: u64) -> Result<BytesRange, BridgeError> {
+    match kind {
+        RANGE_FULL if offset == 0 && length == 0 => Ok(BytesRange::default()),
+        RANGE_FROM if length == 0 => Ok(BytesRange::new(offset, None)),
+        RANGE_OFFSET_LENGTH if offset.checked_add(length).is_some() => {
+            Ok(BytesRange::new(offset, Some(length)))
+        }
+        RANGE_SUFFIX if offset == 0 => Ok(BytesRange::suffix(length)),
+        _ => Err(BridgeError::InvalidArgument {
+            message: "invalid byte-range scalar encoding".to_owned(),
+        }),
+    }
+}
+
+fn read_options_from_scalars(
+    range_kind: u32,
+    range_offset: u64,
+    range_length: u64,
+    version_handle: u32,
+    if_match_handle: u32,
+    if_none_match_handle: u32,
+) -> Result<options::ReadOptions, BridgeError> {
+    Ok(options::ReadOptions {
+        range: byte_range(range_kind, range_offset, range_length)?,
+        version: optional_owned_utf8_buffer(version_handle)?,
+        if_match: optional_owned_utf8_buffer(if_match_handle)?,
+        if_none_match: optional_owned_utf8_buffer(if_none_match_handle)?,
+        ..Default::default()
+    })
+}
+
+fn stat_options_from_scalars(
+    version_handle: u32,
+    if_match_handle: u32,
+    if_none_match_handle: u32,
+) -> Result<options::StatOptions, BridgeError> {
+    Ok(options::StatOptions {
+        version: optional_owned_utf8_buffer(version_handle)?,
+        if_match: optional_owned_utf8_buffer(if_match_handle)?,
+        if_none_match: optional_owned_utf8_buffer(if_none_match_handle)?,
+        ..Default::default()
+    })
+}
+
+fn write_options_from_scalars(
+    append: u32,
+    content_type_handle: u32,
+    content_disposition_handle: u32,
+    content_encoding_handle: u32,
+    cache_control_handle: u32,
+    if_match_handle: u32,
+    if_none_match_handle: u32,
+) -> Result<options::WriteOptions, BridgeError> {
+    Ok(options::WriteOptions {
+        append: scalar_bool(append, "append")?,
+        content_type: optional_owned_utf8_buffer(content_type_handle)?,
+        content_disposition: optional_owned_utf8_buffer(content_disposition_handle)?,
+        content_encoding: optional_owned_utf8_buffer(content_encoding_handle)?,
+        cache_control: optional_owned_utf8_buffer(cache_control_handle)?,
+        if_match: optional_owned_utf8_buffer(if_match_handle)?,
+        if_none_match: optional_owned_utf8_buffer(if_none_match_handle)?,
+        ..Default::default()
+    })
+}
+
+fn ensure_suffix_is_native(operator: &Operator, range: &BytesRange) -> Result<(), BridgeError> {
+    if range.is_suffix() && !operator.base_service().capability_dyn().read_with_suffix {
+        return Err(BridgeError::from(opendal::Error::new(
+            ErrorKind::Unsupported,
+            "suffix reads require native backend range support",
+        )));
+    }
+    Ok(())
+}
+
+fn start_read_task(
+    operator_handle: u32,
+    path_handle: u32,
+    read_options: options::ReadOptions,
+) -> Result<u32, BridgeError> {
+    let (operator, path) = path_and_operator(operator_handle, path_handle)?;
+    ensure_suffix_is_native(&operator, &read_options.range)?;
+    start_task(async move {
+        Completion::Read(match operator.read_options(&path, read_options).await {
+            Ok(buffer) => try_owned_opendal_buffer(buffer),
+            Err(error) => Err(BridgeError::from(error)),
+        })
+    })
+}
+
+fn start_stat_task(
+    operator_handle: u32,
+    path_handle: u32,
+    stat_options: options::StatOptions,
+) -> Result<u32, BridgeError> {
+    let (operator, path) = path_and_operator(operator_handle, path_handle)?;
+    start_task(async move {
+        Completion::Stat(
+            operator
+                .stat_options(&path, stat_options)
+                .await
+                .map(Box::new)
+                .map_err(BridgeError::from),
+        )
+    })
+}
+
+fn start_write_task(
+    operator_handle: u32,
+    path_handle: u32,
+    data_handle: u32,
+    write_options: options::WriteOptions,
+) -> Result<u32, BridgeError> {
+    let (operator, path, data) = STATE.with(|state| -> Result<_, BridgeError> {
+        let state = state.borrow();
+        let operator = state.arena.operator(operator_handle)?.clone();
+        let path = std::str::from_utf8(state.arena.buffer(path_handle)?)
+            .map_err(|_| BridgeError::InvalidUtf8)
+            .and_then(try_owned_string)?;
+        let data = try_owned_bytes(state.arena.buffer(data_handle)?)?;
+        Ok((operator, path, data))
+    })?;
+    start_task(async move {
+        Completion::Write(
+            operator
+                .write_options(&path, data, write_options)
+                .await
+                .map(Box::new)
+                .map_err(BridgeError::from),
+        )
+    })
+}
+
 fn try_owned_string(value: &str) -> Result<String, BridgeError> {
     let mut owned = String::new();
     owned
@@ -910,15 +1201,14 @@ fn zeroed_buffer(length: u32) -> Result<Vec<u8>, BridgeError> {
 fn push_entry_snapshot(
     entries: &mut Vec<EntrySnapshot>,
     total_bytes: &mut usize,
-    path: &str,
-    name: &str,
-    mode: u32,
-    content_length: u64,
+    entry: EntrySnapshot,
     bounds: ListBounds,
 ) -> Result<(), BridgeError> {
+    let metadata_length = entry.metadata_snapshot.len();
     let next_bytes = total_bytes
-        .checked_add(path.len())
-        .and_then(|value| value.checked_add(name.len()))
+        .checked_add(entry.path.len())
+        .and_then(|value| value.checked_add(entry.name.len()))
+        .and_then(|value| value.checked_add(metadata_length))
         .ok_or(BridgeError::ListTooLarge)?;
     if entries.len() >= bounds.max_entries || next_bytes > bounds.max_bytes {
         return Err(BridgeError::ListTooLarge);
@@ -926,12 +1216,7 @@ fn push_entry_snapshot(
     entries
         .try_reserve(1)
         .map_err(|_| BridgeError::AllocationFailed)?;
-    entries.push(EntrySnapshot {
-        path: try_owned_string(path)?,
-        name: try_owned_string(name)?,
-        mode,
-        content_length,
-    });
+    entries.push(entry);
     *total_bytes = next_bytes;
     Ok(())
 }
@@ -954,19 +1239,25 @@ async fn collect_list(
     let mut entries = Vec::new();
     let mut total_bytes = 0;
     while let Some(entry) = lister.try_next().await.map_err(BridgeError::from)? {
-        let metadata = entry.metadata();
+        let name = try_owned_string(entry.name())?;
+        let (path, metadata) = entry.into_parts();
         let mode = match metadata.mode() {
             opendal::EntryMode::FILE => ENTRY_MODE_FILE,
             opendal::EntryMode::DIR => ENTRY_MODE_DIRECTORY,
             opendal::EntryMode::Unknown => ENTRY_MODE_UNKNOWN,
         };
+        let content_length = metadata.content_length();
+        let metadata_snapshot = metadata_snapshot_bytes(&metadata)?;
         push_entry_snapshot(
             &mut entries,
             &mut total_bytes,
-            entry.path(),
-            entry.name(),
-            mode,
-            metadata.content_length(),
+            EntrySnapshot {
+                path,
+                name,
+                mode,
+                content_length,
+                metadata_snapshot,
+            },
             PRODUCTION_LIST_BOUNDS,
         )?;
     }
@@ -1040,6 +1331,7 @@ fn build_operator(builder: OperatorBuilder) -> Result<Operator, BridgeError> {
 
 fn capability_word(operator: &Operator, word: u32) -> Result<u64, BridgeError> {
     let capability = operator.info().capability();
+    let native_read_with_suffix = operator.base_service().capability_dyn().read_with_suffix;
     match word {
         0 => {
             let mut value = 0;
@@ -1051,7 +1343,7 @@ fn capability_word(operator: &Operator, word: u32) -> Result<u64, BridgeError> {
             value |= u64::from(capability.list) * CAP_LIST;
             value |= u64::from(capability.copy) * CAP_COPY;
             value |= u64::from(capability.rename) * CAP_RENAME;
-            value |= u64::from(capability.read_with_suffix) * CAP_READ_SUFFIX;
+            value |= u64::from(native_read_with_suffix) * CAP_READ_SUFFIX;
             value |= u64::from(capability.write_can_append) * CAP_WRITE_APPEND;
             value |= u64::from(capability.list_with_limit) * CAP_LIST_LIMIT;
             value |= u64::from(capability.list_with_start_after) * CAP_LIST_START_AFTER;
@@ -1110,6 +1402,7 @@ pub extern "C" fn opendal_mbt_wasm_feature_flags() -> u32 {
         | FEATURE_BOUNDED_LIST
         | FEATURE_BULK_TRANSFER
         | FEATURE_STRUCTURED_ERRORS
+        | FEATURE_METADATA_OPTIONS
 }
 
 /// Returns how many forced-delay tasks reached an actual pending poll.
@@ -1462,27 +1755,41 @@ pub extern "C" fn opendal_mbt_wasm_operator_write_start(
     path_handle: u32,
     data_handle: u32,
 ) -> u32 {
-    let inputs = STATE.with(|state| {
-        let state = state.borrow();
-        let operator = state.arena.operator(operator_handle)?.clone();
-        let path = std::str::from_utf8(state.arena.buffer(path_handle)?)
-            .map_err(|_| BridgeError::InvalidUtf8)
-            .and_then(try_owned_string)?;
-        let data = try_owned_bytes(state.arena.buffer(data_handle)?)?;
-        Ok((operator, path, data))
-    });
-    let result = inputs.and_then(|(operator, path, data)| {
-        start_task(async move {
-            Completion::Write(
-                operator
-                    .write(&path, data)
-                    .await
-                    .map(|_| ())
-                    .map_err(BridgeError::from),
-            )
-        })
-    });
-    handle_or_record_error(result)
+    handle_or_record_error(start_write_task(
+        operator_handle,
+        path_handle,
+        data_handle,
+        options::WriteOptions::default(),
+    ))
+}
+
+/// Starts an asynchronous write with the complete MoonBit v1 option subset.
+#[allow(clippy::too_many_arguments, reason = "mirrors the frozen scalar ABI")]
+#[unsafe(no_mangle)]
+pub extern "C" fn opendal_mbt_wasm_operator_write_options_start_v1(
+    operator_handle: u32,
+    path_handle: u32,
+    data_handle: u32,
+    append: u32,
+    content_type_handle: u32,
+    content_disposition_handle: u32,
+    content_encoding_handle: u32,
+    cache_control_handle: u32,
+    if_match_handle: u32,
+    if_none_match_handle: u32,
+) -> u32 {
+    let write_options = write_options_from_scalars(
+        append,
+        content_type_handle,
+        content_disposition_handle,
+        content_encoding_handle,
+        cache_control_handle,
+        if_match_handle,
+        if_none_match_handle,
+    );
+    handle_or_record_error(write_options.and_then(|write_options| {
+        start_write_task(operator_handle, path_handle, data_handle, write_options)
+    }))
 }
 
 /// Starts an asynchronous whole-object read and returns an owned task handle.
@@ -1491,15 +1798,38 @@ pub extern "C" fn opendal_mbt_wasm_operator_read_start(
     operator_handle: u32,
     path_handle: u32,
 ) -> u32 {
-    let result = path_and_operator(operator_handle, path_handle).and_then(|(operator, path)| {
-        start_task(async move {
-            Completion::Read(match operator.read(&path).await {
-                Ok(buffer) => try_owned_opendal_buffer(buffer),
-                Err(error) => Err(BridgeError::from(error)),
-            })
-        })
-    });
-    handle_or_record_error(result)
+    handle_or_record_error(start_read_task(
+        operator_handle,
+        path_handle,
+        options::ReadOptions::default(),
+    ))
+}
+
+/// Starts an asynchronous read with range and conditional options.
+#[allow(clippy::too_many_arguments, reason = "mirrors the frozen scalar ABI")]
+#[unsafe(no_mangle)]
+pub extern "C" fn opendal_mbt_wasm_operator_read_options_start_v1(
+    operator_handle: u32,
+    path_handle: u32,
+    range_kind: u32,
+    range_offset: u64,
+    range_length: u64,
+    version_handle: u32,
+    if_match_handle: u32,
+    if_none_match_handle: u32,
+) -> u32 {
+    let read_options = read_options_from_scalars(
+        range_kind,
+        range_offset,
+        range_length,
+        version_handle,
+        if_match_handle,
+        if_none_match_handle,
+    );
+    handle_or_record_error(
+        read_options
+            .and_then(|read_options| start_read_task(operator_handle, path_handle, read_options)),
+    )
 }
 
 /// Starts an asynchronous metadata lookup and returns an owned task handle.
@@ -1508,18 +1838,28 @@ pub extern "C" fn opendal_mbt_wasm_operator_stat_start(
     operator_handle: u32,
     path_handle: u32,
 ) -> u32 {
-    let result = path_and_operator(operator_handle, path_handle).and_then(|(operator, path)| {
-        start_task(async move {
-            Completion::Stat(
-                operator
-                    .stat(&path)
-                    .await
-                    .map(Box::new)
-                    .map_err(BridgeError::from),
-            )
-        })
-    });
-    handle_or_record_error(result)
+    handle_or_record_error(start_stat_task(
+        operator_handle,
+        path_handle,
+        options::StatOptions::default(),
+    ))
+}
+
+/// Starts an asynchronous stat with version and conditional options.
+#[unsafe(no_mangle)]
+pub extern "C" fn opendal_mbt_wasm_operator_stat_options_start_v1(
+    operator_handle: u32,
+    path_handle: u32,
+    version_handle: u32,
+    if_match_handle: u32,
+    if_none_match_handle: u32,
+) -> u32 {
+    let stat_options =
+        stat_options_from_scalars(version_handle, if_match_handle, if_none_match_handle);
+    handle_or_record_error(
+        stat_options
+            .and_then(|stat_options| start_stat_task(operator_handle, path_handle, stat_options)),
+    )
 }
 
 /// Starts an asynchronous recursive directory creation.
@@ -1745,6 +2085,53 @@ pub extern "C" fn opendal_mbt_wasm_completion_take_metadata(handle: u32) -> u32 
     handle_or_record_error(result)
 }
 
+/// Atomically replaces a successful stat/write completion with an ODM1 buffer.
+///
+/// Any encoding or replacement failure leaves the completion valid.
+#[unsafe(no_mangle)]
+pub extern "C" fn opendal_mbt_wasm_completion_take_metadata_snapshot(handle: u32) -> u32 {
+    let result = STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let completion = state.arena.completion(handle)?;
+        let snapshot = match completion {
+            Completion::Write(Ok(metadata)) | Completion::Stat(Ok(metadata)) => {
+                metadata_snapshot_bytes(metadata)?
+            }
+            Completion::Write(Err(error)) | Completion::Stat(Err(error)) => {
+                return Err(error.clone());
+            }
+            completion => {
+                return Err(BridgeError::WrongResourceType {
+                    handle,
+                    expected: "successful metadata completion",
+                    actual: match completion.kind() {
+                        COMPLETION_READ => "read completion",
+                        COMPLETION_CREATE_DIR => "create-dir completion",
+                        COMPLETION_DELETE => "delete completion",
+                        COMPLETION_LIST => "list completion",
+                        _ => "completion",
+                    },
+                });
+            }
+        };
+        state
+            .arena
+            .ensure_insert_capacity_after_take(handle, ResourceKind::Completion)?;
+        let resource = state.arena.take(handle, ResourceKind::Completion)?;
+        match resource {
+            Resource::Completion(Completion::Write(Ok(_)) | Completion::Stat(Ok(_))) => {}
+            _ => unreachable!("metadata completion was checked before removal"),
+        }
+        match state.arena.insert(Resource::Buffer(snapshot)) {
+            Ok(snapshot_handle) => Ok(snapshot_handle),
+            Err(_) => {
+                unreachable!("replacement capacity was checked before consuming the completion")
+            }
+        }
+    });
+    handle_or_record_error(result)
+}
+
 /// Moves a successful list result into an owned entry-list handle.
 #[unsafe(no_mangle)]
 pub extern "C" fn opendal_mbt_wasm_completion_take_entry_list(handle: u32) -> u32 {
@@ -1841,7 +2228,7 @@ pub extern "C" fn opendal_mbt_wasm_completion_take_error(handle: u32) -> u32 {
             | Completion::CreateDir(Err(error))
             | Completion::Delete(Err(error))
             | Completion::List(Err(error)) => error,
-            Completion::Write(Ok(()))
+            Completion::Write(Ok(_))
             | Completion::Read(Ok(_))
             | Completion::Stat(Ok(_))
             | Completion::CreateDir(Ok(()))
@@ -1941,6 +2328,46 @@ pub extern "C" fn opendal_mbt_wasm_entry_list_content_length(handle: u32, index:
             0
         }
     }
+}
+
+/// Moves one pre-encoded ODM1 entry metadata snapshot into a buffer handle.
+///
+/// Each entry snapshot can be taken once. Capacity failure leaves it available.
+#[unsafe(no_mangle)]
+pub extern "C" fn opendal_mbt_wasm_entry_list_metadata_snapshot(handle: u32, index: u32) -> u32 {
+    let result = STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let index = usize::try_from(index).map_err(|_| BridgeError::LengthOverflow)?;
+        {
+            let entries = state.arena.entry_list(handle)?;
+            let entry = entries.get(index).ok_or(BridgeError::IndexOutOfBounds {
+                index: u32::try_from(index).unwrap_or(u32::MAX),
+                length: entries.len(),
+            })?;
+            if entry.metadata_snapshot.is_empty() {
+                return Err(BridgeError::InvalidArgument {
+                    message: "entry metadata snapshot has already been taken".to_owned(),
+                });
+            }
+        }
+        if !state.arena.can_insert() {
+            return Err(BridgeError::HandleLimit);
+        }
+        let snapshot = state
+            .arena
+            .entry_list_mut(handle)?
+            .get_mut(index)
+            .map(|entry| std::mem::take(&mut entry.metadata_snapshot))
+            .filter(|snapshot| !snapshot.is_empty())
+            .ok_or_else(|| BridgeError::InvalidArgument {
+                message: "entry metadata snapshot has already been taken".to_owned(),
+            })?;
+        match state.arena.insert(Resource::Buffer(snapshot)) {
+            Ok(snapshot_handle) => Ok(snapshot_handle),
+            Err(_) => unreachable!("buffer capacity was checked before moving entry metadata"),
+        }
+    });
+    handle_or_record_error(result)
 }
 
 /// Releases an entry list and all of its owned snapshots.
@@ -2158,6 +2585,14 @@ mod tests {
         Ok(u32::from_le_bytes(bytes))
     }
 
+    fn snapshot_u64(snapshot: &[u8], offset: usize) -> u64 {
+        u64::from_le_bytes(snapshot[offset..offset + 8].try_into().unwrap())
+    }
+
+    fn snapshot_i64(snapshot: &[u8], offset: usize) -> i64 {
+        i64::from_le_bytes(snapshot[offset..offset + 8].try_into().unwrap())
+    }
+
     fn decode_error_snapshot(snapshot: &[u8]) -> Result<DecodedErrorSnapshot<'_>, &'static str> {
         if snapshot.get(0..4) != Some(ERROR_SNAPSHOT_MAGIC.as_slice()) {
             return Err("invalid snapshot magic");
@@ -2214,6 +2649,17 @@ mod tests {
         let value = STATE.with(|state| state.borrow().arena.buffer(handle).unwrap().to_vec());
         assert_eq!(opendal_mbt_wasm_buffer_release(handle), STATUS_OK);
         value
+    }
+
+    fn test_entry_snapshot(path: &str, name: &str, content_length: u64) -> EntrySnapshot {
+        let metadata = Metadata::new(opendal::EntryMode::FILE).with_content_length(content_length);
+        EntrySnapshot {
+            path: path.to_owned(),
+            name: name.to_owned(),
+            mode: ENTRY_MODE_FILE,
+            content_length,
+            metadata_snapshot: metadata_snapshot_bytes(&metadata).unwrap(),
+        }
     }
 
     #[test]
@@ -2428,6 +2874,168 @@ mod tests {
     }
 
     #[test]
+    fn metadata_snapshot_encodes_the_complete_native_shaped_contract() {
+        let mut metadata = Metadata::new(opendal::EntryMode::FILE)
+            .with_is_current(Some(false))
+            .with_is_deleted(true)
+            .with_content_length(u64::MAX)
+            .with_last_modified(opendal::raw::Timestamp::new(123, 456_789).unwrap())
+            .with_cache_control("cache".to_owned())
+            .with_content_disposition("disposition".to_owned())
+            .with_content_md5("md5".to_owned())
+            .with_content_type("type".to_owned())
+            .with_etag("etag".to_owned())
+            .with_version("version".to_owned());
+        metadata.set_content_encoding("encoding");
+
+        let snapshot = metadata_snapshot_bytes(&metadata).unwrap();
+
+        assert_eq!(&snapshot[0..4], METADATA_SNAPSHOT_MAGIC.as_slice());
+        assert_eq!(snapshot_word(&snapshot, 4), Ok(METADATA_SNAPSHOT_SCHEMA));
+        assert_eq!(snapshot_u64(&snapshot, 8), (1 << 9) - 1);
+        assert_eq!(snapshot_word(&snapshot, 16), Ok(ENTRY_MODE_FILE));
+        assert_eq!(snapshot_word(&snapshot, 20), Ok(0));
+        assert_eq!(snapshot_word(&snapshot, 24), Ok(1));
+        assert_eq!(snapshot_word(&snapshot, 28), Ok(0));
+        assert_eq!(snapshot_u64(&snapshot, 32), u64::MAX);
+        assert_eq!(snapshot_i64(&snapshot, 40), 123);
+        assert_eq!(snapshot_word(&snapshot, 48), Ok(456_789));
+        assert_eq!(snapshot_word(&snapshot, 52), Ok(0));
+        assert_eq!(
+            (0..7)
+                .map(|index| snapshot_word(&snapshot, 56 + index * 4).unwrap())
+                .collect::<Vec<_>>(),
+            vec![5, 11, 8, 3, 4, 4, 7]
+        );
+        assert_eq!(
+            &snapshot[METADATA_SNAPSHOT_HEADER_LENGTH..],
+            b"cachedispositionencodingmd5typeetagversion"
+        );
+    }
+
+    #[test]
+    fn metadata_snapshot_uses_canonical_zeroes_for_absent_values() {
+        let snapshot = metadata_snapshot_bytes(&Metadata::default()).unwrap();
+
+        assert_eq!(snapshot.len(), METADATA_SNAPSHOT_HEADER_LENGTH);
+        assert_eq!(snapshot_u64(&snapshot, 8), 0);
+        assert!(snapshot[16..].iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn metadata_snapshot_canonicalizes_pre_epoch_fractional_timestamps() {
+        let metadata =
+            Metadata::default().with_last_modified(opendal::raw::Timestamp::new(-4, -1).unwrap());
+
+        let snapshot = metadata_snapshot_bytes(&metadata).unwrap();
+
+        assert_eq!(snapshot_u64(&snapshot, 8), METADATA_LAST_MODIFIED_PRESENT);
+        assert_eq!(snapshot_i64(&snapshot, 40), -5);
+        assert_eq!(snapshot_word(&snapshot, 48), Ok(999_999_999));
+    }
+
+    #[test]
+    fn metadata_completion_snapshot_take_supports_write_and_stat() {
+        for completion in [
+            Completion::Write(Ok(Box::new(
+                Metadata::new(opendal::EntryMode::FILE).with_content_length(3),
+            ))),
+            Completion::Stat(Ok(Box::new(
+                Metadata::new(opendal::EntryMode::DIR).with_content_length(4),
+            ))),
+        ] {
+            reset_state();
+            let completion = insert_test_resource(Resource::Completion(completion));
+
+            let snapshot = opendal_mbt_wasm_completion_take_metadata_snapshot(completion);
+
+            assert_ne!(snapshot, 0);
+            assert!(STATE.with(|state| state.borrow().arena.completion(completion).is_err()));
+            assert_eq!(
+                &take_test_buffer(snapshot)[0..4],
+                METADATA_SNAPSHOT_MAGIC.as_slice()
+            );
+            assert_eq!(opendal_mbt_wasm_live_handle_count(), 0);
+        }
+        reset_state();
+    }
+
+    #[test]
+    fn metadata_completion_snapshot_take_is_failure_atomic_without_capacity() {
+        reset_state();
+        let completion = encode_handle(0, MAX_GENERATION);
+        STATE.with(|state| {
+            let mut state = state.borrow_mut();
+            state.arena.slots = (0..MAX_SLOTS)
+                .map(|index| Slot {
+                    generation: if index == 0 { MAX_GENERATION } else { 0 },
+                    resource: (index == 0).then(|| {
+                        Resource::Completion(Completion::Stat(Ok(Box::new(Metadata::new(
+                            opendal::EntryMode::FILE,
+                        )))))
+                    }),
+                })
+                .collect();
+            state.arena.live = 1;
+        });
+
+        assert_eq!(
+            opendal_mbt_wasm_completion_take_metadata_snapshot(completion),
+            0
+        );
+        assert_eq!(
+            opendal_mbt_wasm_completion_kind(completion),
+            COMPLETION_STAT
+        );
+        reset_state();
+    }
+
+    #[test]
+    fn operation_options_preserve_empty_values_and_validate_scalars() {
+        reset_state();
+        let empty = insert_test_buffer(b"");
+        let value = insert_test_buffer(b"value");
+
+        let read = read_options_from_scalars(RANGE_OFFSET_LENGTH, 2, 3, empty, value, 0).unwrap();
+        assert_eq!(read.range, BytesRange::new(2, Some(3)));
+        assert_eq!(read.version.as_deref(), Some(""));
+        assert_eq!(read.if_match.as_deref(), Some("value"));
+        assert_eq!(read.if_none_match, None);
+
+        let stat = stat_options_from_scalars(0, empty, value).unwrap();
+        assert_eq!(stat.version, None);
+        assert_eq!(stat.if_match.as_deref(), Some(""));
+        assert_eq!(stat.if_none_match.as_deref(), Some("value"));
+
+        let write = write_options_from_scalars(1, empty, value, 0, empty, value, 0).unwrap();
+        assert!(write.append);
+        assert_eq!(write.content_type.as_deref(), Some(""));
+        assert_eq!(write.content_disposition.as_deref(), Some("value"));
+        assert_eq!(write.content_encoding, None);
+        assert_eq!(write.cache_control.as_deref(), Some(""));
+        assert_eq!(write.if_match.as_deref(), Some("value"));
+        assert_eq!(write.if_none_match, None);
+
+        assert!(matches!(
+            byte_range(RANGE_FULL, 1, 0),
+            Err(BridgeError::InvalidArgument { .. })
+        ));
+        assert!(matches!(
+            byte_range(RANGE_OFFSET_LENGTH, u64::MAX, 1),
+            Err(BridgeError::InvalidArgument { .. })
+        ));
+        assert!(matches!(
+            write_options_from_scalars(2, 0, 0, 0, 0, 0, 0),
+            Err(BridgeError::InvalidArgument { .. })
+        ));
+
+        assert_eq!(opendal_mbt_wasm_buffer_release(empty), STATUS_OK);
+        assert_eq!(opendal_mbt_wasm_buffer_release(value), STATUS_OK);
+        assert_eq!(opendal_mbt_wasm_live_handle_count(), 0);
+        reset_state();
+    }
+
+    #[test]
     fn sized_buffers_are_zeroed_and_bounded() {
         reset_state();
         let buffer = opendal_mbt_wasm_buffer_new_sized(4);
@@ -2555,6 +3163,62 @@ mod tests {
     }
 
     #[test]
+    fn suffix_capability_and_guard_use_the_native_memory_service() {
+        reset_state();
+        let masked_memory = Operator::new(Memory::default()).unwrap().layer(
+            opendal::layers::CapabilityOverrideLayer::new(|mut capability| {
+                capability.read_with_suffix = false;
+                capability
+            }),
+        );
+        let (context, service) = masked_memory.into_parts();
+        let operator =
+            Operator::from_parts(context, service).layer(opendal::layers::SimulateLayer::default());
+        let operator_handle = insert_test_resource(Resource::Operator(operator.clone()));
+        assert_ne!(operator_handle, 0);
+        assert_eq!(
+            opendal_mbt_wasm_operator_info_capability_word(operator_handle, 0) & CAP_READ_SUFFIX,
+            0
+        );
+
+        assert!(operator.info().capability().read_with_suffix);
+        assert!(!operator.base_service().capability_dyn().read_with_suffix);
+        assert_eq!(
+            ensure_suffix_is_native(&operator, &BytesRange::suffix(1))
+                .unwrap_err()
+                .kind(),
+            ERROR_UNSUPPORTED
+        );
+
+        let path = insert_test_buffer(b"value");
+        assert_eq!(
+            opendal_mbt_wasm_operator_read_options_start_v1(
+                operator_handle,
+                path,
+                RANGE_SUFFIX,
+                0,
+                1,
+                0,
+                0,
+                0,
+            ),
+            0
+        );
+        assert_eq!(
+            STATE.with(|state| state.borrow().last_error.as_ref().unwrap().kind()),
+            ERROR_UNSUPPORTED
+        );
+        assert_eq!(opendal_mbt_wasm_last_error_clear(), STATUS_OK);
+        assert_eq!(opendal_mbt_wasm_buffer_release(path), STATUS_OK);
+        assert_eq!(
+            opendal_mbt_wasm_operator_release(operator_handle),
+            STATUS_OK
+        );
+        assert_eq!(opendal_mbt_wasm_live_handle_count(), 0);
+        reset_state();
+    }
+
+    #[test]
     fn generic_builder_rejects_duplicate_and_unbounded_config() {
         reset_state();
         let scheme = insert_test_buffer(b"memory");
@@ -2642,16 +3306,13 @@ mod tests {
         let mut bytes = 0;
         let bounds = ListBounds {
             max_entries: 2,
-            max_bytes: 5,
+            max_bytes: 172,
         };
         assert!(
             push_entry_snapshot(
                 &mut entries,
                 &mut bytes,
-                "a",
-                "a",
-                ENTRY_MODE_FILE,
-                1,
+                test_entry_snapshot("a", "a", 1),
                 bounds,
             )
             .is_ok()
@@ -2660,31 +3321,25 @@ mod tests {
             push_entry_snapshot(
                 &mut entries,
                 &mut bytes,
-                "b",
-                "b",
-                ENTRY_MODE_FILE,
-                1,
+                test_entry_snapshot("b", "b", 1),
                 bounds,
             )
             .is_ok()
         );
         assert_eq!(entries.len(), 2);
-        assert_eq!(bytes, 4);
+        assert_eq!(bytes, 172);
 
         assert!(matches!(
             push_entry_snapshot(
                 &mut entries,
                 &mut bytes,
-                "c",
-                "c",
-                ENTRY_MODE_FILE,
-                1,
+                test_entry_snapshot("c", "c", 1),
                 bounds,
             ),
             Err(BridgeError::ListTooLarge)
         ));
         assert_eq!(entries.len(), 2);
-        assert_eq!(bytes, 4);
+        assert_eq!(bytes, 172);
 
         let mut bytes_limited = Vec::new();
         let mut byte_count = 0;
@@ -2692,11 +3347,11 @@ mod tests {
             push_entry_snapshot(
                 &mut bytes_limited,
                 &mut byte_count,
-                "abc",
-                "def",
-                ENTRY_MODE_FILE,
-                3,
-                bounds,
+                test_entry_snapshot("abc", "def", 3),
+                ListBounds {
+                    max_entries: 2,
+                    max_bytes: 89,
+                },
             ),
             Err(BridgeError::ListTooLarge)
         ));
@@ -2713,6 +3368,10 @@ mod tests {
                 name: "value.bin".to_owned(),
                 mode: ENTRY_MODE_FILE,
                 content_length: 3,
+                metadata_snapshot: metadata_snapshot_bytes(
+                    &Metadata::new(opendal::EntryMode::FILE).with_content_length(3),
+                )
+                .unwrap(),
             },
         ]))));
 
@@ -2739,6 +3398,16 @@ mod tests {
             opendal_mbt_wasm_entry_list_mode(entries, 0),
             ENTRY_MODE_FILE as i32
         );
+        assert_eq!(opendal_mbt_wasm_entry_list_content_length(entries, 0), 3);
+        let metadata = opendal_mbt_wasm_entry_list_metadata_snapshot(entries, 0);
+        assert_ne!(metadata, 0);
+        assert_eq!(
+            &take_test_buffer(metadata)[0..4],
+            METADATA_SNAPSHOT_MAGIC.as_slice()
+        );
+        assert_eq!(opendal_mbt_wasm_entry_list_metadata_snapshot(entries, 0), 0);
+        assert_eq!(opendal_mbt_wasm_last_error_code(), 17);
+        assert_eq!(opendal_mbt_wasm_last_error_clear(), STATUS_OK);
         assert_eq!(opendal_mbt_wasm_entry_list_content_length(entries, 0), 3);
         assert_eq!(opendal_mbt_wasm_entry_list_mode(entries, 1), SCALAR_ERROR);
         assert_eq!(opendal_mbt_wasm_last_error_code(), 4);
@@ -2834,14 +3503,20 @@ mod tests {
 
         assert_eq!(opendal_mbt_wasm_task_cancel(stale), STATUS_OK);
         assert_eq!(opendal_mbt_wasm_task_state(stale), TASK_CANCELLED);
-        publish_task(stale, Completion::Write(Ok(())));
+        publish_task(
+            stale,
+            Completion::Write(Ok(Box::new(Metadata::new(opendal::EntryMode::FILE)))),
+        );
         assert_eq!(opendal_mbt_wasm_task_state(stale), TASK_CANCELLED);
         assert_eq!(opendal_mbt_wasm_task_release(stale), STATUS_OK);
 
         let current = opendal_mbt_wasm_buffer_new();
         assert_ne!(current, 0);
         assert_ne!(current, stale);
-        publish_task(stale, Completion::Write(Ok(())));
+        publish_task(
+            stale,
+            Completion::Write(Ok(Box::new(Metadata::new(opendal::EntryMode::FILE)))),
+        );
         assert_eq!(opendal_mbt_wasm_buffer_len(current), 0);
         assert_eq!(opendal_mbt_wasm_buffer_release(current), STATUS_OK);
         assert_eq!(opendal_mbt_wasm_live_handle_count(), 0);
@@ -2852,7 +3527,7 @@ mod tests {
     fn cancellation_wins_over_an_unclaimed_ready_result() {
         reset_state();
         let task = insert_test_resource(Resource::Task(Task::Ready(Box::new(Completion::Write(
-            Ok(()),
+            Ok(Box::new(Metadata::new(opendal::EntryMode::FILE))),
         )))));
 
         assert_eq!(opendal_mbt_wasm_task_cancel(task), STATUS_OK);
@@ -2870,7 +3545,10 @@ mod tests {
 
         assert_eq!(opendal_mbt_wasm_teardown(), STATUS_OK);
         assert_eq!(opendal_mbt_wasm_teardown(), STATUS_OK);
-        publish_task(task, Completion::Write(Ok(())));
+        publish_task(
+            task,
+            Completion::Write(Ok(Box::new(Metadata::new(opendal::EntryMode::FILE)))),
+        );
         assert_eq!(opendal_mbt_wasm_live_handle_count(), 0);
 
         assert_eq!(opendal_mbt_wasm_buffer_new(), 0);
