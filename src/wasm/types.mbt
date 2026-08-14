@@ -188,6 +188,14 @@ pub struct Operator {
 }
 
 ///|
+/// A callback-based asynchronous view of an Operator.
+///
+/// The view shares the configured operator and performs no I/O when created.
+pub struct AsyncOperator {
+  priv native : Operator
+}
+
+///|
 /// Observable state of an experimental callback task.
 pub enum TaskState {
   Pending

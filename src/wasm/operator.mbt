@@ -152,6 +152,20 @@ pub fn Operator::info(self : Operator) -> OperatorInfo raise WasmError {
 }
 
 ///|
+/// Create a lightweight asynchronous view that shares this Operator.
+pub fn Operator::as_async(self : Operator) -> AsyncOperator {
+  { native: self }
+}
+
+///|
+/// Release the shared operator through this asynchronous view.
+///
+/// This explicit lifecycle extension is specific to the Wasm binding.
+pub fn AsyncOperator::close(self : AsyncOperator) -> Unit {
+  self.native.close()
+}
+
+///|
 /// Release bridge resources early. Closing more than once is harmless.
 pub fn Operator::close(self : Operator) -> Unit {
   if self.handle != 0U {

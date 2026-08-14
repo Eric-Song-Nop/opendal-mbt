@@ -20,12 +20,12 @@ The experimental public MoonBit package exposes:
   compiled into the selected bridge artifact;
 - `Operator::info()`, including the effective scheme, root, name, and
   capabilities reported by OpenDAL;
-- `create_dir_callback`, `write_callback`, `read_callback`, `stat_callback`,
-  bounded `list_callback`, and `delete_callback` operations;
+- `Operator::as_async()` and `AsyncOperator` callback methods for create,
+  write, read, stat, bounded list, and delete operations;
 - a `Task` with `Pending`, `Completed`, `Cancelled`, and `Closed` states,
   plus idempotent logical cancellation and close;
 - owned `Bytes`, `Metadata`, `Entry`, `Capability`, and `WasmError` values;
-- explicit, idempotent `Operator::close()`.
+- explicit, idempotent `Operator::close()` and `AsyncOperator::close()`.
 
 The public MoonBit package intentionally does **not** expose synchronous
 storage methods, `Operator::memory`, raw task/resource handles, ABI version or

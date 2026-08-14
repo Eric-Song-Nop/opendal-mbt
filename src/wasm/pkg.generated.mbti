@@ -17,6 +17,17 @@ pub fn WasmError::is_not_found(Self) -> Bool
 pub fn WasmError::message(Self) -> String
 
 // Types and methods
+pub struct AsyncOperator {
+  // private fields
+}
+pub fn AsyncOperator::close(Self) -> Unit
+pub fn AsyncOperator::create_dir_callback(Self, StringView, callback~ : (Result[Unit, WasmError]) -> Unit) -> Task raise WasmError
+pub fn AsyncOperator::delete_callback(Self, StringView, callback~ : (Result[Unit, WasmError]) -> Unit, version? : StringView, recursive? : Bool) -> Task raise WasmError
+pub fn AsyncOperator::list_callback(Self, StringView, callback~ : (Result[Array[Entry], WasmError]) -> Unit, recursive? : Bool, limit? : UInt64, start_after? : StringView) -> Task raise WasmError
+pub fn AsyncOperator::read_callback(Self, StringView, callback~ : (Result[Bytes, WasmError]) -> Unit) -> Task raise WasmError
+pub fn AsyncOperator::stat_callback(Self, StringView, callback~ : (Result[Metadata, WasmError]) -> Unit) -> Task raise WasmError
+pub fn AsyncOperator::write_callback(Self, StringView, BytesView, callback~ : (Result[Unit, WasmError]) -> Unit) -> Task raise WasmError
+
 pub struct Capability {
   // private fields
 } derive(Eq, @debug.Debug)
@@ -62,15 +73,10 @@ pub fn Metadata::is_file(Self) -> Bool
 pub struct Operator {
   // private fields
 }
+pub fn Operator::as_async(Self) -> AsyncOperator
 pub fn Operator::close(Self) -> Unit
-pub fn Operator::create_dir_callback(Self, StringView, (Result[Unit, WasmError]) -> Unit) -> Task raise WasmError
-pub fn Operator::delete_callback(Self, StringView, (Result[Unit, WasmError]) -> Unit, version? : StringView, recursive? : Bool) -> Task raise WasmError
 pub fn Operator::info(Self) -> OperatorInfo raise WasmError
-pub fn Operator::list_callback(Self, StringView, (Result[Array[Entry], WasmError]) -> Unit, recursive? : Bool, limit? : UInt64, start_after? : StringView) -> Task raise WasmError
 pub fn Operator::new(StringView, config? : Map[String, String]) -> Self raise WasmError
-pub fn Operator::read_callback(Self, StringView, (Result[Bytes, WasmError]) -> Unit) -> Task raise WasmError
-pub fn Operator::stat_callback(Self, StringView, (Result[Metadata, WasmError]) -> Unit) -> Task raise WasmError
-pub fn Operator::write_callback(Self, StringView, BytesView, (Result[Unit, WasmError]) -> Unit) -> Task raise WasmError
 
 pub struct OperatorInfo {
   scheme : String

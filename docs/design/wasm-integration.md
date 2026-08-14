@@ -59,13 +59,15 @@ checkout is therefore an engineering proof, not a Mooncake release.
 The current experimental `/wasm` facade exposes:
 
 - `available_schemes()`;
-- `Operator::new(scheme, config)` and `Operator::info()`;
-- `create_dir_callback`, `write_callback`, `read_callback`, `stat_callback`,
-  bounded `list_callback`, and `delete_callback` methods;
+- `Operator::new(scheme, config)`, `Operator::info()`, and
+  `Operator::as_async()`;
+- `AsyncOperator` callback methods for create, write, read, stat, bounded
+  list, and delete operations;
 - `Task::state()`, logical `cancel()`, and `close()`;
 - owned `WasmError`, `Metadata`, `Entry`, `OperatorInfo`, and `Capability`
   values;
-- explicit `Operator::close()`.
+- explicit `Operator::close()` and the Wasm lifecycle extension
+  `AsyncOperator::close()`.
 
 The public package does not expose:
 
@@ -84,17 +86,20 @@ does not make them MoonBit API.
 The callback shape is explicit:
 
 ```moonbit
-let operation = operator.read_callback("notes/hello.txt", result => {
-  match result {
-    Ok(bytes) => consume(bytes)
-    Err(error) => report(error)
-  }
-})
+let task = operator.as_async().read_callback(
+  "notes/hello.txt",
+  callback=result => {
+    match result {
+      Ok(bytes) => consume(bytes)
+      Err(error) => report(error)
+    }
+  },
+)
 
 // Both are idempotent. Cancellation suppresses callback delivery but does not
 // promise to abort the underlying browser operation.
-operation.cancel()
-operation.close()
+task.cancel()
+task.close()
 ```
 
 This surface stays experimental until MoonBit provides a documented

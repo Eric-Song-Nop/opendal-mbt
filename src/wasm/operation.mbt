@@ -126,13 +126,13 @@ fn finish_unit_operation(
 ///
 /// The callback is delivered from a later microtask or timer turn, never from
 /// the initiating call stack.
-pub fn Operator::write_callback(
-  self : Operator,
+pub fn AsyncOperator::write_callback(
+  self : AsyncOperator,
   path : StringView,
   data : BytesView,
-  callback : (Result[Unit, WasmError]) -> Unit,
+  callback~ : (Result[Unit, WasmError]) -> Unit,
 ) -> Task raise WasmError {
-  if self.handle == 0U {
+  if self.native.handle == 0U {
     raise WasmError(1, "operator is closed")
   }
   ignore(bridge_last_error_clear())
@@ -143,7 +143,11 @@ pub fn Operator::write_callback(
       raise error
     }
   }
-  let task = bridge_operator_write_start(self.handle, path_handle, data_handle)
+  let task = bridge_operator_write_start(
+    self.native.handle,
+    path_handle,
+    data_handle,
+  )
   ignore(bridge_buffer_release(data_handle))
   ignore(bridge_buffer_release(path_handle))
   if task == 0U {
@@ -161,17 +165,17 @@ pub fn Operator::write_callback(
 ///
 /// The callback is delivered from a later microtask or timer turn, never from
 /// the initiating call stack.
-pub fn Operator::read_callback(
-  self : Operator,
+pub fn AsyncOperator::read_callback(
+  self : AsyncOperator,
   path : StringView,
-  callback : (Result[Bytes, WasmError]) -> Unit,
+  callback~ : (Result[Bytes, WasmError]) -> Unit,
 ) -> Task raise WasmError {
-  if self.handle == 0U {
+  if self.native.handle == 0U {
     raise WasmError(1, "operator is closed")
   }
   ignore(bridge_last_error_clear())
   let path_handle = copy_path_to_bridge(path)
-  let task = bridge_operator_read_start(self.handle, path_handle)
+  let task = bridge_operator_read_start(self.native.handle, path_handle)
   ignore(bridge_buffer_release(path_handle))
   if task == 0U {
     raise_last_bridge_error("could not start an asynchronous read")
@@ -223,17 +227,17 @@ pub fn Operator::read_callback(
 ///
 /// The callback is delivered from a later microtask or timer turn, never from
 /// the initiating call stack.
-pub fn Operator::stat_callback(
-  self : Operator,
+pub fn AsyncOperator::stat_callback(
+  self : AsyncOperator,
   path : StringView,
-  callback : (Result[Metadata, WasmError]) -> Unit,
+  callback~ : (Result[Metadata, WasmError]) -> Unit,
 ) -> Task raise WasmError {
-  if self.handle == 0U {
+  if self.native.handle == 0U {
     raise WasmError(1, "operator is closed")
   }
   ignore(bridge_last_error_clear())
   let path_handle = copy_path_to_bridge(path)
-  let task = bridge_operator_stat_start(self.handle, path_handle)
+  let task = bridge_operator_stat_start(self.native.handle, path_handle)
   ignore(bridge_buffer_release(path_handle))
   if task == 0U {
     raise_last_bridge_error("could not start an asynchronous stat")
@@ -294,17 +298,17 @@ pub fn Operator::stat_callback(
 ///
 /// The path must end with `/`. The callback is always delivered from a later
 /// browser event-loop turn.
-pub fn Operator::create_dir_callback(
-  self : Operator,
+pub fn AsyncOperator::create_dir_callback(
+  self : AsyncOperator,
   path : StringView,
-  callback : (Result[Unit, WasmError]) -> Unit,
+  callback~ : (Result[Unit, WasmError]) -> Unit,
 ) -> Task raise WasmError {
-  if self.handle == 0U {
+  if self.native.handle == 0U {
     raise WasmError(1, "operator is closed")
   }
   ignore(bridge_last_error_clear())
   let path_handle = copy_path_to_bridge(path)
-  let task = bridge_operator_create_dir_start(self.handle, path_handle)
+  let task = bridge_operator_create_dir_start(self.native.handle, path_handle)
   ignore(bridge_buffer_release(path_handle))
   if task == 0U {
     raise_last_bridge_error("could not start asynchronous directory creation")
@@ -328,14 +332,14 @@ pub fn Operator::create_dir_callback(
 /// The optional version and recursive behavior are passed through to the
 /// selected OpenDAL backend. The callback is delivered from a later browser
 /// event-loop turn.
-pub fn Operator::delete_callback(
-  self : Operator,
+pub fn AsyncOperator::delete_callback(
+  self : AsyncOperator,
   path : StringView,
-  callback : (Result[Unit, WasmError]) -> Unit,
+  callback~ : (Result[Unit, WasmError]) -> Unit,
   version? : StringView,
   recursive? : Bool = false,
 ) -> Task raise WasmError {
-  if self.handle == 0U {
+  if self.native.handle == 0U {
     raise WasmError(1, "operator is closed")
   }
   ignore(bridge_last_error_clear())
@@ -351,7 +355,7 @@ pub fn Operator::delete_callback(
       }
   }
   let task = bridge_operator_delete_start(
-    self.handle,
+    self.native.handle,
     path_handle,
     version_handle,
     recursive,
@@ -430,15 +434,15 @@ fn materialize_entry_list(handle : UInt) -> Array[Entry] raise WasmError {
 ///
 /// `limit` is a backend request/page hint. Independently, the bridge enforces
 /// fixed total entry and UTF-8 byte ceilings before publishing any result.
-pub fn Operator::list_callback(
-  self : Operator,
+pub fn AsyncOperator::list_callback(
+  self : AsyncOperator,
   path : StringView,
-  callback : (Result[Array[Entry], WasmError]) -> Unit,
+  callback~ : (Result[Array[Entry], WasmError]) -> Unit,
   recursive? : Bool = false,
   limit? : UInt64,
   start_after? : StringView,
 ) -> Task raise WasmError {
-  if self.handle == 0U {
+  if self.native.handle == 0U {
     raise WasmError(1, "operator is closed")
   }
   ignore(bridge_last_error_clear())
@@ -454,7 +458,7 @@ pub fn Operator::list_callback(
       }
   }
   let task = bridge_operator_list_start(
-    self.handle,
+    self.native.handle,
     path_handle,
     recursive,
     limit is Some(_),

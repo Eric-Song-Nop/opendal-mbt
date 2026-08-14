@@ -28,10 +28,10 @@ const runtime = await loadOpenDalMoonBit({
   moonbit: new URL("../artifacts/app.wasm", import.meta.url),
 });
 
-// Invoke an application export that uses Operator::new and callback methods.
+// Invoke an application export that uses Operator::new and AsyncOperator callbacks.
 runtime.exports.start_application();
 
-// Call after the application has closed its operators and operations.
+// Call after the application has closed its operators and tasks.
 runtime.dispose();
 ```
 

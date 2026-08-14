@@ -133,9 +133,10 @@ The current artifact compiles the memory fixture, but construction already
 uses the generic registry. The public MoonBit facade exposes:
 
 - `available_schemes()`;
-- `Operator::new(scheme, config)` and `Operator::info()`;
-- `create_dir_callback`, `write_callback`, `read_callback`, `stat_callback`,
-  bounded `list_callback`, and `delete_callback`;
+- `Operator::new(scheme, config)`, `Operator::info()`, and
+  `Operator::as_async()`;
+- `AsyncOperator` callback methods for create, write, read, stat, bounded
+  list, and delete operations;
 - `Task` states `Pending`, `Completed`, `Cancelled`, and `Closed`;
 - logical cancellation, explicit close, owned errors, metadata, entries, and
   capabilities.
@@ -223,12 +224,16 @@ let operator = @opendal.Operator::new(
   config={ "root": "notes" },
 )
 
-let operation = operator.read_callback("hello.txt", result => {
-  match result {
-    Ok(bytes) => consume(bytes)
-    Err(error) => report(error)
-  }
-})
+let async_operator = operator.as_async()
+let task = async_operator.read_callback(
+  "hello.txt",
+  callback=result => {
+    match result {
+      Ok(bytes) => consume(bytes)
+      Err(error) => report(error)
+    }
+  },
+)
 ```
 
 `create_dir_callback`, `write_callback`, `stat_callback`, `list_callback`, and
@@ -236,6 +241,10 @@ let operation = operator.read_callback("hello.txt", result => {
 `Task::close()` are idempotent. Cancellation suppresses callback delivery
 and discards a late result; it does not claim to abort the underlying OpenDAL
 future or browser API.
+
+`AsyncOperator::close()` is a Wasm lifecycle extension that releases the
+shared operator when only the async view is retained. Closing either view is
+idempotent and makes both views unusable for new work.
 
 The package does not offer synchronous write/read/stat fallbacks. A future
 native-looking `async fn` facade requires a documented ordinary-browser

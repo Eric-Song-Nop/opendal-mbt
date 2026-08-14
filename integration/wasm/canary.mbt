@@ -152,21 +152,23 @@ fn fail_async_lifecycle() -> Unit {
 ///|
 fn start_async_missing(operator : @opendal.Operator) -> Unit {
   async_stage.val = ASYNC_MISSING_PENDING
-  let operation = operator.read_callback("canary/async/data.bin", result => {
-    match result {
-      Err(error) if error.is_not_found() => {
-        async_operation.val = None
-        async_operator.val = None
-        async_stage.val = ASYNC_OK
+  let operation = operator
+    .as_async()
+    .read_callback("canary/async/data.bin", callback=result => {
+      match result {
+        Err(error) if error.is_not_found() => {
+          async_operation.val = None
+          async_operator.val = None
+          async_stage.val = ASYNC_OK
+        }
+        _ => fail_async_lifecycle()
       }
-      _ => fail_async_lifecycle()
+    }) catch {
+      _ => {
+        fail_async_lifecycle()
+        return
+      }
     }
-  }) catch {
-    _ => {
-      fail_async_lifecycle()
-      return
-    }
-  }
   async_operation.val = Some(operation)
   operator.close()
 }
@@ -174,135 +176,147 @@ fn start_async_missing(operator : @opendal.Operator) -> Unit {
 ///|
 fn start_async_delete_again(operator : @opendal.Operator) -> Unit {
   async_stage.val = ASYNC_DELETE_AGAIN_PENDING
-  let operation = operator.delete_callback(
-    "canary/async/",
-    result => {
-      match result {
-        Ok(_) => start_async_missing(operator)
-        Err(_) => fail_async_lifecycle()
+  let operation = operator
+    .as_async()
+    .delete_callback(
+      "canary/async/",
+      callback=result => {
+        match result {
+          Ok(_) => start_async_missing(operator)
+          Err(_) => fail_async_lifecycle()
+        }
+      },
+      recursive=true,
+    ) catch {
+      _ => {
+        fail_async_lifecycle()
+        return
       }
-    },
-    recursive=true,
-  ) catch {
-    _ => {
-      fail_async_lifecycle()
-      return
     }
-  }
   async_operation.val = Some(operation)
 }
 
 ///|
 fn start_async_delete(operator : @opendal.Operator) -> Unit {
   async_stage.val = ASYNC_DELETE_PENDING
-  let operation = operator.delete_callback(
-    "canary/async/",
-    result => {
-      match result {
-        Ok(_) => start_async_delete_again(operator)
-        Err(_) => fail_async_lifecycle()
+  let operation = operator
+    .as_async()
+    .delete_callback(
+      "canary/async/",
+      callback=result => {
+        match result {
+          Ok(_) => start_async_delete_again(operator)
+          Err(_) => fail_async_lifecycle()
+        }
+      },
+      recursive=true,
+    ) catch {
+      _ => {
+        fail_async_lifecycle()
+        return
       }
-    },
-    recursive=true,
-  ) catch {
-    _ => {
-      fail_async_lifecycle()
-      return
     }
-  }
   async_operation.val = Some(operation)
 }
 
 ///|
 fn start_async_list(operator : @opendal.Operator, payload : Bytes) -> Unit {
   async_stage.val = ASYNC_LIST_PENDING
-  let operation = operator.list_callback(
-    "canary/async/",
-    result => {
-      match result {
-        Ok(entries) => {
-          let mut found_file = false
-          let mut found_directory = false
-          for entry in entries {
-            if entry.path == "canary/async/data.bin" &&
-              entry.name == "data.bin" &&
-              entry.is_file() &&
-              entry.metadata.content_length == payload.length().to_uint64() {
-              found_file = true
-            } else if entry.path == "canary/async/" && entry.is_dir() {
-              found_directory = true
+  let operation = operator
+    .as_async()
+    .list_callback(
+      "canary/async/",
+      callback=result => {
+        match result {
+          Ok(entries) => {
+            let mut found_file = false
+            let mut found_directory = false
+            for entry in entries {
+              if entry.path == "canary/async/data.bin" &&
+                entry.name == "data.bin" &&
+                entry.is_file() &&
+                entry.metadata.content_length == payload.length().to_uint64() {
+                found_file = true
+              } else if entry.path == "canary/async/" && entry.is_dir() {
+                found_directory = true
+              }
+            }
+            if found_file && found_directory {
+              start_async_delete(operator)
+            } else {
+              fail_async_lifecycle()
             }
           }
-          if found_file && found_directory {
-            start_async_delete(operator)
-          } else {
-            fail_async_lifecycle()
-          }
+          Err(_) => fail_async_lifecycle()
         }
-        Err(_) => fail_async_lifecycle()
+      },
+      recursive=true,
+      limit=2UL,
+    ) catch {
+      _ => {
+        fail_async_lifecycle()
+        return
       }
-    },
-    recursive=true,
-    limit=2UL,
-  ) catch {
-    _ => {
-      fail_async_lifecycle()
-      return
     }
-  }
   async_operation.val = Some(operation)
 }
 
 ///|
 fn start_async_stat(operator : @opendal.Operator, payload : Bytes) -> Unit {
   async_stage.val = ASYNC_STAT_PENDING
-  let operation = operator.stat_callback("canary/async/data.bin", result => {
-    match result {
-      Ok(metadata) if metadata.is_file() &&
-        metadata.content_length == payload.length().to_uint64() =>
-        start_async_list(operator, payload)
-      _ => fail_async_lifecycle()
+  let operation = operator
+    .as_async()
+    .stat_callback("canary/async/data.bin", callback=result => {
+      match result {
+        Ok(metadata) if metadata.is_file() &&
+          metadata.content_length == payload.length().to_uint64() =>
+          start_async_list(operator, payload)
+        _ => fail_async_lifecycle()
+      }
+    }) catch {
+      _ => {
+        fail_async_lifecycle()
+        return
+      }
     }
-  }) catch {
-    _ => {
-      fail_async_lifecycle()
-      return
-    }
-  }
   async_operation.val = Some(operation)
 }
 
 ///|
 fn start_async_read(operator : @opendal.Operator, payload : Bytes) -> Unit {
   async_stage.val = ASYNC_READ_PENDING
-  let operation = operator.read_callback("canary/async/data.bin", result => {
-    match result {
-      Ok(actual) if actual == payload => start_async_stat(operator, payload)
-      _ => fail_async_lifecycle()
+  let operation = operator
+    .as_async()
+    .read_callback("canary/async/data.bin", callback=result => {
+      match result {
+        Ok(actual) if actual == payload => start_async_stat(operator, payload)
+        _ => fail_async_lifecycle()
+      }
+    }) catch {
+      _ => {
+        fail_async_lifecycle()
+        return
+      }
     }
-  }) catch {
-    _ => {
-      fail_async_lifecycle()
-      return
-    }
-  }
   async_operation.val = Some(operation)
 }
 
 ///|
 fn start_async_write(operator : @opendal.Operator, payload : Bytes) -> Unit {
   async_stage.val = ASYNC_WRITE_PENDING
-  let operation = operator.write_callback("canary/async/data.bin", payload, result => {
-    match result {
-      Ok(_) => start_async_read(operator, payload)
-      Err(_) => fail_async_lifecycle()
+  let operation = operator
+    .as_async()
+    .write_callback("canary/async/data.bin", payload, callback=result => {
+      match result {
+        Ok(_) => start_async_read(operator, payload)
+        Err(_) => fail_async_lifecycle()
+      }
+    }) catch {
+      _ => {
+        fail_async_lifecycle()
+        return
+      }
     }
-  }) catch {
-    _ => {
-      fail_async_lifecycle()
-      return
-    }
-  }
   async_operation.val = Some(operation)
 }
 
@@ -342,17 +356,19 @@ pub fn canary_async_start() -> Int {
   async_operator.val = Some(operator)
   let payload = b"\x00\xffMoonBit-async\x80OpenDAL"
   async_stage.val = ASYNC_CREATE_DIR_PENDING
-  let operation = operator.create_dir_callback("canary/async/", result => {
-    match result {
-      Ok(_) => start_async_write(operator, payload)
-      Err(_) => fail_async_lifecycle()
+  let operation = operator
+    .as_async()
+    .create_dir_callback("canary/async/", callback=result => {
+      match result {
+        Ok(_) => start_async_write(operator, payload)
+        Err(_) => fail_async_lifecycle()
+      }
+    }) catch {
+      _ => {
+        fail_async_lifecycle()
+        return ASYNC_ERROR
+      }
     }
-  }) catch {
-    _ => {
-      fail_async_lifecycle()
-      return ASYNC_ERROR
-    }
-  }
   async_operation.val = Some(operation)
   ASYNC_CREATE_DIR_PENDING
 }
@@ -373,7 +389,8 @@ pub fn canary_cancel_start() -> Int {
     _ => return ASYNC_ERROR
   }
   cancel_operator.val = Some(operator)
-  let operation = operator.read_callback("canary/cancel.bin", _ => {
+  let async_operator = operator.as_async()
+  let operation = async_operator.read_callback("canary/cancel.bin", callback=_ => {
     cancel_callback_count.val = cancel_callback_count.val + 1
   }) catch {
     _ => {
@@ -384,7 +401,7 @@ pub fn canary_cancel_start() -> Int {
   }
   cancel_operation.val = Some(operation)
   operation.cancel()
-  operator.close()
+  async_operator.close()
   cancel_operation.val = None
   cancel_operator.val = None
   0
@@ -440,19 +457,21 @@ pub fn canary_ready_start() -> Int {
     _ => return RACE_ERROR
   }
   ready_operator.val = Some(operator)
-  let operation = operator.read_callback("canary/ready-missing.bin", result => {
-    ready_callback_count.val = ready_callback_count.val + 1
-    ready_callback_ok.val = match result {
-      Err(error) => error.is_not_found()
-      Ok(_) => false
+  let operation = operator
+    .as_async()
+    .read_callback("canary/ready-missing.bin", callback=result => {
+      ready_callback_count.val = ready_callback_count.val + 1
+      ready_callback_ok.val = match result {
+        Err(error) => error.is_not_found()
+        Ok(_) => false
+      }
+    }) catch {
+      _ => {
+        operator.close()
+        ready_operator.val = None
+        return RACE_ERROR
+      }
     }
-  }) catch {
-    _ => {
-      operator.close()
-      ready_operator.val = None
-      return RACE_ERROR
-    }
-  }
   ready_operation.val = Some(operation)
   RACE_PENDING
 }
@@ -561,25 +580,27 @@ pub fn canary_multi_start() -> Int {
     }
   }
   multi_operator_two.val = Some(operator_two)
-  let operation_one = operator_one.read_callback(
-    "canary/operator-one-missing.bin",
-    result => finish_multi(1, result),
-  ) catch {
-    _ => {
-      fail_multi()
-      return RACE_ERROR
+  let operation_one = operator_one
+    .as_async()
+    .read_callback("canary/operator-one-missing.bin", callback=result => {
+      finish_multi(1, result)
+    }) catch {
+      _ => {
+        fail_multi()
+        return RACE_ERROR
+      }
     }
-  }
   multi_operation_one.val = Some(operation_one)
-  let operation_two = operator_two.read_callback(
-    "canary/operator-two-missing.bin",
-    result => finish_multi(2, result),
-  ) catch {
-    _ => {
-      fail_multi()
-      return RACE_ERROR
+  let operation_two = operator_two
+    .as_async()
+    .read_callback("canary/operator-two-missing.bin", callback=result => {
+      finish_multi(2, result)
+    }) catch {
+      _ => {
+        fail_multi()
+        return RACE_ERROR
+      }
     }
-  }
   multi_operation_two.val = Some(operation_two)
   RACE_PENDING
 }
@@ -600,15 +621,17 @@ pub fn canary_dispose_start() -> Int {
     _ => return RACE_ERROR
   }
   dispose_operator.val = Some(operator)
-  let operation = operator.read_callback("canary/dispose-missing.bin", _ => {
-    dispose_callback_count.val = dispose_callback_count.val + 1
-  }) catch {
-    _ => {
-      operator.close()
-      dispose_operator.val = None
-      return RACE_ERROR
+  let operation = operator
+    .as_async()
+    .read_callback("canary/dispose-missing.bin", callback=_ => {
+      dispose_callback_count.val = dispose_callback_count.val + 1
+    }) catch {
+      _ => {
+        operator.close()
+        dispose_operator.val = None
+        return RACE_ERROR
+      }
     }
-  }
   dispose_operation.val = Some(operation)
   RACE_PENDING
 }
@@ -636,22 +659,24 @@ fn fail_bulk_lifecycle() -> Unit {
 ///|
 fn start_bulk_read(operator : @opendal.Operator, expected : BytesView) -> Unit {
   bulk_stage.val = BULK_READ_PENDING
-  let operation = operator.read_callback("canary/bulk.bin", result => {
-    match result {
-      Ok(actual) if actual[:] == expected => {
-        operator.close()
-        bulk_operation.val = None
-        bulk_operator.val = None
-        bulk_stage.val = BULK_OK
+  let operation = operator
+    .as_async()
+    .read_callback("canary/bulk.bin", callback=result => {
+      match result {
+        Ok(actual) if actual[:] == expected => {
+          operator.close()
+          bulk_operation.val = None
+          bulk_operator.val = None
+          bulk_stage.val = BULK_OK
+        }
+        _ => fail_bulk_lifecycle()
       }
-      _ => fail_bulk_lifecycle()
+    }) catch {
+      _ => {
+        fail_bulk_lifecycle()
+        return
+      }
     }
-  }) catch {
-    _ => {
-      fail_bulk_lifecycle()
-      return
-    }
-  }
   bulk_operation.val = Some(operation)
 }
 
@@ -670,17 +695,19 @@ pub fn canary_bulk_start() -> Int {
   let storage = block.repeat(986896)
   let payload : BytesView = storage[16:16 + BULK_TRANSFER_BYTES]
   bulk_stage.val = BULK_WRITE_PENDING
-  let operation = operator.write_callback("canary/bulk.bin", payload, result => {
-    match result {
-      Ok(_) => start_bulk_read(operator, payload)
-      Err(_) => fail_bulk_lifecycle()
+  let operation = operator
+    .as_async()
+    .write_callback("canary/bulk.bin", payload, callback=result => {
+      match result {
+        Ok(_) => start_bulk_read(operator, payload)
+        Err(_) => fail_bulk_lifecycle()
+      }
+    }) catch {
+      _ => {
+        fail_bulk_lifecycle()
+        return BULK_ERROR
+      }
     }
-  }) catch {
-    _ => {
-      fail_bulk_lifecycle()
-      return BULK_ERROR
-    }
-  }
   bulk_operation.val = Some(operation)
   BULK_WRITE_PENDING
 }
