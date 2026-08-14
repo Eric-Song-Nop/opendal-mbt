@@ -14,12 +14,15 @@ candidate are intentionally different until the release tag is cut:
 | Track | Services and API | Native hosts |
 | --- | --- | --- |
 | Published `Eric-Song-Nop/opendal@0.1.0` | `local` profile: `memory`, `fs`, synchronous Phase 1-4 API | Apple silicon macOS 11+, x86-64 glibc Linux 2.35+ |
-| Pinned `0.2.0` release candidate (not published) | `standard` profile: `memory`, `fs`, typed `s3`, complete Phase 5A-E API | Apple silicon macOS 11+, x86-64 and arm64 glibc Linux 2.35+ |
+| Pinned `0.2.0-r1` candidate (not published) | `standard` profile: `memory`, `fs`, typed `s3`, Phase 5A-E through ABI v1.7 | Apple silicon macOS 11+, x86-64 and arm64 glibc Linux 2.35+ |
+| Current source (artifact repin pending) | ABI v1.8 native core `AsyncOperator` parity on the same `standard` profile | Source builds on the three candidate hosts |
 
-This source tree selects the fully pinned `native/artifacts-standard.json`
-table for `0.2.0-r1`. The immutable `v0.1.0-r1` local records remain unchanged
-in `native/artifacts.json`. The standard URLs name future `v0.2.0` release
-assets and are not a publication claim: `moon add
+This source tree retains the fully pinned `native/artifacts-standard.json`
+table for the ABI v1.7 `0.2.0-r1` candidate. The current ABI v1.8 source must
+use a maintainer source build until matching artifacts are rebuilt and
+repinned. The immutable `v0.1.0-r1` local records remain unchanged in
+`native/artifacts.json`. The standard URLs name future `v0.2.0` release assets
+and are not a publication claim: `moon add
 Eric-Song-Nop/opendal@0.1.0` still provides only the released local API until
 the tag workflow publishes `0.2.0`.
 
@@ -33,7 +36,9 @@ The current source facade implements:
 - owned presigned read/write/stat requests;
 - immutable timeout, retry, and concurrency-limit layers, all opt-in;
 - all-or-error `delete_many` and a managed same-Operator, one-object `Copier`;
-- an initial async facade for read, bounded read streams, and chunked writers;
+- native async core operations (`check`, `exists`, `read`, `stat`, `write`,
+  `create_dir`, `delete`, `list`, `copy`, and `rename`), plus bounded read
+  streams and chunked writers;
 - typed `OpenDalError` values and capability inspection.
 
 The generated public interface is
@@ -70,7 +75,7 @@ later builds reuse Moon's shared cache. The current prebuild hook requires
 Node.js 18 or newer and `tar` at build time. Consumers do not need Rust, Cargo,
 or this repository.
 
-Contributors testing the Phase 5 source stack use the checked-out repository:
+Contributors testing the current source stack use the checked-out repository:
 
 ```sh
 make moon-deps
@@ -131,7 +136,7 @@ async test "README: async memory round trip" {
 ## Guides
 
 - [Getting started](getting-started.mbt.md) — install a published release or
-  exercise the pinned `v0.2.0` candidate, then choose synchronous or async I/O.
+  exercise the current source stack, then choose synchronous or async I/O.
 - [Connecting](connecting.mbt.md) — understand profiles and construct memory,
   filesystem, and typed S3 operators.
 - [Common tasks](tasks.mbt.md) — recipes for streams, abort, presign, layers,
@@ -151,13 +156,17 @@ async test "README: async memory round trip" {
   OpenDAL or a backend may provide and retain one larger raw buffer internally.
 - Suffix ranges require `capability.can_read_suffix()`; the binding does not
   emulate suffix reads with a preliminary `stat`.
-- The first async slice covers read, bounded read streams, and chunked writers;
-  async stat/list/delete/copy/presign and public task handles remain later
-  work.
+- Native core async operations call OpenDAL's asynchronous backend API;
+  `copy` and `rename` are not emulated. Async `list` publishes no partial
+  result and rejects materialization above 65,536 entries or 16 MiB of
+  ABI-visible entry/metadata data.
+- Async random-access Reader, streaming Lister, managed Copier, presign, and
+  public task/callback adapters remain later work.
 - Retry, timeout, and concurrency limits are never implicit. Logging, tracing,
   metrics exporters, and custom callback layers are not exposed.
-- Standard artifacts are pinned for the `v0.2.0` release candidate but are not
-  yet published. Intel macOS, Windows, and musl Linux are not advertised; a
+- ABI v1.7 standard artifacts are pinned for the `v0.2.0-r1` release candidate
+  but are not yet published; ABI v1.8 artifacts still need rebuilding and
+  repinning. Intel macOS, Windows, and musl Linux are not advertised; a
   Rust-only build is not treated as MoonBit host support.
 
 Passing an arbitrary scheme does not install a backend. ABI feature presence,

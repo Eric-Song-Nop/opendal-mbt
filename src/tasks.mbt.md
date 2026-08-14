@@ -1,10 +1,11 @@
 # Common storage tasks
 
 The blocking core recipes also apply to the published `0.1.0` local profile.
-Recipes for S3, presign, layers, batch/Copier, and async target the pinned but
-unpublished `0.2.0` standard candidate and require a source standard build until
-the tag publishes its assets and package. Examples use `memory` or `fs` when
-behavior can be hermetic.
+Recipes for S3, presign, layers, and batch/Copier target the pinned but
+unpublished ABI v1.7 `0.2.0-r1` standard candidate. The native core async
+recipes target the current ABI v1.8 source. Both require a source standard
+build until matching assets and the package are published. Examples use
+`memory` or `fs` when behavior can be hermetic.
 
 ## Write and read a complete object
 
@@ -406,7 +407,7 @@ does not promise exactly-once stateful writes or appends after an uncertain
 remote commit. Operation permits remain held for body-style resource
 lifetimes; the optional HTTP permit remains held until a response body drops.
 
-## Use the initial async facade
+## Use the native async facade
 
 `Operator::as_async()` shares the configured operator. Call async methods
 directly from an async context—there is no `await` keyword:
@@ -443,11 +444,20 @@ async test "tasks: async writer and bounded reader" {
 }
 ```
 
-The first async slice includes whole/ranged read, bounded read streams, and
-chunked writers with explicit `finish`/`abort`. Streams and writers allow one
-in-flight operation. Cancellation of a stateful operation makes the resource
-terminal when cursor or commit progress may be unknown; remote effects are not
-rolled back. `AsyncReadStream::close` is synchronous and idempotent.
+The native async facade includes `check`, `exists`, whole/ranged `read`,
+`stat`, whole-object `write`, `create_dir`, `delete`, `list`, `copy`, and
+`rename`, plus bounded read streams and chunked writers with explicit
+`finish`/`abort`. Core operations call OpenDAL's asynchronous backend API;
+`copy` and `rename` are never emulated with read/write or copy/delete.
+`list` materializes the returned listing before publishing it and rejects the
+whole result above 65,536 entries or 16 MiB of ABI-visible entry/metadata data.
+Its optional `limit` remains a backend request hint rather than a total-result
+bound.
+
+Streams and writers allow one in-flight operation. Cancellation of a stateful
+operation makes the resource terminal when cursor or commit progress may be
+unknown; remote effects are not rolled back. `AsyncReadStream::close` is
+synchronous and idempotent.
 
 ## Handle typed errors
 
@@ -481,8 +491,8 @@ to retry. The binding never installs a retry layer implicitly; callers choose
 
 The following upstream recipes cannot yet be translated faithfully:
 
-- async stat, list/lister, delete, copy/Copier, presign, and public task-handle
-  APIs beyond the first async slice;
+- async random-access Reader, streaming Lister, managed Copier, presign, and
+  public task-handle APIs;
 - callback adapters or Node stream compatibility;
 - presigned delete and other methods beyond read/write/stat;
 - ordered per-path batch results or transactional batch rollback;
@@ -492,5 +502,7 @@ The following upstream recipes cannot yet be translated faithfully:
 - recipes requiring Intel macOS, Windows, or musl release artifacts.
 
 They are deliberate scope boundaries, not hidden APIs. The published `0.1.0`
-local profile lacks all Phase 5 methods until `0.2.0` is published; this source
-tree already pins the exact standard candidate artifacts.
+local profile lacks all Phase 5 methods until `0.2.0` is published. This tree
+retains the exact ABI v1.7 standard candidate artifacts; the current ABI v1.8
+source requires a maintainer source build until matching artifacts are
+repinned.

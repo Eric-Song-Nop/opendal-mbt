@@ -59,13 +59,15 @@ test oracle, but is not the public or long-term ABI of this project.
 | Presign and explicit operational layers | Pinned in `v0.2.0` candidate; publication pending | Phase 5C, ABI `1.3`-`1.5` |
 | Batch delete and managed Copier | Pinned in `v0.2.0` candidate; publication pending | Phase 5D, ABI `1.6` |
 | Initial MoonBit async facade | Pinned in `v0.2.0` candidate; publication pending | Phase 5E, ABI `1.7` |
+| Native core `AsyncOperator` parity | Implemented in current source; artifact repin and publication pending | Append-only ABI `1.8`, feature bit 14 |
 | Standard native host expansion | Pinned in `v0.2.0` candidate; publication pending | macOS arm64, Linux x86-64, Linux arm64 |
 
-`v0.1.0` remains the published compatibility baseline. This tree is the fully
-pinned `v0.2.0` standard release candidate across three target-native hosts.
-Phase 5 is not released until the tag workflow reproduces the committed
-digests, uploads those assets, publishes the same source to mooncakes.io, and
-passes fresh registry consumers. Until then, `moon add
+`v0.1.0` remains the published compatibility baseline. The committed
+`v0.2.0-r1` standard artifacts across three target-native hosts preserve the
+ABI v1.7 candidate; the current source adds ABI v1.8 core async parity and must
+be repinned before publication. Phase 5 is not released until the tag workflow
+reproduces the committed digests, uploads those assets, publishes the same
+source to mooncakes.io, and passes fresh registry consumers. Until then, `moon add
 Eric-Song-Nop/opendal@0.1.0` still provides only the released local surface and
 native archive.
 
@@ -247,20 +249,23 @@ separate linker and artifact-distribution decision.
 
 ### Phase 5: Standard profile and complete first-generation facade
 
-Status: pinned `v0.2.0` release candidate through Phase 5E; tag publication and
-fresh registry acceptance remain.
+Status: ABI v1.7 is pinned in the `v0.2.0` release candidate through Phase 5E;
+the ABI v1.8 native core async extension is implemented in current source and
+still needs artifact repinning, tag publication, and fresh registry acceptance.
 
 The user guides were checked against OpenDAL's binding overview, connecting,
 getting-started, and common-task documentation. Phase 5 was delivered as
-ordered vertical slices so each public contract remained reviewable even
-though the final source stack now contains all five slices:
+ordered vertical slices so each public contract remained reviewable. The
+current source contains all five slices plus the append-only v1.8 core async
+extension:
 
 ```text
 5A local lifecycle completion
   -> 5B first cloud profile
        -> 5C presign and explicit operational layers
             -> 5D batch and copier tasks
-                 -> 5E public async API
+                 -> 5E public async API (ABI v1.7)
+                      -> native core AsyncOperator parity (ABI v1.8)
 
 Linux arm64 artifacts and S3 integration run in parallel
 ```
@@ -675,13 +680,19 @@ reports finish or abort success.
 
 #### Phase 5E: Public MoonBit async API
 
-Status: the first public async slice is included in the pinned but unpublished
-`v0.2.0` candidate; full blocking API parity is intentionally deferred.
+Status: the first public async slice remains included in the pinned but
+unpublished ABI v1.7 `v0.2.0` candidate. Native core `AsyncOperator` parity is
+implemented in current source as the append-only ABI v1.8 extension; updated
+artifacts and publication remain pending.
 
-`Operator::as_async()` creates a lightweight view. The current async surface
-contains whole/ranged `read`, bounded `open_read_stream`/`next`/`close`, and
-`open_writer`/`write`/`finish`/`abort`. It uses ordinary MoonBit `async fn`
-methods, not public callbacks or native task handles.
+`Operator::as_async()` creates a lightweight view. The historical ABI v1.7
+slice contains whole/ranged `read`, bounded
+`open_read_stream`/`next`/`close`, and
+`open_writer`/`write`/`finish`/`abort`. ABI v1.8 adds true native async
+`check`, `exists`, `stat`, whole-object `write`, `create_dir`, `delete`,
+`list`, `copy`, and `rename`. Together with v1.7 `read`, this completes the
+core whole-object `AsyncOperator` operations. The facade uses ordinary
+MoonBit `async fn` methods, not public callbacks or native task handles.
 
 Each native operation owns copied inputs and its result. A worker publishes
 the result, then writes one byte to a private pipe watched by MoonBit's async
@@ -698,9 +709,16 @@ remainder is pending. Whole-object async `read` still materializes one
 output-bounded `Bytes` value. Neither guarantee bounds one raw buffer allocated
 inside OpenDAL or the backend.
 
-Async stat, list/lister, delete, copy/Copier, presign, and separate public task
-handles are not part of this first slice. Callers can configure an immutable
-Operator first and then obtain its async view.
+The v1.8 core operations call OpenDAL's asynchronous backend API directly.
+`copy` and `rename` use the native backend operations rather than read/write
+or copy/delete emulation. `list` exhausts the backend's async lister into an
+ABI-visible snapshot before publication and rejects a result above 65,536
+entries or 16 MiB of owned path, name, and visible metadata payload.
+
+Remaining async work is resource parity: random-access Reader, streaming
+Lister, managed Copier, presign, and separate public task/callback adapters.
+Additional services remain independent, capability-honest slices. Callers can
+configure an immutable Operator first and then obtain its async view.
 
 ##### 5E exit criteria
 
@@ -714,11 +732,16 @@ Operator first and then obtain its async view.
 - [x] Memory integration covers async range reads, stable stream EOF, writer
   finish, and idempotent successful abort.
 - [x] The synchronous facade and ABI prefix remain backward compatible.
+- [x] Core whole-object async operations use the native backend API; copy and
+  rename are not emulated.
+- [x] Async list materialization enforces the 65,536-entry and 16 MiB
+  ABI-visible snapshot bounds before publishing a result.
 - [x] Source/native tests cover async runtime and cancellation semantics, while
   every pinned candidate passes release identity and clean packaged-consumer
   gates.
-- [ ] Reproduce those pins and run fresh registry consumers from the `v0.2.0`
-  tag; expand the async surface only in later independent slices.
+- [ ] Build and pin ABI v1.8 artifacts, then run fresh registry consumers from
+  the release tag. Expand async resource parity only in later independent
+  slices.
 
 ### Parallel track A: Platform and artifact expansion
 
@@ -787,8 +810,9 @@ if a milestone cannot satisfy its exit criteria independently.
 | Release line | Intended content |
 | --- | --- |
 | Published `0.1.x` | Immutable `local` profile: memory/fs, original blocking facade, macOS arm64 and Linux x86-64 |
-| Pinned, unpublished `0.2.0` release candidate | Phase 5A-E, `standard` memory/fs/S3 profile, and Linux arm64 |
-| Later releases | Additional async operations, services, targets, recursive/cross-service transfer only after separate contracts |
+| Pinned, unpublished `0.2.0-r1` release candidate | Phase 5A-E through ABI v1.7, `standard` memory/fs/S3 profile, and Linux arm64 |
+| Current post-candidate source | ABI v1.8 native core `AsyncOperator` parity; artifact repin and release gates pending |
+| Later releases | Async resource/Lister/Copier/presign parity, additional services and targets, and recursive/cross-service transfer only after separate contracts |
 
 Each release tag must build its native artifacts and Moon package from the same
 commit, upload and verify every pinned artifact, publish the matching package,
@@ -855,15 +879,15 @@ A feature is not complete when the Rust method exists. Every slice includes:
 | --- | --- | --- |
 | Sequential read API and bounds | Resolved | `ReadStream`, fixed positive `chunk_size`, one owned output-bounded chunk, one possible larger upstream buffer, stable EOF |
 | Writer cleanup | Resolved | Explicit terminal `finish`/`abort`; successful repeated abort is idempotent; finalizers never commit |
-| ABI extension strategy | Resolved | Append-only v1 optional groups through ABI `1.7`, with older-prefix negotiation tests |
+| ABI extension strategy | Resolved | Append-only v1 optional groups through ABI `1.8`, preserving the v1.7 layout and older-prefix negotiation tests |
 | Standard profile selection | Resolved for `v0.2.0` | One pinned successor profile containing memory/fs/S3; no public runtime selector |
 | S3 configuration ownership | Resolved | Typed `Operator::s3`, opaque auth/source values, copied input, generic constructor retained as escape hatch |
 | Presigned result | Resolved | Owned method/URI/binary-header snapshot with explicit expiry and no automatic HTTP execution |
 | Layer order and replay policy | Resolved | Immutable timeout -> retry -> concurrency; opt-in retry makes no exactly-once stateful-write promise |
 | Batch result shape | Resolved | All-or-error `Unit`, possible partial remote effects, no fabricated ordered per-path result |
 | Copier scope | Resolved | Managed same-Operator one-object copy; not recursive or cross-service |
-| Initial async shape | Resolved | MoonBit `async fn` facade using owned native tasks and a pipe wakeup; no public callbacks/task handles |
+| Initial async shape | Resolved | MoonBit `async fn` facade using owned native tasks and a pipe wakeup; ABI v1.8 completes core `AsyncOperator` operations without public callbacks/task handles |
 | Standard release trust roots | Pinned candidate; tag verification pending | `artifacts-standard.json` is populated and selected atomically; publish the exact bytes and verify fresh registry consumers from `v0.2.0` |
-| Additional services and async parity | Deferred | Add only as independent, capability-honest vertical slices |
+| Additional services and async resource parity | Deferred | Add Reader/Lister/Copier/presign resources and services only as independent, capability-honest vertical slices |
 | Intel macOS, musl, and Windows | Deferred | Require installable MoonBit toolchains plus target-native build/link/consumer evidence |
 | Replacement for experimental prebuild tooling | Open toolchain follow-up | Adopt stable native-artifact support when it can preserve pinned, ordinary-package installation |

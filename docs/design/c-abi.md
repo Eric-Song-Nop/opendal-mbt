@@ -1,7 +1,7 @@
 # OpenDAL MoonBit C ABI
 
-Status: ABI v1.7 implemented; append-only v1 extensions frozen through the
-initial async facade
+Status: ABI v1.8 implemented; append-only v1 extensions frozen through native
+core `AsyncOperator` parity
 
 The executable header is `native/include/opendal_mbt.h`. It is the canonical
 source for exact field order, numeric constants, and function signatures. This
@@ -29,9 +29,10 @@ Rust ABI.
 ABI v1 covers the synchronous public contract, bounded read streams, Writer
 abort, the standard S3 constructor, presigning, explicit timeout/retry/
 concurrency-limit layers, batch delete, managed Copier operations, and the
-initial asynchronous read/stream/writer facade. It intentionally excludes
-foreign callbacks, public native task handles, full async parity, and raw
-service-specific handles.
+native asynchronous core operations plus bounded read streams and chunked
+Writers. It intentionally excludes foreign callbacks, public native task
+handles, async random-access Reader, streaming Lister, managed Copier and
+presign resource parity, and raw service-specific handles.
 
 ## Core choices
 
@@ -119,18 +120,21 @@ open/write/finish/free contract; `READ_STREAM` and `WRITER_ABORT` cover the two
 v1.1 lifecycle additions; `S3` covers typed construction; `PRESIGN` covers the
 three request constructors and owned request inspection; `LAYERS` covers
 timeout and retry; `CONCURRENCY_LIMIT` covers its separately feature-gated
-layer; `BATCH_DELETE` and `COPIER` cover the v1.6 operations; and `ASYNC` covers
-the v1.7 start, resource, result-take, cancellation, and free functions. A set
-feature bit guarantees that every pointer in that group is non-NULL.
+layer; `BATCH_DELETE` and `COPIER` cover the v1.6 operations; `ASYNC` covers
+the v1.7 start, resource, result-take, cancellation, and free functions; and
+`ASYNC_CORE` is feature bit 14 covering the v1.8 whole-object core starts and
+their two additional typed result-take functions. A set feature bit guarantees
+that every pointer in that group is non-NULL.
 
 Every non-`BASE` group depends on `BASE`: a library must never advertise one
 without also advertising `BASE`, and a caller requiring any operation group
 must require and validate both bits. `WRITER_ABORT` additionally depends on
-`CHUNKED_WRITER`. This guarantees construction plus the common buffer,
-snapshot, error, and destruction functions needed to consume each group's
-results. Feature availability remains separate from a configured backend's
-capability; for example, a library can expose `PRESIGN` or `COPIER` while a
-memory Operator reports the corresponding operation as unsupported.
+`CHUNKED_WRITER`. `ASYNC_CORE` depends on `WHOLE_OBJECT`, `LISTING`, and
+`ASYNC` in addition to `BASE`. This guarantees construction plus the common
+buffer, snapshot, error, and destruction functions needed to consume each
+group's results. Feature availability remains separate from a configured
+backend's capability; for example, a library can expose `PRESIGN` or `COPIER`
+while a memory Operator reports the corresponding operation as unsupported.
 
 The table ranges are normative: `BASE` is `library_info` through
 `operator_free`; `WHOLE_OBJECT` is `operator_check` through `operator_rename`;
@@ -143,7 +147,8 @@ appended `writer_abort` pointer; `S3` is `operator_s3`; `PRESIGN` is
 `operator_with_timeout` through `operator_with_retry`; `CONCURRENCY_LIMIT` is
 `operator_with_concurrency_limit`; `BATCH_DELETE` is `operator_delete_many`;
 `COPIER` is `operator_copier` through `copier_free`; and `ASYNC` is
-`async_operator_read_start` through `async_task_free`.
+`async_operator_read_start` through `async_task_free`. `ASYNC_CORE` is
+`async_operator_check_start` through `async_task_take_lister`.
 
 ### ABI v1.1 local-lifecycle extension
 
@@ -302,6 +307,32 @@ Async stream chunks retain the fixed returned-output/copy bound and pending-
 remainder behavior of the synchronous stream. `async_read_stream_close` is
 synchronous, idempotent, and performs no I/O. Async resource/task frees only
 release owned state; they never invent successful finish or abort outcomes.
+
+### ABI v1.8 core-async extension
+
+ABI v1.8 strictly appends `OPENDAL_MBT_FEATURE_ASYNC_CORE` at feature bit 14.
+The group contains nine starts—`async_operator_check_start`,
+`async_operator_exists_start`, `async_operator_stat_start`,
+`async_operator_write_start`, `async_operator_create_dir_start`,
+`async_operator_delete_start`, `async_operator_list_start`,
+`async_operator_copy_start`, and `async_operator_rename_start`—followed by
+`async_task_take_bool` and `async_task_take_lister`. It depends on `BASE`,
+`WHOLE_OBJECT`, `LISTING`, and the v1.7 `ASYNC` group. The v1.7 layout and
+semantics remain unchanged.
+
+Every v1.8 start follows the v1.7 copied-input, pipe-readiness,
+exactly-once result-taking, cancellation, and free contract. The operations
+call OpenDAL's asynchronous API directly. In particular, copy uses the native
+backend copy operation rather than read/write, and rename uses the native
+backend rename operation rather than copy/delete.
+
+Async list exhausts an OpenDAL asynchronous lister before it publishes a
+result. Each entry is projected to the metadata visible through this ABI, so
+backend-private metadata is not retained. The materialized result is bounded
+to at most 65,536 entries and 16 MiB of owned path, name, and ABI-visible
+metadata payload. Crossing either bound fails the task without publishing a
+partial lister. After a successful take, the existing `lister_next` interface
+consumes the materialized entries without further backend I/O.
 
 Version meaning:
 
@@ -668,7 +699,14 @@ exceptions cannot be converted into normal errors.
 | `Copier::finish` | `copier_finish` + metadata view/free |
 | `Copier::abort` | `copier_abort` |
 | `Operator::as_async` | pure MoonBit wrapper retaining the Operator |
+| `AsyncOperator::check` | `async_operator_check_start` + unit task take/free |
+| `AsyncOperator::exists` | `async_operator_exists_start` + bool task take/free |
 | `AsyncOperator::read` | `async_operator_read_start` + pipe readiness + buffer task take/free |
+| `AsyncOperator::stat` | `async_operator_stat_start` + metadata task take/free |
+| `AsyncOperator::write` | `async_operator_write_start` + metadata task take/free |
+| `AsyncOperator::create_dir`/`delete`/`rename` | matching async start + unit task take/free |
+| `AsyncOperator::list` | `async_operator_list_start` + lister task take/free + bounded materialization |
+| `AsyncOperator::copy` | `async_operator_copy_start` + metadata task take/free |
 | `AsyncOperator::open_read_stream` | `async_operator_read_stream_start` + read-stream task take/free |
 | `AsyncReadStream::next` | `async_read_stream_next_start` + buffer task take/free |
 | `AsyncReadStream::close` | `async_read_stream_close` |
@@ -863,7 +901,7 @@ AsyncWriter. They can be private structs while their public types stay opaque.
 ## Validation gates
 
 The implemented header has warning-clean C11 and C++17 syntax smoke tests.
-ABI v1.7 remains complete only while all of the following gates pass:
+ABI v1.8 remains complete only while all of the following gates pass:
 
 1. Real C consumers negotiate the table, exercise memory lifecycle operations,
    and cover standard-profile typed S3 construction and optional groups.

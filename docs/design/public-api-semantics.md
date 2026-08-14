@@ -1,14 +1,16 @@
 # Public API Semantics
 
-Status: Phase 5A-E source contract frozen for the pinned `v0.2.0` candidate
+Status: ABI v1.7 Phase 5A-E candidate contract preserved; ABI v1.8 native core
+`AsyncOperator` source contract implemented, with artifact repinning pending
 
 This document defines the intended MoonBit-facing behavior of the blocking core
-and the initial asynchronous OpenDAL facade. It deliberately avoids fixing the
-native ABI or implementation layout; those details must implement this
-contract without leaking through the public package.
+and the native asynchronous OpenDAL facade, including core `AsyncOperator`
+parity. It deliberately avoids fixing the native ABI or implementation layout;
+those details must implement this contract without leaking through the public
+package.
 
 This document defines the implemented resource, S3, presign, layer, batch,
-Copier, and initial async semantics. The generated
+Copier, and native async semantics. The generated
 `src/pkg.generated.mbti` is the authoritative current public surface.
 
 ## Design stance
@@ -491,15 +493,23 @@ permit is retained for the body lifetime. The optional
 until the HTTP response body is dropped. Both limits must be positive; there
 is no implicit or environment-selected limit.
 
-## Initial async facade
+## Native async facade
 
 `Operator::as_async()` creates a lightweight `AsyncOperator` retaining the
 same configured Operator; it performs no I/O. Callers first construct and layer
-an Operator, then obtain its async view. The initial async surface deliberately
-contains only:
+an Operator, then obtain its async view. The implemented surface contains:
 
 ```moonbit nocheck
+async fn AsyncOperator::check() -> Unit
+async fn AsyncOperator::exists(...) -> Bool
 async fn AsyncOperator::read(...) -> Bytes
+async fn AsyncOperator::stat(...) -> Metadata
+async fn AsyncOperator::write(...) -> Metadata
+async fn AsyncOperator::create_dir(...) -> Unit
+async fn AsyncOperator::delete(...) -> Unit
+async fn AsyncOperator::list(...) -> Array[Entry]
+async fn AsyncOperator::copy(...) -> Metadata
+async fn AsyncOperator::rename(...) -> Unit
 async fn AsyncOperator::open_read_stream(...) -> AsyncReadStream
 async fn AsyncReadStream::next() -> Bytes?
 fn AsyncReadStream::close() -> Unit
@@ -515,15 +525,26 @@ has no `await` keyword. No native task handle or callback enters the public
 API. Native workers own copied inputs and results, signal readiness through a
 private pipe, and never call MoonBit from a foreign thread.
 
+`check`, `exists`, `read`, `stat`, `write`, `create_dir`, `delete`, `list`,
+`copy`, and `rename` call OpenDAL's asynchronous backend API. In particular,
+`copy` and `rename` use the backend operations and are never emulated with
+read/write or copy/delete. `list` exhausts an asynchronous backend lister into
+an ABI-visible metadata snapshot before publishing the result. That snapshot
+is bounded to 65,536 entries and 16 MiB of owned path, name, and visible
+metadata payload; exceeding either bound fails the whole list operation. The
+optional `limit` remains a backend request hint rather than a total-result
+bound.
+
 An AsyncReadStream and AsyncWriter admit one in-flight operation. Cancelling
 `next`, `write`, `finish`, or `abort` makes that resource terminal because
 cursor or commit progress may be unknown; already-visible remote effects are
 not rolled back. Async stream calls return one output-bounded owned chunk at a
 time and do not poll upstream while a locally split remainder is pending. The
 same one-raw-buffer caveat as synchronous streams applies. Whole/ranged async
-`read` still materializes one output-bounded `Bytes` value. Async stat,
-list/lister, delete, copy/Copier, presign, and public task handles remain
-outside this first slice.
+`read` still materializes one output-bounded `Bytes` value. Cancellation does
+not roll back backend effects that are already visible. Async random-access
+Reader, streaming Lister, managed Copier, presign, and public task handles
+remain outside the current resource surface.
 
 ## Check semantics
 
@@ -533,7 +554,8 @@ comprehensive health, credential, read/write, or consistency check.
 
 ## Current non-goals
 
-- async parity beyond read, bounded streams, and chunked Writers;
+- async resource parity for random-access Reader, streaming Lister, managed
+  Copier, and presign;
 - callback adapters and public native task handles;
 - presigned delete or methods beyond read/write/stat;
 - ordered per-path batch results or transactional rollback;

@@ -20,8 +20,8 @@ The experimental public MoonBit package exposes:
   compiled into the selected bridge artifact;
 - `Operator::info()`, including the effective scheme, root, name, and
   capabilities reported by OpenDAL;
-- `Operator::as_async()` and `AsyncOperator` callback methods for create,
-  write, read, stat, bounded list, and delete operations;
+- `Operator::as_async()` and `AsyncOperator` callback methods for check,
+  exists, create, write, read, stat, bounded list, delete, copy, and rename;
 - native-shaped read ranges and operation options: read range/version/
   conditions, stat version/conditions, and write append/content headers/
   conditions, with write and stat both returning `Metadata`;
@@ -102,7 +102,7 @@ The three checks make different claims:
   teardown.
 - `make wasm-browser-canary` runs the same callback binding in real headless
   Chrome/Chromium. It explicitly enables the bridge's test-only
-  forced-pending wrapper and checks twelve observed pending tasks, heartbeat
+  forced-pending wrapper and checks sixteen observed pending tasks, heartbeat
   ordering, cancellation suppression, completion-versus-cancel behavior,
   concurrent operators, diagnostic isolation, and teardown with work in
   flight.
@@ -112,13 +112,14 @@ sequence yields to a real browser event loop. The Node check exercises real
 tasks and callbacks, but it neither enables the forced-pending hook nor makes
 a browser-heartbeat claim.
 
-The bridge ABI is version `0x0001_0006`. The bridge reports feature bitmap
-`0x0000_07ff`; bits 0 and 1 are the memory and poll-once fixture capabilities,
-bit 9 is structured error snapshots, and bit 10 is metadata snapshots and
-operation options. The public facade requires only `0x0000_07fc` (generation
-handles, binary buffers, task ABI, generic operator construction, common
-mutations, bounded listing, bounded bulk transfer, structured errors, and
-metadata/options).
+The bridge ABI is version `0x0001_0007`. The bridge reports feature bitmap
+`0x0000_0fff`; bits 0 and 1 are the memory and poll-once fixture capabilities,
+bit 9 is structured error snapshots, bit 10 is metadata snapshots and
+operation options, and bit 11 is core async parity. The public facade requires
+only `0x0000_0ffc` (generation handles, binary buffers, task ABI, generic
+operator construction, common mutations, bounded listing, bounded bulk
+transfer, structured errors, metadata/options, and the complete core async
+surface).
 
 The static snapshot is an implementation compatibility gate, not a release
 manifest: it does not yet provide artifact provenance, immutable release

@@ -61,8 +61,10 @@ The current experimental `/wasm` facade exposes:
 - `available_schemes()`;
 - `Operator::new(scheme, config)`, `Operator::info()`, and
   `Operator::as_async()`;
-- `AsyncOperator` callback methods for create, write, read, stat, bounded
-  list, and delete operations;
+- `AsyncOperator::{check_callback, exists_callback, read_callback,
+  stat_callback, write_callback, create_dir_callback, delete_callback,
+  list_callback, copy_callback, rename_callback}` for the ten common
+  whole-object operations, with bounded list materialization;
 - native-shaped `ByteRange`, `Timestamp`, and complete `Metadata` value types;
 - read range/version/conditions, stat version/conditions, and write append/
   content headers/conditions, with write and stat returning `Metadata`;
@@ -106,13 +108,17 @@ task.cancel()
 task.close()
 ```
 
+`check_callback` returns `Unit`, while `exists_callback` returns `Bool`.
 `read_callback` accepts an optional `ByteRange` (`Full`, `From`, `Range`, or
-`Suffix`), version, `if_match`, and `if_none_match`. `stat_callback` accepts
-the same version and condition values. `write_callback` accepts append, four
-content headers, and conditions; its success value is `Metadata`, not `Unit`.
-Suffix support is reported and accepted only when the base service implements
-native suffix reads, not when a completion layer could simulate one with an
-extra stat.
+`Suffix`), version,
+`if_match`, and `if_none_match`. `stat_callback` accepts the same version and
+condition values. `write_callback` accepts append, four content headers, and
+conditions; its success value is `Metadata`, not `Unit`. `copy_callback`
+returns the metadata supplied by OpenDAL, while `rename_callback` returns
+`Unit`; both preserve source and destination context on failure. Suffix
+support is reported and accepted only when the base service implements native
+suffix reads, not when a completion layer could simulate one with an extra
+stat.
 
 This surface stays experimental until MoonBit provides a documented
 ordinary-browser continuation contract or the project explicitly chooses
@@ -180,15 +186,17 @@ and seven string lengths. Strict UTF-8 payloads follow in cache-control,
 content-disposition, content-encoding, content-MD5, content-type, ETag, and
 version order. MoonBit validates the entire snapshot, including canonical
 absence and the 64 MiB limit, before constructing `Metadata`. Completion takes
-are failure-atomic and successful takes consume the snapshot. List entries use
+are failure-atomic: a successful take consumes the completion and returns one
+owned snapshot buffer, which MoonBit releases after parsing. List entries use
 the same schema with the potentially partial metadata supplied by the lister;
 they do not cause per-entry stat calls.
 
-The bridge ABI is `0x0001_0006`. It reports feature bitmap `0x0000_07ff`:
+The bridge ABI is 1.7 (`0x00010007`). It reports feature bitmap `0x00000fff`:
 memory and poll-once fixture bits plus generation handles, binary buffers, task
 ABI, generic operator construction, common mutations, bounded list, bulk
-transfer, structured errors, and metadata/options. The public facade requires
-`0x0000_07fc`; it does not require the memory or poll-once fixtures.
+transfer, structured errors, metadata/options, and bit 11 for core async
+parity. The public facade requires `0x00000ffc`; it does not require the memory
+or poll-once fixtures.
 
 ## Task and callback semantics
 
@@ -230,8 +238,8 @@ The repository separates static, Node, and browser evidence:
 | Check | Claim |
 | --- | --- |
 | `make wasm-static-contract` | Exact imports/exports, independent memory shape, forbidden-import policy, Moon-to-Rust import resolution, and raw/gzip/Brotli size ceilings match the committed browser-memory snapshot |
-| `make wasm-canary` | Node can instantiate the modules, use the generic callback facade, transfer a 16 MiB value in bounded chunks, verify write headers and returned metadata, perform a ranged read, verify stat/list metadata, run the callback lifecycle twice, clean up, and tear down |
-| `make wasm-browser-canary` | Real Chrome/Chromium runs the same options/metadata lifecycle and observes twelve explicitly forced pending tasks, browser heartbeat ordering, cancellation/race behavior, concurrent operators, and inert pending teardown |
+| `make wasm-canary` | Node can instantiate the modules, use the generic callback facade, transfer a 16 MiB value in bounded chunks, verify write headers and returned metadata, perform a ranged read, verify stat/list metadata, exercise check/exists, verify copy/rename `Unsupported` errors retain source/destination context, run the callback lifecycle twice, clean up, and tear down |
+| `make wasm-browser-canary` | Real Chrome/Chromium runs the same core-operation lifecycle and observes 16 checked, non-cancelled tasks enter the explicitly forced `Pending` state, along with browser heartbeat ordering, cancellation/race behavior, concurrent operators, and inert pending teardown |
 
 Only Chrome is evidence for forced `Pending -> Ready` behavior and a responsive
 browser event loop. Node exercises real `spawn_local` tasks and callbacks but
@@ -257,12 +265,14 @@ checkout.
 
 ### M1 — Callback task lifecycle: implementation complete; public API experimental
 
-Create-dir, write, read, stat, list, and delete use owned tasks and
-per-completion results. Read/stat/write expose the native-shaped option subset,
-write and stat return full-shaped metadata values, and list returns the
-lister's potentially partial metadata without per-entry stat. Browser evidence
-covers later-turn delivery, cancel-before-ready, completion-before-cancel,
-terminal close, concurrent operators, close/teardown with work pending, and
+Check, exists, read, stat, write, create-dir, delete, list, copy, and rename use
+owned tasks and per-completion results. Read/stat/write expose the native-shaped
+option subset, write and stat return full-shaped metadata values, list returns
+the lister's potentially partial metadata without per-entry stat, and
+copy/rename failures retain source and destination context. Browser evidence
+covers the forced-`Pending` state for 16 checked, non-cancelled tasks,
+later-turn delivery, cancel-before-ready, completion-before-cancel, terminal
+close, concurrent operators, close/teardown with work pending, and
 late-completion suppression.
 
 The stable MoonBit continuation decision is not complete; the public callback
