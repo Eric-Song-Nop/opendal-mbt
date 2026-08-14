@@ -28,6 +28,7 @@ endif
 NATIVE_LIB_DIR := $(CURDIR)/target/$(RUST_PROFILE)
 MOON_NATIVE_LIB := $(NATIVE_LIB_DIR)/libopendal_mbt_native.a
 MOON_TEST_FLAGS := --target native --frozen --warn-list '$(MOON_WARN_LIST)' --deny-warn
+MOON_BROWSER_FLAGS := --target js --frozen --warn-list '$(MOON_WARN_LIST)' --deny-warn
 BROWSER_RUST_TARGET := wasm32-unknown-unknown
 BROWSER_BRIDGE_STEM := opendal_mbt_browser_bridge
 BROWSER_BRIDGE_RAW := $(CURDIR)/target/$(BROWSER_RUST_TARGET)/$(RUST_PROFILE)/$(BROWSER_BRIDGE_STEM).wasm
@@ -37,7 +38,8 @@ BROWSER_BRIDGE_DIR := $(CURDIR)/target/browser-js/$(RUST_PROFILE)
 .PHONY: native rust-test moon-deps moon-check moon-test coverage abi-smoke c-example \
 	api-contract interface-contract package-contract packaged-consumer check \
 	test-profile native-artifact-test version-contract asan browser-bridge \
-	browser-rust-check browser-rust-test browser-js-canary
+	browser-rust-check browser-rust-test browser-js-canary \
+	moon-browser-check moon-browser-test
 
 native:
 	cargo build --package opendal-mbt-native --locked $(CARGO_SERVICE_FLAGS) \
@@ -84,6 +86,12 @@ moon-deps:
 
 moon-check:
 	moon check --target native --frozen --warn-list '$(MOON_WARN_LIST)' --deny-warn
+
+moon-browser-check:
+	moon check $(MOON_BROWSER_FLAGS) src/browser
+
+moon-browser-test:
+	moon test $(MOON_BROWSER_FLAGS) src/browser
 
 moon-test: native
 	OPENDAL_MBT_NATIVE_LIB="$(MOON_NATIVE_LIB)" \

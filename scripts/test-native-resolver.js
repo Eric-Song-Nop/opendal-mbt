@@ -17,13 +17,134 @@ const {
   loadDistributionProfile,
   loadSelectedArtifacts,
   makeBuildOutput,
+  makeNoopBuildOutput,
   makeSourceBuildOutput,
+  normalizeMoonTarget,
+  parseMoonTarget,
   parseMaintainerLinkFlags,
+  resolveMoonTarget,
   resolveSystemLinkFlags,
   resolveLocalOverride,
   selectArtifact,
   sha256File,
 } = require('../build.js');
+
+test('portable Moon targets use an empty link configuration', () => {
+  assert.deepEqual(makeNoopBuildOutput(), { vars: {}, link_configs: [] });
+  for (const target of ['js', 'wasm', 'wasm-gc']) {
+    assert.equal(normalizeMoonTarget(target), target);
+  }
+  assert.equal(normalizeMoonTarget('unknown'), null);
+});
+
+test('Moon target resolver accepts protocol fields and explicit environment', () => {
+  assert.equal(resolveMoonTarget({ target: 'js', env: {} }), 'js');
+  assert.equal(resolveMoonTarget({ backend: 'wasm', env: {} }), 'wasm');
+  assert.equal(resolveMoonTarget({ build_target: 'wasm-gc', env: {} }), 'wasm-gc');
+  assert.equal(resolveMoonTarget({ paths: { target: 'native' }, env: {} }), 'native');
+  assert.equal(
+    resolveMoonTarget({ env: { OPENDAL_MBT_TARGET: 'all' } }),
+    'all',
+  );
+});
+
+test('Moon target resolver reads only the parent command target option', () => {
+  assert.equal(parseMoonTarget('moon test --target js src/browser'), 'js');
+  assert.equal(parseMoonTarget('moon build --target=wasm-gc'), 'wasm-gc');
+  assert.equal(parseMoonTarget('moon test --target native src'), 'native');
+  assert.equal(
+    parseMoonTarget(
+      '"C:\\Program Files\\MoonBit\\moon.exe" -C "C:\\work tree" test --target "js" src/browser',
+    ),
+    'js',
+  );
+  assert.equal(parseMoonTarget('moon run src/browser -- --target wasm'), null);
+  assert.equal(
+    resolveMoonTarget(
+      { paths: { module_root: '/module', out_dir: 'TODO' }, env: {} },
+      { parentCommandLine: 'moon test --target wasm src/browser' },
+    ),
+    'wasm',
+  );
+  assert.equal(
+    resolveMoonTarget(
+      { paths: { module_root: '/module', out_dir: 'TODO' }, env: {} },
+      { parentCommandLine: 'moon test src' },
+    ),
+    null,
+  );
+});
+
+test('Moon target resolver queries the parent process without a shell', () => {
+  const calls = [];
+  const spawn = (command, args, options) => {
+    calls.push({ command, args, options });
+    return { status: 0, stdout: 'moon test --target js src/browser\n' };
+  };
+  assert.equal(
+    resolveMoonTarget(
+      { paths: { module_root: '/module', out_dir: 'TODO' }, env: {} },
+      { platform: 'darwin', spawnSync: spawn },
+    ),
+    'js',
+  );
+  assert.equal(calls[0].command, 'ps');
+  assert.deepEqual(calls[0].options.stdio, ['ignore', 'pipe', 'ignore']);
+
+  calls.length = 0;
+  assert.equal(
+    resolveMoonTarget(
+      { paths: { module_root: 'C:\\module', out_dir: 'TODO' }, env: {} },
+      { platform: 'win32', spawnSync: spawn },
+    ),
+    'js',
+  );
+  assert.equal(calls[0].command, 'powershell.exe');
+  assert.equal(calls[0].args.includes('-NonInteractive'), true);
+  assert.equal(calls[0].options.stdio[0], 'ignore');
+
+  assert.equal(
+    resolveMoonTarget(
+      { paths: { module_root: 'C:\\module', out_dir: 'TODO' }, env: {} },
+      {
+        platform: 'win32',
+        spawnSync: () => ({ status: 1, stdout: '', error: new Error('missing') }),
+      },
+    ),
+    null,
+  );
+});
+
+test('portable target prebuild bypasses native artifact resolution', () => {
+  const result = spawnSync(process.execPath, [path.join(__dirname, '..', 'build.js')], {
+    encoding: 'utf8',
+    input: JSON.stringify({
+      target: 'js',
+      env: { OPENDAL_MBT_NATIVE_LIB: '/definitely/missing/native-library.a' },
+    }),
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), { vars: {}, link_configs: [] });
+  assert.equal(result.stderr, '');
+});
+
+test('native and unspecified targets preserve native artifact resolution', () => {
+  for (const target of ['native', undefined]) {
+    const input = {
+      env: { OPENDAL_MBT_NATIVE_LIB: '/definitely/missing/native-library.a' },
+    };
+    if (target) {
+      input.target = target;
+    }
+    const result = spawnSync(
+      process.execPath,
+      [path.join(__dirname, '..', 'build.js')],
+      { encoding: 'utf8', input: JSON.stringify(input) },
+    );
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /OPENDAL_MBT_NATIVE_LIB.*unavailable/);
+  }
+});
 
 async function fixture(serviceProfile = 'local') {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'opendal-resolver-test-'));
