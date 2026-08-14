@@ -5,6 +5,7 @@ NATIVE_SERVICE_PROFILE ?= standard
 MOON_WARN_LIST ?= -68+73
 NATIVE_ARTIFACT ?=
 NATIVE_ARTIFACT_TABLE ?=
+WASM_BINDGEN_VERSION ?= 0.2.127
 
 ifeq ($(RUST_PROFILE),debug)
 CARGO_PROFILE_FLAG :=
@@ -27,18 +28,53 @@ endif
 NATIVE_LIB_DIR := $(CURDIR)/target/$(RUST_PROFILE)
 MOON_NATIVE_LIB := $(NATIVE_LIB_DIR)/libopendal_mbt_native.a
 MOON_TEST_FLAGS := --target native --frozen --warn-list '$(MOON_WARN_LIST)' --deny-warn
+BROWSER_RUST_TARGET := wasm32-unknown-unknown
+BROWSER_BRIDGE_STEM := opendal_mbt_browser_bridge
+BROWSER_BRIDGE_RAW := $(CURDIR)/target/$(BROWSER_RUST_TARGET)/$(RUST_PROFILE)/$(BROWSER_BRIDGE_STEM).wasm
+BROWSER_BRIDGE_DIR := $(CURDIR)/target/browser-js/$(RUST_PROFILE)
 
 
 .PHONY: native rust-test moon-deps moon-check moon-test coverage abi-smoke c-example \
 	api-contract interface-contract package-contract packaged-consumer check \
-	test-profile native-artifact-test version-contract asan
+	test-profile native-artifact-test version-contract asan browser-bridge \
+	browser-rust-check browser-rust-test browser-js-canary
 
 native:
-	cargo build --workspace --locked $(CARGO_SERVICE_FLAGS) $(CARGO_PROFILE_FLAG)
+	cargo build --package opendal-mbt-native --locked $(CARGO_SERVICE_FLAGS) \
+		$(CARGO_PROFILE_FLAG)
 
 rust-test:
-	cargo test --workspace --all-targets --locked $(CARGO_SERVICE_FLAGS) \
+	cargo test --package opendal-mbt-native --all-targets --locked $(CARGO_SERVICE_FLAGS) \
 		$(CARGO_PROFILE_FLAG)
+
+browser-bridge:
+	@command -v wasm-bindgen >/dev/null 2>&1 || { \
+		echo "wasm-bindgen $(WASM_BINDGEN_VERSION) is required" >&2; exit 1; \
+	}
+	@test "$$(wasm-bindgen --version)" = "wasm-bindgen $(WASM_BINDGEN_VERSION)" || { \
+		echo "expected wasm-bindgen $(WASM_BINDGEN_VERSION), got $$(wasm-bindgen --version)" >&2; \
+		exit 1; \
+	}
+	mkdir -p "$(BROWSER_BRIDGE_DIR)"
+	CARGO_PROFILE_RELEASE_PANIC=abort cargo build --locked \
+		--package opendal-mbt-browser-bridge \
+		--target "$(BROWSER_RUST_TARGET)" $(CARGO_PROFILE_FLAG)
+	wasm-bindgen --target web --no-typescript \
+		--out-dir "$(BROWSER_BRIDGE_DIR)" \
+		--out-name "$(BROWSER_BRIDGE_STEM)" "$(BROWSER_BRIDGE_RAW)"
+	mv -f "$(BROWSER_BRIDGE_DIR)/$(BROWSER_BRIDGE_STEM).js" \
+		"$(BROWSER_BRIDGE_DIR)/$(BROWSER_BRIDGE_STEM).mjs"
+
+browser-rust-check:
+	cargo fmt --all -- --check
+	cargo clippy --locked --package opendal-mbt-browser-bridge --all-targets \
+		--target "$(BROWSER_RUST_TARGET)" -- -D warnings
+
+browser-rust-test:
+	cargo test --locked --package opendal-mbt-browser-bridge --lib
+
+browser-js-canary: browser-bridge
+	node wasm/browser-canary/run.mjs "$(BROWSER_BRIDGE_DIR)"
 
 moon-deps:
 	moon update
@@ -111,7 +147,8 @@ native-artifact-test:
 check: api-contract interface-contract package-contract native-artifact-test \
 	version-contract
 	cargo fmt --all -- --check
-	cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+	cargo clippy --package opendal-mbt-native --all-targets --all-features \
+		--locked -- -D warnings
 	$(MAKE) moon-check
 	$(MAKE) abi-smoke
 

@@ -1,0 +1,46 @@
+name: Browser JS
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/browser-js.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "Makefile"
+      - "wasm/**"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/browser-js.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "Makefile"
+      - "wasm/**"
+
+permissions:
+  contents: read
+
+jobs:
+  browser:
+    name: Promise bridge and Chrome canary
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust WebAssembly target
+        run: rustup target add wasm32-unknown-unknown
+      - name: Install matching wasm-bindgen CLI
+        run: cargo install --locked wasm-bindgen-cli --version 0.2.127
+      - name: Tool versions
+        run: |
+          rustc --version
+          cargo --version
+          wasm-bindgen --version
+          node --version
+          google-chrome --version
+      - name: Check browser bridge
+        run: make browser-rust-check
+      - name: Test bridge state machines and snapshots
+        run: make browser-rust-test
+      - name: Run browser integration canary
+        run: make browser-js-canary RUST_PROFILE=release

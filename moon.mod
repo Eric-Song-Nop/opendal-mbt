@@ -33,6 +33,7 @@ options(
     "Cargo.toml",
     "rust-toolchain.toml",
     "native/rust",
+    "wasm",
     "native/distribution-profile.json",
     "native/distribution-profiles",
     "examples",

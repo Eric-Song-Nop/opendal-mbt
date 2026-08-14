@@ -9,7 +9,7 @@ package_files=$(moon package --list --frozen --target-dir "$package_target" 2>&1
 printf '%s\n' "$package_files"
 
 if printf '%s\n' "$package_files" | \
-  grep -nE '^(integration/|moon\.work$|Makefile$|Cargo\.(lock|toml)$|rust-toolchain\.toml$|native/rust/|native/distribution-profile\.json$|native/distribution-profiles/|examples/|tests/|scripts/)'; then
+  grep -nE '^(integration/|moon\.work$|Makefile$|Cargo\.(lock|toml)$|rust-toolchain\.toml$|native/rust/|wasm/|native/distribution-profile\.json$|native/distribution-profiles/|examples/|tests/|scripts/)'; then
   echo "maintainer-only files leaked into the published module" >&2
   exit 1
 fi

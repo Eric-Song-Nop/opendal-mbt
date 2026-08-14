@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "bindingVersion": "0.2.0",
+  "abiVersion": 65542,
+  "requiredFeatureFlags": 2044,
+  "wasmBindgenVersion": "0.2.127",
+  "services": [
+    "memory",
+    "opfs",
+    "s3"
+  ],
+  "limits": {
+    "bufferBytes": 67108864,
+    "transferChunkBytes": 262144,
+    "listEntries": 65536,
+    "listUtf8Bytes": 16777216,
+    "configEntries": 1024,
+    "configUtf8Bytes": 1048576
+  },
+  "snapshots": {
+    "error": "ODE1",
+    "metadata": "ODM1"
+  },
+  "localErrorKinds": {
+    "cancelled": 4101
+  }
+}
