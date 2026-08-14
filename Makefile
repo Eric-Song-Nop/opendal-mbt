@@ -95,16 +95,18 @@ browser-embed-bridge:
 		exit 1; \
 	}
 	mkdir -p "$(BROWSER_EMBED_DIR)"
-	# Panic locations are live Wasm data, so canonicalize host source roots.
+	# Canonicalize panic paths and function ordering across maintainer hosts.
 	@rust_sysroot="$$(rustc --print sysroot)"; \
 		cargo_home="$${CARGO_HOME:-$$HOME/.cargo}"; \
 		RUSTFLAGS="--remap-path-prefix=$(CURDIR)=/workspace \
 			--remap-path-prefix=$$cargo_home=/cargo \
 			--remap-path-prefix=$$rust_sysroot=/rust-toolchain" \
+		CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
 		CARGO_PROFILE_RELEASE_PANIC=abort cargo build --locked --release \
 			--package opendal-mbt-browser-bridge \
 			--target "$(BROWSER_RUST_TARGET)"
 	wasm-bindgen --target no-modules --no-typescript \
+		--remove-name-section --remove-producers-section \
 		--out-dir "$(BROWSER_EMBED_DIR)" \
 		--out-name "$(BROWSER_BRIDGE_STEM)" "$(BROWSER_EMBED_RAW)"
 
