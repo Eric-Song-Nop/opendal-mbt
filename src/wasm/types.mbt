@@ -1,4 +1,15 @@
 ///|
+/// An independent byte range for whole-object reads.
+/// The `length` field is a byte count, not an end offset.
+/// `Suffix` requires the selected backend's native suffix capability.
+pub(all) enum ByteRange {
+  Full
+  From(offset~ : UInt64)
+  Range(offset~ : UInt64, length~ : UInt64)
+  Suffix(length~ : UInt64)
+} derive(Eq, @debug.Debug)
+
+///|
 /// OpenDAL's retry classification for an operation failure.
 pub enum ErrorStatus {
   Permanent
@@ -86,11 +97,30 @@ pub enum EntryMode {
 } derive(Eq, Debug)
 
 ///|
-/// The metadata subset currently materialized by the browser binding.
+/// A UTC instant represented without imposing a calendar/time-zone package.
+/// `nanoseconds` is always in the range 0 through 999,999,999 for values
+/// produced by this package.
+pub struct Timestamp {
+  unix_seconds : Int64
+  nanoseconds : Int
+} derive(Eq, @debug.Debug)
+
+///|
+/// Read-only metadata snapshot associated with one operation context.
 pub struct Metadata {
   mode : EntryMode
   content_length : UInt64
-} derive(Eq, Debug)
+  is_current : Bool?
+  is_deleted : Bool
+  cache_control : String?
+  content_disposition : String?
+  content_encoding : String?
+  content_md5 : String?
+  content_type : String?
+  etag : String?
+  last_modified : Timestamp?
+  version : String?
+} derive(Eq, @debug.Debug)
 
 ///|
 pub fn Metadata::is_file(self : Metadata) -> Bool {

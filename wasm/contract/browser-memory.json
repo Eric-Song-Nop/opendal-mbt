@@ -200,11 +200,19 @@
           "kind": "function"
         },
         {
+          "name": "opendal_mbt_wasm_completion_take_metadata_snapshot",
+          "kind": "function"
+        },
+        {
           "name": "opendal_mbt_wasm_entry_list_content_length",
           "kind": "function"
         },
         {
           "name": "opendal_mbt_wasm_entry_list_len",
+          "kind": "function"
+        },
+        {
+          "name": "opendal_mbt_wasm_entry_list_metadata_snapshot",
           "kind": "function"
         },
         {
@@ -332,6 +340,10 @@
           "kind": "function"
         },
         {
+          "name": "opendal_mbt_wasm_operator_read_options_start_v1",
+          "kind": "function"
+        },
+        {
           "name": "opendal_mbt_wasm_operator_read_start",
           "kind": "function"
         },
@@ -344,11 +356,19 @@
           "kind": "function"
         },
         {
+          "name": "opendal_mbt_wasm_operator_stat_options_start_v1",
+          "kind": "function"
+        },
+        {
           "name": "opendal_mbt_wasm_operator_stat_start",
           "kind": "function"
         },
         {
           "name": "opendal_mbt_wasm_operator_write",
+          "kind": "function"
+        },
+        {
+          "name": "opendal_mbt_wasm_operator_write_options_start_v1",
           "kind": "function"
         },
         {
@@ -395,9 +415,9 @@
         }
       ],
       "observed_sizes": {
-        "raw": 963695,
-        "gzip": 317726,
-        "brotli": 240045
+        "raw": 979079,
+        "gzip": 323822,
+        "brotli": 245567
       },
       "size_caps": {
         "raw": 1100000,
@@ -476,12 +496,7 @@
         },
         {
           "module": "opendal_mbt_bridge",
-          "name": "opendal_mbt_wasm_completion_take_metadata",
-          "kind": "function"
-        },
-        {
-          "module": "opendal_mbt_bridge",
-          "name": "opendal_mbt_wasm_entry_list_content_length",
+          "name": "opendal_mbt_wasm_completion_take_metadata_snapshot",
           "kind": "function"
         },
         {
@@ -491,7 +506,7 @@
         },
         {
           "module": "opendal_mbt_bridge",
-          "name": "opendal_mbt_wasm_entry_list_mode",
+          "name": "opendal_mbt_wasm_entry_list_metadata_snapshot",
           "kind": "function"
         },
         {
@@ -532,26 +547,6 @@
         {
           "module": "opendal_mbt_bridge",
           "name": "opendal_mbt_wasm_last_error_take",
-          "kind": "function"
-        },
-        {
-          "module": "opendal_mbt_bridge",
-          "name": "opendal_mbt_wasm_metadata_content_length_high",
-          "kind": "function"
-        },
-        {
-          "module": "opendal_mbt_bridge",
-          "name": "opendal_mbt_wasm_metadata_content_length_low",
-          "kind": "function"
-        },
-        {
-          "module": "opendal_mbt_bridge",
-          "name": "opendal_mbt_wasm_metadata_mode",
-          "kind": "function"
-        },
-        {
-          "module": "opendal_mbt_bridge",
-          "name": "opendal_mbt_wasm_metadata_release",
           "kind": "function"
         },
         {
@@ -611,7 +606,7 @@
         },
         {
           "module": "opendal_mbt_bridge",
-          "name": "opendal_mbt_wasm_operator_read_start",
+          "name": "opendal_mbt_wasm_operator_read_options_start_v1",
           "kind": "function"
         },
         {
@@ -621,12 +616,12 @@
         },
         {
           "module": "opendal_mbt_bridge",
-          "name": "opendal_mbt_wasm_operator_stat_start",
+          "name": "opendal_mbt_wasm_operator_stat_options_start_v1",
           "kind": "function"
         },
         {
           "module": "opendal_mbt_bridge",
-          "name": "opendal_mbt_wasm_operator_write_start",
+          "name": "opendal_mbt_wasm_operator_write_options_start_v1",
           "kind": "function"
         },
         {
@@ -744,9 +739,9 @@
         }
       ],
       "observed_sizes": {
-        "raw": 51533,
-        "gzip": 20237,
-        "brotli": 17070
+        "raw": 58419,
+        "gzip": 23672,
+        "brotli": 19901
       },
       "size_caps": {
         "raw": 65536,

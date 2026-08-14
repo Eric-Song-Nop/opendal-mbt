@@ -22,6 +22,9 @@ The experimental public MoonBit package exposes:
   capabilities reported by OpenDAL;
 - `Operator::as_async()` and `AsyncOperator` callback methods for create,
   write, read, stat, bounded list, and delete operations;
+- native-shaped read ranges and operation options: read range/version/
+  conditions, stat version/conditions, and write append/content headers/
+  conditions, with write and stat both returning `Metadata`;
 - a `Task` with `Pending`, `Completed`, `Cancelled`, and `Closed` states,
   plus idempotent logical cancellation and close;
 - owned `Bytes`, `Metadata`, `Entry`, `Capability`, and native-shaped
@@ -64,6 +67,14 @@ constructing `OpenDalError`, then attaches the initiating operation, path, and
 destination. Malformed snapshots are binding ABI mismatches rather than
 partially decoded backend errors.
 
+Stat and write results cross as owned `ODM1` metadata snapshots. The schema
+carries the native-shaped mode, length, current/deleted state, timestamp, and
+seven optional HTTP/version strings. MoonBit validates the complete envelope,
+canonical absence, timestamp, lengths, and UTF-8 before publishing a value.
+List entries carry the same schema using the metadata supplied by the lister;
+optional fields can therefore be absent and the facade does not issue a stat
+for each entry.
+
 Whole-object materialization is capped at 64 MiB. The loader copies at most
 256 KiB per call and recreates typed-array views for every window so
 `memory.grow` cannot leave a stale view. The public facade does not use the
@@ -72,6 +83,9 @@ bridge's legacy per-byte buffer operations.
 Operator configuration is capped at 1,024 entries and 1 MiB of combined key
 and value UTF-8. ASCII-case-insensitive duplicate keys are rejected before an
 operator is constructed.
+
+Bounded list materialization fails atomically above 65,536 entries or 16 MiB
+of combined path, name, and pre-encoded `ODM1` metadata bytes.
 
 ## Evidence
 
@@ -82,8 +96,10 @@ The three checks make different claims:
   module, no imported/shared/memory64 memory, no `env` or WASI imports, MoonBit
   bridge imports resolved by Rust exports, and raw/gzip/Brotli size ceilings.
 - `make wasm-canary` runs in Node.js through the callback task path. It checks
-  bootstrap, generic memory construction, bounded bulk transfer, two complete
-  callback lifecycles, owned errors, repeated cleanup, and final teardown.
+  bootstrap, generic memory construction, bounded bulk transfer, write content
+  options and returned metadata, ranged reads, stat/list metadata, two
+  complete callback lifecycles, owned errors, repeated cleanup, and final
+  teardown.
 - `make wasm-browser-canary` runs the same callback binding in real headless
   Chrome/Chromium. It explicitly enables the bridge's test-only
   forced-pending wrapper and checks twelve observed pending tasks, heartbeat
@@ -96,12 +112,13 @@ sequence yields to a real browser event loop. The Node check exercises real
 tasks and callbacks, but it neither enables the forced-pending hook nor makes
 a browser-heartbeat claim.
 
-The bridge ABI is version `0x0001_0005`. The bridge reports feature bitmap
-`0x0000_03ff`; bits 0 and 1 are the memory and poll-once fixture capabilities,
-and bit 9 is structured error snapshots. The public facade requires only
-`0x0000_03fc` (generation handles, binary buffers, task ABI, generic operator
-construction, common mutations, bounded listing, bounded bulk transfer, and
-structured errors).
+The bridge ABI is version `0x0001_0006`. The bridge reports feature bitmap
+`0x0000_07ff`; bits 0 and 1 are the memory and poll-once fixture capabilities,
+bit 9 is structured error snapshots, and bit 10 is metadata snapshots and
+operation options. The public facade requires only `0x0000_07fc` (generation
+handles, binary buffers, task ABI, generic operator construction, common
+mutations, bounded listing, bounded bulk transfer, structured errors, and
+metadata/options).
 
 The static snapshot is an implementation compatibility gate, not a release
 manifest: it does not yet provide artifact provenance, immutable release

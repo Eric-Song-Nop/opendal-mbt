@@ -45,17 +45,39 @@ fn bridge_operator_info_name(operator : UInt) -> UInt = "opendal_mbt_bridge" "op
 fn bridge_operator_info_capability_word(operator : UInt, word : UInt) -> UInt64 = "opendal_mbt_bridge" "opendal_mbt_wasm_operator_info_capability_word"
 
 ///|
-fn bridge_operator_write_start(
+fn bridge_operator_write_options_start_v1(
   operator : UInt,
   path : UInt,
   data : UInt,
-) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_operator_write_start"
+  append : Bool,
+  content_type : UInt,
+  content_disposition : UInt,
+  content_encoding : UInt,
+  cache_control : UInt,
+  if_match : UInt,
+  if_none_match : UInt,
+) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_operator_write_options_start_v1"
 
 ///|
-fn bridge_operator_read_start(operator : UInt, path : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_operator_read_start"
+fn bridge_operator_read_options_start_v1(
+  operator : UInt,
+  path : UInt,
+  range_kind : UInt,
+  range_offset : UInt64,
+  range_length : UInt64,
+  version : UInt,
+  if_match : UInt,
+  if_none_match : UInt,
+) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_operator_read_options_start_v1"
 
 ///|
-fn bridge_operator_stat_start(operator : UInt, path : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_operator_stat_start"
+fn bridge_operator_stat_options_start_v1(
+  operator : UInt,
+  path : UInt,
+  version : UInt,
+  if_match : UInt,
+  if_none_match : UInt,
+) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_operator_stat_options_start_v1"
 
 ///|
 fn bridge_operator_create_dir_start(operator : UInt, path : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_operator_create_dir_start"
@@ -97,7 +119,7 @@ fn bridge_completion_status(handle : UInt) -> UInt = "opendal_mbt_bridge" "opend
 fn bridge_completion_take_buffer(handle : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_completion_take_buffer"
 
 ///|
-fn bridge_completion_take_metadata(handle : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_completion_take_metadata"
+fn bridge_completion_take_metadata_snapshot(handle : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_completion_take_metadata_snapshot"
 
 ///|
 fn bridge_completion_take_entry_list(handle : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_completion_take_entry_list"
@@ -118,10 +140,7 @@ fn bridge_entry_list_path(handle : UInt, index : UInt) -> UInt = "opendal_mbt_br
 fn bridge_entry_list_name(handle : UInt, index : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_entry_list_name"
 
 ///|
-fn bridge_entry_list_mode(handle : UInt, index : UInt) -> Int = "opendal_mbt_bridge" "opendal_mbt_wasm_entry_list_mode"
-
-///|
-fn bridge_entry_list_content_length(handle : UInt, index : UInt) -> UInt64 = "opendal_mbt_bridge" "opendal_mbt_wasm_entry_list_content_length"
+fn bridge_entry_list_metadata_snapshot(handle : UInt, index : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_entry_list_metadata_snapshot"
 
 ///|
 fn bridge_entry_list_release(handle : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_entry_list_release"
@@ -154,18 +173,6 @@ fn host_copy_bridge_to_moon(
 
 ///|
 fn bridge_operator_release(handle : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_operator_release"
-
-///|
-fn bridge_metadata_content_length_low(handle : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_metadata_content_length_low"
-
-///|
-fn bridge_metadata_content_length_high(handle : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_metadata_content_length_high"
-
-///|
-fn bridge_metadata_mode(handle : UInt) -> Int = "opendal_mbt_bridge" "opendal_mbt_wasm_metadata_mode"
-
-///|
-fn bridge_metadata_release(handle : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_metadata_release"
 
 ///|
 fn bridge_last_error_take() -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_last_error_take"

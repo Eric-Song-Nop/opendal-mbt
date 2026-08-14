@@ -2525,10 +2525,21 @@ fn metadata_output_view(metadata: &Metadata, header: StructHeaderV1) -> CallResu
         Some(value) => {
             present_bits |= METADATA_LAST_MODIFIED_PRESENT;
             let value = value.into_inner();
-            let nanoseconds =
-                u32::try_from(value.subsec_nanosecond()).map_err(|_| CallFailure::AbiMismatch)?;
+            let mut unix_seconds = value.as_second();
+            let signed_nanoseconds = value.subsec_nanosecond();
+            // jiff truncates seconds toward zero and keeps pre-epoch fractions
+            // negative; the ABI uses floor seconds and a non-negative remainder.
+            let nanoseconds = if signed_nanoseconds < 0 {
+                unix_seconds = unix_seconds
+                    .checked_sub(1)
+                    .ok_or(CallFailure::AbiMismatch)?;
+                u32::try_from(1_000_000_000 + signed_nanoseconds)
+                    .map_err(|_| CallFailure::AbiMismatch)?
+            } else {
+                u32::try_from(signed_nanoseconds).map_err(|_| CallFailure::AbiMismatch)?
+            };
             TimestampV1 {
-                unix_seconds: value.as_second(),
+                unix_seconds,
                 nanoseconds,
                 reserved0: 0,
             }
@@ -7794,6 +7805,50 @@ mod tests {
             assert_eq!(opendal_mbt_get_api(pointer.cast()), STATUS_ABI_MISMATCH);
             assert_eq!(ptr::addr_of!((*pointer).library_patch).read(), 0xDEAD_BEEF);
         }
+    }
+
+    #[test]
+    fn metadata_output_view_normalizes_pre_epoch_fractional_timestamp() {
+        let timestamp = raw::Timestamp::new(0, -500_000_000)
+            .expect("negative fractional timestamp is in range");
+        let metadata = Metadata::new(EntryMode::FILE).with_last_modified(timestamp);
+        let header = StructHeaderV1 {
+            struct_size: size_of::<MetadataViewV1>() as u32,
+            struct_version: STRUCT_VERSION,
+        };
+        let Ok(view) = metadata_output_view(&metadata, header) else {
+            panic!("valid metadata should produce an ABI view");
+        };
+
+        assert_eq!(
+            (
+                view.last_modified.unix_seconds,
+                view.last_modified.nanoseconds,
+            ),
+            (-1, 500_000_000),
+        );
+    }
+
+    #[test]
+    fn metadata_output_view_preserves_post_epoch_fractional_timestamp() {
+        let timestamp =
+            raw::Timestamp::new(0, 500_000_000).expect("positive fractional timestamp is in range");
+        let metadata = Metadata::new(EntryMode::FILE).with_last_modified(timestamp);
+        let header = StructHeaderV1 {
+            struct_size: size_of::<MetadataViewV1>() as u32,
+            struct_version: STRUCT_VERSION,
+        };
+        let Ok(view) = metadata_output_view(&metadata, header) else {
+            panic!("valid metadata should produce an ABI view");
+        };
+
+        assert_eq!(
+            (
+                view.last_modified.unix_seconds,
+                view.last_modified.nanoseconds,
+            ),
+            (0, 500_000_000),
+        );
     }
 
     #[test]
