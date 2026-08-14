@@ -64,8 +64,8 @@ The current experimental `/wasm` facade exposes:
 - `AsyncOperator` callback methods for create, write, read, stat, bounded
   list, and delete operations;
 - `Task::state()`, logical `cancel()`, and `close()`;
-- owned `WasmError`, `Metadata`, `Entry`, `OperatorInfo`, and `Capability`
-  values;
+- owned native-shaped `OpenDalError`/`ErrorInfo`, `Metadata`, `Entry`,
+  `OperatorInfo`, and `Capability` values;
 - explicit `Operator::close()` and the Wasm lifecycle extension
   `AsyncOperator::close()`.
 
@@ -154,11 +154,18 @@ The core-Wasm boundary follows these rules:
   immutable MoonBit errors;
 - bridge teardown is permanent for one instance and late completion is inert.
 
-The bridge ABI is `0x0001_0004`. It reports feature bitmap `0x0000_01ff`:
+Structured errors use an owned, versioned `ODE1` little-endian snapshot that
+preserves the OpenDAL kind, status, kind name, and message atomically. MoonBit
+validates the entire snapshot before constructing `OpenDalError` and attaches
+the initiating operation, path, and destination from its owned callback
+context. Unknown future kind/status codes remain representable; malformed
+snapshots become `AbiMismatch` binding errors.
+
+The bridge ABI is `0x0001_0005`. It reports feature bitmap `0x0000_03ff`:
 memory and poll-once fixture bits plus generation handles, binary buffers, task
-ABI, generic operator construction, common mutations, bounded list, and bulk
-transfer. The public facade requires `0x0000_01fc`; it does not require the
-memory or poll-once fixtures.
+ABI, generic operator construction, common mutations, bounded list, bulk
+transfer, and structured errors. The public facade requires `0x0000_03fc`; it
+does not require the memory or poll-once fixtures.
 
 ## Task and callback semantics
 

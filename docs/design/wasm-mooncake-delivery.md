@@ -144,11 +144,12 @@ uses the generic registry. The public MoonBit facade exposes:
 It exposes no synchronous storage method, `Operator::memory`, raw bridge or
 task handle, ABI/feature accessor, leak counter, or forced-pending diagnostic.
 
-The bridge ABI is `0x0001_0004`. The bridge reports `0x0000_01ff`: bits 0 and
+The bridge ABI is `0x0001_0005`. The bridge reports `0x0000_03ff`: bits 0 and
 1 are memory and poll-once fixture capabilities, followed by generation
 handles, binary buffers, task ABI, generic operator construction, common
-mutations, bounded list, and bulk transfer. The public facade requires
-`0x0000_01fc`; it is not coupled to the memory or poll-once fixture bits.
+mutations, bounded list, bulk transfer, and structured errors. The public
+facade requires `0x0000_03fc`; it is not coupled to the memory or poll-once
+fixture bits.
 
 Production task starts use `wasm_bindgen_futures::spawn_local` and await the
 OpenDAL future directly. A raw bridge-only test switch can wrap tasks started

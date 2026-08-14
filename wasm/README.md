@@ -24,7 +24,8 @@ The experimental public MoonBit package exposes:
   write, read, stat, bounded list, and delete operations;
 - a `Task` with `Pending`, `Completed`, `Cancelled`, and `Closed` states,
   plus idempotent logical cancellation and close;
-- owned `Bytes`, `Metadata`, `Entry`, `Capability`, and `WasmError` values;
+- owned `Bytes`, `Metadata`, `Entry`, `Capability`, and native-shaped
+  `OpenDalError`/`ErrorInfo` values;
 - explicit, idempotent `Operator::close()` and `AsyncOperator::close()`.
 
 The public MoonBit package intentionally does **not** expose synchronous
@@ -56,6 +57,12 @@ messages, metadata, errors, tasks, and completions are owned behind positive,
 generation-checked integer handles. Cross-module calls use fixed-width Wasm
 scalars. The loader instantiates Rust first, wires its exports and the host
 scheduler/copy functions into MoonBit, and owns instance teardown.
+
+OpenDAL failures cross that boundary as immutable, owned `ODE1` snapshots.
+MoonBit validates the versioned little-endian envelope and strict UTF-8 before
+constructing `OpenDalError`, then attaches the initiating operation, path, and
+destination. Malformed snapshots are binding ABI mismatches rather than
+partially decoded backend errors.
 
 Whole-object materialization is capped at 64 MiB. The loader copies at most
 256 KiB per call and recreates typed-array views for every window so
@@ -89,11 +96,12 @@ sequence yields to a real browser event loop. The Node check exercises real
 tasks and callbacks, but it neither enables the forced-pending hook nor makes
 a browser-heartbeat claim.
 
-The bridge ABI is version `0x0001_0004`. The bridge reports feature bitmap
-`0x0000_01ff`; bits 0 and 1 are the memory and poll-once fixture capabilities.
-The public facade requires only `0x0000_01fc` (generation handles, binary
-buffers, task ABI, generic operator construction, common mutations, bounded
-listing, and bounded bulk transfer).
+The bridge ABI is version `0x0001_0005`. The bridge reports feature bitmap
+`0x0000_03ff`; bits 0 and 1 are the memory and poll-once fixture capabilities,
+and bit 9 is structured error snapshots. The public facade requires only
+`0x0000_03fc` (generation handles, binary buffers, task ABI, generic operator
+construction, common mutations, bounded listing, bounded bulk transfer, and
+structured errors).
 
 The static snapshot is an implementation compatibility gate, not a release
 manifest: it does not yet provide artifact provenance, immutable release

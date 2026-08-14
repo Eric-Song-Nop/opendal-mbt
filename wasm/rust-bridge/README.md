@@ -52,13 +52,13 @@ feature profile does not alter the native package.
 
 ## ABI conventions
 
-- ABI version is `0x0001_0004` (major 1, minor 4).
-- The bridge reports feature flags `0x0000_01ff`: bit 0 memory fixture, bit 1
+- ABI version is `0x0001_0005` (major 1, minor 5).
+- The bridge reports feature flags `0x0000_03ff`: bit 0 memory fixture, bit 1
   poll-once fixture, bit 2 generation handles, bit 3 binary buffers, bit 4
   task ABI, bit 5 generic operator construction and inspection, bit 6 common
   create-dir/delete mutations, bit 7 bounded streaming list materialization,
-  and bit 8 bounded cross-memory transfer.
-- The public facade requires `0x0000_01fc`; memory and poll-once are not generic
+  bit 8 bounded cross-memory transfer, and bit 9 structured error snapshots.
+- The public facade requires `0x0000_03fc`; memory and poll-once are not generic
   facade requirements.
 - Handles are positive signed 32-bit values as well as valid `u32` values. The
   generation field is 15 bits so MoonBit can carry a handle in `Int` without
@@ -74,9 +74,10 @@ feature profile does not alter the native package.
 - `buffer_new_sized` allocates at most 64 MiB. `buffer_data_ptr` exposes a
   checked window of at most 256 KiB for one immediate synchronous host copy;
   the pointer is invalid after the next mutation or release of that buffer.
-- Asynchronous OpenDAL errors belong to their completion. Start/ABI misuse
-  errors use the bridge's sticky last-error slot until the MoonBit facade
-  copies them into an owned `WasmError`.
+- Asynchronous OpenDAL errors belong to their completion. Start failures use
+  the bridge's sticky last-error slot only until `last_error_take` moves the
+  error into an owned handle. MoonBit then consumes a structured snapshot and
+  constructs an immutable `OpenDalError`.
 - Lists publish atomically only below 65,536 entries and 16 MiB of combined
   path/name UTF-8. A backend request `limit` remains a service hint and does
   not replace those binding limits.
@@ -98,6 +99,18 @@ OpenDAL error, `9` poll-once operation became pending, `10` handle limit, `11`
 scalar length overflow, `12` task not ready, `13` task already consumed, `14`
 bridge torn down, `15` list materialization limit, `16` allocation failure,
 and `17` invalid scalar argument.
+
+Those scalar codes remain as a legacy low-level transport. Structured error
+snapshots preserve the stable OpenDAL kinds `1..12`, binding kinds
+`0x1001..0x1004`, statuses `1` permanent, `2` temporary, and `3` persistent,
+plus the OpenDAL kind name and diagnostic message. Unknown kind or status
+values fail open as `UnknownKind(code, name)` and `UnknownStatus(code)`.
+
+`opendal_mbt_wasm_error_snapshot_take` is the only ABI 1.5 export added to the
+bridge. Its versioned little-endian payload is `ODE1`, schema `1`, kind,
+status, kind-name length, message length, then strict UTF-8 kind-name and
+message bytes. A successful snapshot consumes the error handle; allocation or
+encoding failure leaves it intact.
 
 All exported symbols use the `opendal_mbt_wasm_` prefix. The committed static
 browser-memory contract records their exact current set, the module imports,
