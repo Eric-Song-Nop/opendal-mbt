@@ -1,0 +1,22 @@
+[package]
+name = "opendal-mbt-browser-bridge"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.91"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+futures-util = "=0.3.34"
+gloo-timers = { version = "=0.3.0", features = ["futures"] }
+opendal = { version = "=0.58.1", default-features = false, features = [
+  "http-transport-reqwest",
+  "services-memory",
+  "services-opfs",
+  "services-s3",
+] }
+thiserror = "=2.0.20"
+wasm-bindgen-futures = "=0.4.77"

@@ -1,5 +1,5 @@
 [workspace]
-members = ["native/rust"]
+members = ["native/rust", "wasm/browser-bridge"]
 resolver = "3"
 
 [profile.release]
