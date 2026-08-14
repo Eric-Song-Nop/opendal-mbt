@@ -313,12 +313,21 @@ async fn use_external_browser_assets(
 
 Do not mix files from different package releases: `Runtime::load` validates
 the ABI and required feature flags and reports mismatches as `AbiMismatch`.
+Call `Runtime::load` at most once for a given `bridge_module_url` during the
+lifetime of a page. Browser module loading caches the initialized wasm-bindgen
+exports by URL, and closing the runtime permanently tears that instance down.
+Share the returned runtime between operators; do not load the same bridge
+module URL concurrently or again after close. Use embedded `Runtime::new`
+through `AsyncOperator::new` when independently owned runtimes are needed.
 Close all child streams, writers, listers, and operators before their shared
 runtime. Closing an `AsyncOperator` created by `AsyncOperator::new` also closes
 its privately owned runtime; closing an operator obtained from `Runtime` does
 not close that shared runtime. Wait for in-flight calls before closing a parent;
 behavior of outstanding child work after parent close is deliberately not a
 portable cascade or cancellation guarantee.
+
+For a signature-by-signature target map, see the
+[Browser and JavaScript API reference](../docs/reference/browser-api.md).
 
 ## Browser and hosting requirements
 

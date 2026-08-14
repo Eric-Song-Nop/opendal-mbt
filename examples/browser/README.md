@@ -94,6 +94,8 @@ reader and writer futures rather than invoking the blocking facade on a worker
 thread. The native ABI tests separately reject a blocking completion
 descriptor and exercise full-pipe and closed-reader wakeups.
 
-The nested `moon.work` resolves `Eric-Song-Nop/opendal` to this checkout. This
-is necessary because the library module intentionally publishes packages only
-from its `src` directory, while examples remain outside the published module.
+In a source checkout, the nested `moon.work` resolves
+`Eric-Song-Nop/opendal` to the enclosing module. Moon excludes workspace files
+from published archives, but ships the rest of this Browser example; after the
+corresponding release exists, its pinned import resolves normally from the
+registry.

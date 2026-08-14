@@ -205,6 +205,8 @@ operation, and path on either target.
 
 ## Guides
 
+- [Documentation index](../docs/README.md) — user guides, target-specific API
+  reference, architecture contracts, release procedure, and examples.
 - [Getting started](getting-started.mbt.md) — install a published release or
   exercise the pinned `v0.2.0` candidate, then choose synchronous or async I/O.
 - [Connecting](connecting.mbt.md) — understand profiles and construct memory,

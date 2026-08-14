@@ -5,6 +5,18 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const packageListFlag = process.argv.indexOf("--package-list");
+let packagedFiles = null;
+if (packageListFlag !== -1) {
+  const packageListPath = process.argv[packageListFlag + 1];
+  if (!packageListPath) {
+    throw new Error("--package-list requires a path");
+  }
+  const packageList = await fs.readFile(packageListPath, "utf8");
+  packagedFiles = new Set(
+    packageList.split(/\r?\n/).map((line) => line.trim()).filter(Boolean),
+  );
+}
 
 async function collectMarkdown(relativeRoot, predicate) {
   const absoluteRoot = path.join(repoRoot, relativeRoot);
@@ -53,6 +65,48 @@ function githubSlug(text) {
     .replace(/\s+/g, "-");
 }
 
+function analyzeMarkdown(markdown) {
+  const visibleLines = [];
+  const bareMbtFenceLines = [];
+  let fence = null;
+
+  for (const [index, line] of markdown.split(/\r?\n/).entries()) {
+    if (fence !== null) {
+      const closing = line.match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/);
+      if (
+        closing !== null &&
+        closing[1][0] === fence.marker &&
+        closing[1].length >= fence.length
+      ) {
+        fence = null;
+      }
+      visibleLines.push("");
+      continue;
+    }
+
+    const opening = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+    if (
+      opening === null ||
+      (opening[1][0] === "`" && opening[2].includes("`"))
+    ) {
+      visibleLines.push(line);
+      continue;
+    }
+
+    fence = { marker: opening[1][0], length: opening[1].length };
+    if (opening[2].trim() === "mbt") {
+      bareMbtFenceLines.push(index + 1);
+    }
+    visibleLines.push("");
+  }
+
+  return {
+    visibleMarkdown: visibleLines.join("\n"),
+    bareMbtFenceLines,
+    hasUnclosedFence: fence !== null,
+  };
+}
+
 function anchorsFor(markdown) {
   const anchors = new Set();
   const occurrences = new Map();
@@ -73,18 +127,19 @@ function anchorsFor(markdown) {
 
 for (const relative of files) {
   const markdown = await fs.readFile(path.join(repoRoot, relative), "utf8");
-  documents.set(relative, { markdown, anchors: anchorsFor(markdown) });
-  const fences = markdown.split(/\r?\n/).filter((line) => /^\s*```/.test(line));
-  if (fences.length % 2 !== 0) {
+  const analysis = analyzeMarkdown(markdown);
+  documents.set(relative, {
+    markdown: analysis.visibleMarkdown,
+    anchors: anchorsFor(analysis.visibleMarkdown),
+  });
+  if (analysis.hasUnclosedFence) {
     errors.push(`${relative}: unbalanced fenced code block`);
   }
   if (relative.endsWith(".mbt.md")) {
-    for (const [index, line] of markdown.split(/\r?\n/).entries()) {
-      if (/^\s*```mbt(?:\s*)$/.test(line)) {
-        errors.push(
-          `${relative}:${index + 1}: use \`mbt check\` or \`mbt nocheck\` explicitly`,
-        );
-      }
+    for (const line of analysis.bareMbtFenceLines) {
+      errors.push(
+        `${relative}:${line}: use \`mbt check\` or \`mbt nocheck\` explicitly`,
+      );
     }
   }
 }
@@ -109,6 +164,7 @@ function localDestination(destination) {
 }
 
 for (const [relative, { markdown }] of documents) {
+  if (packagedFiles !== null && !packagedFiles.has(relative)) continue;
   const destinations = [];
   for (const match of markdown.matchAll(/!?\[[^\]]*\]\(([^)\n]+)\)/g)) {
     destinations.push({ raw: match[1], offset: match.index });
@@ -130,6 +186,17 @@ for (const [relative, { markdown }] of documents) {
       stat = await fs.stat(path.join(repoRoot, target));
     } catch {
       errors.push(`${relative}:${lineAt(offset)}: missing local link target ${destination}`);
+      continue;
+    }
+    const packagedTarget = target.split(path.sep).join("/");
+    const targetIsPackaged = packagedFiles === null ||
+      packagedFiles.has(packagedTarget) ||
+      (stat.isDirectory() &&
+        [...packagedFiles].some((file) => file.startsWith(`${packagedTarget}/`)));
+    if (!targetIsPackaged) {
+      errors.push(
+        `${relative}:${lineAt(offset)}: local link target is not published: ${destination}`,
+      );
       continue;
     }
     if (encodedAnchor && stat.isFile() && documents.has(target)) {
