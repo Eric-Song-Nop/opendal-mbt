@@ -46,7 +46,7 @@ local path strings are not interpreted as files.
 loader polls it again from a later zero-delay timer turn. A ready task receives
 its MoonBit callback, so delivery cannot re-enter the initiating call stack.
 
-Cancelling or closing a pending `Operation` deregisters its wait before the
+Cancelling or closing a pending `Task` deregisters its wait before the
 MoonBit facade cancels and releases the task. This prevents an already queued
 poll from touching a stale handle. `dispose()` is idempotent: it cancels every
 registered wait and permanently tears down the Rust instance, making late

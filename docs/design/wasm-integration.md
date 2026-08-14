@@ -62,7 +62,7 @@ The current experimental `/wasm` facade exposes:
 - `Operator::new(scheme, config)` and `Operator::info()`;
 - `create_dir_callback`, `write_callback`, `read_callback`, `stat_callback`,
   bounded `list_callback`, and `delete_callback` methods;
-- `Operation::state()`, logical `cancel()`, and `close()`;
+- `Task::state()`, logical `cancel()`, and `close()`;
 - owned `WasmError`, `Metadata`, `Entry`, `OperatorInfo`, and `Capability`
   values;
 - explicit `Operator::close()`.
@@ -158,7 +158,7 @@ memory or poll-once fixtures.
 ## Task and callback semantics
 
 Each public operation copies its inputs and clones its OpenDAL operator before
-returning an `Operation`. Rust schedules the future with `spawn_local` and, by
+returning a `Task`. Rust schedules the future with `spawn_local` and, by
 default, awaits it directly. A raw test-only switch can add a zero-delay wrapper
 to tasks started afterward, guaranteeing an observed first `Pending` poll. The
 Chrome canary enables this switch; production initialization does not.
@@ -172,7 +172,7 @@ The lifecycle contract is:
 ```text
 Pending -> Ready(Completion) -> Consumed -> released
 Pending or Ready -> Cancelled -> released
-MoonBit: Pending -> Completed | Cancelled -> Closed
+MoonBit Task: Pending -> Completed | Cancelled -> Closed
 ```
 
 - one task publishes at most one completion;

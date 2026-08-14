@@ -17,8 +17,8 @@ const COMPLETION_DELETE = 5U
 const COMPLETION_LIST = 6U
 
 ///|
-/// Return the local state of this experimental callback operation.
-pub fn Operation::state(self : Operation) -> OperationState {
+/// Return the local state of this experimental callback task.
+pub fn Task::state(self : Task) -> TaskState {
   self.state
 }
 
@@ -27,7 +27,7 @@ pub fn Operation::state(self : Operation) -> OperationState {
 ///
 /// Cancellation suppresses the user callback. The underlying browser I/O may
 /// continue, but any late completion is discarded by the bridge.
-pub fn Operation::cancel(self : Operation) -> Unit {
+pub fn Task::cancel(self : Task) -> Unit {
   if self.state is Pending && self.handle != 0U {
     host_cancel_wait(self.handle)
     ignore(bridge_task_cancel(self.handle))
@@ -38,10 +38,10 @@ pub fn Operation::cancel(self : Operation) -> Unit {
 }
 
 ///|
-/// Release this operation without delivering a later callback.
+/// Release this task without delivering a later callback.
 ///
 /// Closing more than once is harmless.
-pub fn Operation::close(self : Operation) -> Unit {
+pub fn Task::close(self : Task) -> Unit {
   if self.state is Pending {
     self.cancel()
     self.state = Closed
@@ -51,7 +51,7 @@ pub fn Operation::close(self : Operation) -> Unit {
 }
 
 ///|
-fn Operation::take_completion(self : Operation, task : UInt) -> UInt? {
+fn Task::take_completion(self : Task, task : UInt) -> UInt? {
   if self.state != Pending || self.handle != task {
     return None
   }
@@ -81,13 +81,13 @@ fn completion_error(
 }
 
 ///|
-fn start_wait(operation : Operation, finish : (UInt) -> Unit) -> Unit {
+fn start_wait(operation : Task, finish : (UInt) -> Unit) -> Unit {
   host_wait_task(operation.handle, finish)
 }
 
 ///|
 fn finish_unit_operation(
-  operation : Operation,
+  operation : Task,
   task : UInt,
   expected_kind : UInt,
   name : String,
@@ -131,7 +131,7 @@ pub fn Operator::write_callback(
   path : StringView,
   data : BytesView,
   callback : (Result[Unit, WasmError]) -> Unit,
-) -> Operation raise WasmError {
+) -> Task raise WasmError {
   if self.handle == 0U {
     raise WasmError(1, "operator is closed")
   }
@@ -149,7 +149,7 @@ pub fn Operator::write_callback(
   if task == 0U {
     raise_last_bridge_error("could not start an asynchronous write")
   }
-  let operation : Operation = { handle: task, state: Pending }
+  let operation : Task = { handle: task, state: Pending }
   start_wait(operation, task => {
     finish_unit_operation(operation, task, COMPLETION_WRITE, "write", callback)
   })
@@ -165,7 +165,7 @@ pub fn Operator::read_callback(
   self : Operator,
   path : StringView,
   callback : (Result[Bytes, WasmError]) -> Unit,
-) -> Operation raise WasmError {
+) -> Task raise WasmError {
   if self.handle == 0U {
     raise WasmError(1, "operator is closed")
   }
@@ -176,7 +176,7 @@ pub fn Operator::read_callback(
   if task == 0U {
     raise_last_bridge_error("could not start an asynchronous read")
   }
-  let operation : Operation = { handle: task, state: Pending }
+  let operation : Task = { handle: task, state: Pending }
   start_wait(operation, task => {
     match operation.take_completion(task) {
       None =>
@@ -227,7 +227,7 @@ pub fn Operator::stat_callback(
   self : Operator,
   path : StringView,
   callback : (Result[Metadata, WasmError]) -> Unit,
-) -> Operation raise WasmError {
+) -> Task raise WasmError {
   if self.handle == 0U {
     raise WasmError(1, "operator is closed")
   }
@@ -238,7 +238,7 @@ pub fn Operator::stat_callback(
   if task == 0U {
     raise_last_bridge_error("could not start an asynchronous stat")
   }
-  let operation : Operation = { handle: task, state: Pending }
+  let operation : Task = { handle: task, state: Pending }
   start_wait(operation, task => {
     match operation.take_completion(task) {
       None =>
@@ -298,7 +298,7 @@ pub fn Operator::create_dir_callback(
   self : Operator,
   path : StringView,
   callback : (Result[Unit, WasmError]) -> Unit,
-) -> Operation raise WasmError {
+) -> Task raise WasmError {
   if self.handle == 0U {
     raise WasmError(1, "operator is closed")
   }
@@ -309,7 +309,7 @@ pub fn Operator::create_dir_callback(
   if task == 0U {
     raise_last_bridge_error("could not start asynchronous directory creation")
   }
-  let operation : Operation = { handle: task, state: Pending }
+  let operation : Task = { handle: task, state: Pending }
   start_wait(operation, task => {
     finish_unit_operation(
       operation,
@@ -334,7 +334,7 @@ pub fn Operator::delete_callback(
   callback : (Result[Unit, WasmError]) -> Unit,
   version? : StringView,
   recursive? : Bool = false,
-) -> Operation raise WasmError {
+) -> Task raise WasmError {
   if self.handle == 0U {
     raise WasmError(1, "operator is closed")
   }
@@ -363,7 +363,7 @@ pub fn Operator::delete_callback(
   if task == 0U {
     raise_last_bridge_error("could not start an asynchronous delete")
   }
-  let operation : Operation = { handle: task, state: Pending }
+  let operation : Task = { handle: task, state: Pending }
   start_wait(operation, task => {
     finish_unit_operation(
       operation,
@@ -437,7 +437,7 @@ pub fn Operator::list_callback(
   recursive? : Bool = false,
   limit? : UInt64,
   start_after? : StringView,
-) -> Operation raise WasmError {
+) -> Task raise WasmError {
   if self.handle == 0U {
     raise WasmError(1, "operator is closed")
   }
@@ -468,7 +468,7 @@ pub fn Operator::list_callback(
   if task == 0U {
     raise_last_bridge_error("could not start an asynchronous list")
   }
-  let operation : Operation = { handle: task, state: Pending }
+  let operation : Task = { handle: task, state: Pending }
   start_wait(operation, task => {
     match operation.take_completion(task) {
       None =>

@@ -136,7 +136,7 @@ uses the generic registry. The public MoonBit facade exposes:
 - `Operator::new(scheme, config)` and `Operator::info()`;
 - `create_dir_callback`, `write_callback`, `read_callback`, `stat_callback`,
   bounded `list_callback`, and `delete_callback`;
-- `Operation` states `Pending`, `Completed`, `Cancelled`, and `Closed`;
+- `Task` states `Pending`, `Completed`, `Cancelled`, and `Closed`;
 - logical cancellation, explicit close, owned errors, metadata, entries, and
   capabilities.
 
@@ -232,8 +232,8 @@ let operation = operator.read_callback("hello.txt", result => {
 ```
 
 `create_dir_callback`, `write_callback`, `stat_callback`, `list_callback`, and
-`delete_callback` follow the same lifecycle. `Operation::cancel()` and
-`Operation::close()` are idempotent. Cancellation suppresses callback delivery
+`delete_callback` follow the same lifecycle. `Task::cancel()` and
+`Task::close()` are idempotent. Cancellation suppresses callback delivery
 and discards a late result; it does not claim to abort the underlying OpenDAL
 future or browser API.
 
@@ -308,7 +308,7 @@ the callback never re-enters the initiating MoonBit/Rust stack.
 ```text
 task: Pending -> Ready(Completion) -> Consumed -> released
 task: Pending or Ready -> Cancelled -> released
-MoonBit Operation: Pending -> Completed | Cancelled -> Closed
+MoonBit Task: Pending -> Completed | Cancelled -> Closed
 ```
 
 The current contract guarantees:

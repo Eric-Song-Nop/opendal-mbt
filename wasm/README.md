@@ -22,7 +22,7 @@ The experimental public MoonBit package exposes:
   capabilities reported by OpenDAL;
 - `create_dir_callback`, `write_callback`, `read_callback`, `stat_callback`,
   bounded `list_callback`, and `delete_callback` operations;
-- an `Operation` with `Pending`, `Completed`, `Cancelled`, and `Closed` states,
+- a `Task` with `Pending`, `Completed`, `Cancelled`, and `Closed` states,
   plus idempotent logical cancellation and close;
 - owned `Bytes`, `Metadata`, `Entry`, `Capability`, and `WasmError` values;
 - explicit, idempotent `Operator::close()`.

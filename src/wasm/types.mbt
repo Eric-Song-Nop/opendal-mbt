@@ -188,8 +188,8 @@ pub struct Operator {
 }
 
 ///|
-/// Observable state of an experimental callback operation.
-pub enum OperationState {
+/// Observable state of an experimental callback task.
+pub enum TaskState {
   Pending
   Completed
   Cancelled
@@ -197,11 +197,11 @@ pub enum OperationState {
 } derive(Eq, Debug)
 
 ///|
-/// A cancellable browser operation driven by the official loader.
+/// A cancellable browser task driven by the official loader.
 ///
 /// This callback surface is experimental until MoonBit exposes a documented
 /// continuation API for ordinary browser Wasm hosts.
-pub struct Operation {
+pub struct Task {
   priv mut handle : UInt
-  priv mut state : OperationState
+  priv mut state : TaskState
 }

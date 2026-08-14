@@ -74,7 +74,7 @@ let async_stage : Ref[Int] = Ref(ASYNC_IDLE)
 let async_operator : Ref[@opendal.Operator?] = Ref(None)
 
 ///|
-let async_operation : Ref[@opendal.Operation?] = Ref(None)
+let async_operation : Ref[@opendal.Task?] = Ref(None)
 
 ///|
 let cancel_callback_count : Ref[Int] = Ref(0)
@@ -83,7 +83,7 @@ let cancel_callback_count : Ref[Int] = Ref(0)
 let cancel_operator : Ref[@opendal.Operator?] = Ref(None)
 
 ///|
-let cancel_operation : Ref[@opendal.Operation?] = Ref(None)
+let cancel_operation : Ref[@opendal.Task?] = Ref(None)
 
 ///|
 let ready_callback_count : Ref[Int] = Ref(0)
@@ -95,7 +95,7 @@ let ready_callback_ok : Ref[Bool] = Ref(false)
 let ready_operator : Ref[@opendal.Operator?] = Ref(None)
 
 ///|
-let ready_operation : Ref[@opendal.Operation?] = Ref(None)
+let ready_operation : Ref[@opendal.Task?] = Ref(None)
 
 ///|
 let multi_stage : Ref[Int] = Ref(RACE_IDLE)
@@ -113,10 +113,10 @@ let multi_operator_one : Ref[@opendal.Operator?] = Ref(None)
 let multi_operator_two : Ref[@opendal.Operator?] = Ref(None)
 
 ///|
-let multi_operation_one : Ref[@opendal.Operation?] = Ref(None)
+let multi_operation_one : Ref[@opendal.Task?] = Ref(None)
 
 ///|
-let multi_operation_two : Ref[@opendal.Operation?] = Ref(None)
+let multi_operation_two : Ref[@opendal.Task?] = Ref(None)
 
 ///|
 let dispose_callback_count : Ref[Int] = Ref(0)
@@ -125,7 +125,7 @@ let dispose_callback_count : Ref[Int] = Ref(0)
 let dispose_operator : Ref[@opendal.Operator?] = Ref(None)
 
 ///|
-let dispose_operation : Ref[@opendal.Operation?] = Ref(None)
+let dispose_operation : Ref[@opendal.Task?] = Ref(None)
 
 ///|
 let bulk_stage : Ref[Int] = Ref(BULK_IDLE)
@@ -134,7 +134,7 @@ let bulk_stage : Ref[Int] = Ref(BULK_IDLE)
 let bulk_operator : Ref[@opendal.Operator?] = Ref(None)
 
 ///|
-let bulk_operation : Ref[@opendal.Operation?] = Ref(None)
+let bulk_operation : Ref[@opendal.Task?] = Ref(None)
 
 ///|
 fn fail_async_lifecycle() -> Unit {
@@ -398,7 +398,7 @@ pub fn canary_cancel_callback_count() -> Int {
 }
 
 ///|
-fn operation_state_code(operation : @opendal.Operation) -> Int {
+fn operation_state_code(operation : @opendal.Task) -> Int {
   match operation.state() {
     Pending => RACE_PENDING
     Completed => RACE_COMPLETED
