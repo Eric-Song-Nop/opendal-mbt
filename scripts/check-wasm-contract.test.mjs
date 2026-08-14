@@ -260,3 +260,92 @@ test("exact import and export snapshots reject surface drift", () => {
     /Rust bridge exports changed/,
   );
 });
+
+test("wasm-bindgen closure hashes may vary while kind and count remain exact", () => {
+  const rust = {
+    imports: [],
+    exports: [
+      { name: "bridge_call", kind: "function" },
+      {
+        name: "wasm_bindgen__convert__closures_____invoke__h0d75f8712a5f6417",
+        kind: "function",
+      },
+      {
+        name: "wasm_bindgen__convert__closures_____invoke__hacf999f7d4cb3596",
+        kind: "function",
+      },
+      { name: "memory", kind: "memory" },
+    ],
+    defined_memories: [{ minimum_pages: 1, maximum_pages: null }],
+    sizes: { raw: 100, gzip: 80, brotli: 70 },
+  };
+  const glue = { raw: 20, gzip: 10, brotli: 9 };
+  const moon = {
+    imports: [
+      {
+        module: "opendal_mbt_bridge",
+        name: "bridge_call",
+        kind: "function",
+      },
+    ],
+    exports: [{ name: "memory", kind: "memory" }],
+    defined_memories: [{ minimum_pages: 1, maximum_pages: null }],
+    sizes: { raw: 50, gzip: 30, brotli: 25 },
+  };
+  const snapshot = makeSnapshot(rust, glue, moon);
+  assert.deepEqual(snapshot.artifacts.rust_bridge.generated_exports, [
+    {
+      name_prefix: "wasm_bindgen__convert__closures_____invoke__h",
+      hash_encoding: "lower_hex_16",
+      kind: "function",
+      count: 2,
+    },
+  ]);
+
+  const platformVariant = {
+    ...rust,
+    exports: rust.exports.map((entry) => {
+      if (entry.name.endsWith("0d75f8712a5f6417")) {
+        return {
+          ...entry,
+          name: "wasm_bindgen__convert__closures_____invoke__h5ed240abe4fef72e",
+        };
+      }
+      if (entry.name.endsWith("acf999f7d4cb3596")) {
+        return {
+          ...entry,
+          name: "wasm_bindgen__convert__closures_____invoke__ha938a1bf75da0f4f",
+        };
+      }
+      return entry;
+    }),
+  };
+  assert.doesNotThrow(() => checkContract(snapshot, platformVariant, glue, moon));
+
+  const unexpectedProjectExport = {
+    ...platformVariant,
+    exports: [
+      ...platformVariant.exports,
+      { name: "opendal_mbt_wasm_unreviewed_call", kind: "function" },
+    ],
+  };
+  assert.throws(
+    () => checkContract(snapshot, unexpectedProjectExport, glue, moon),
+    /Rust bridge exports changed/,
+  );
+
+  const extraGeneratedExport = {
+    ...platformVariant,
+    exports: [
+      ...platformVariant.exports,
+      {
+        name: "wasm_bindgen__convert__closures_____invoke__h0123456789abcdef",
+        kind: "function",
+      },
+    ],
+  };
+  assert.throws(
+    () => checkContract(snapshot, extraGeneratedExport, glue, moon),
+    /Rust bridge generated exports changed/,
+  );
+});

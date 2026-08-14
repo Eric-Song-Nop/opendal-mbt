@@ -13,6 +13,16 @@ const WASM_HEADER = Uint8Array.of(0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00
 const MEMORY_SECTION = 5;
 const LAST_KNOWN_SECTION = 13;
 const BRIDGE_IMPORT_MODULE = "opendal_mbt_bridge";
+const CONTRACT_SCHEMA_VERSION = 2;
+
+const GENERATED_EXPORT_RULES = Object.freeze([
+  Object.freeze({
+    name_prefix: "wasm_bindgen__convert__closures_____invoke__h",
+    hash_encoding: "lower_hex_16",
+    kind: "function",
+    name_pattern: /^wasm_bindgen__convert__closures_____invoke__h[0-9a-f]{16}$/,
+  }),
+]);
 
 const DEFAULT_SIZE_CAPS = Object.freeze({
   rust_bridge: Object.freeze({ raw: 1_100_000, gzip: 360_000, brotli: 280_000 }),
@@ -161,6 +171,42 @@ function canonicalExports(module) {
     .sort(compareExport);
 }
 
+function contractExports(exports) {
+  const exact = [];
+  const counts = new Map(GENERATED_EXPORT_RULES.map((rule) => [rule, 0]));
+
+  for (const entry of exports) {
+    const rule = GENERATED_EXPORT_RULES.find(({ name_pattern }) =>
+      name_pattern.test(entry.name)
+    );
+    if (rule === undefined) {
+      exact.push(entry);
+      continue;
+    }
+    if (entry.kind !== rule.kind) {
+      throw new Error(
+        `generated Wasm export ${entry.name} must have kind ${rule.kind}, got ${entry.kind}`,
+      );
+    }
+    counts.set(rule, counts.get(rule) + 1);
+  }
+
+  return {
+    exact,
+    generated: GENERATED_EXPORT_RULES.flatMap((rule) => {
+      const count = counts.get(rule);
+      return count === 0
+        ? []
+        : [{
+            name_prefix: rule.name_prefix,
+            hash_encoding: rule.hash_encoding,
+            kind: rule.kind,
+            count,
+          }];
+    }),
+  };
+}
+
 export function compressedSizes(bytes) {
   return {
     raw: bytes.byteLength,
@@ -267,9 +313,11 @@ function assertObservedSizes(label, observedSizes) {
 }
 
 function snapshotEntry(inspection, sizeCaps) {
+  const exports = contractExports(inspection.exports);
   return {
     imports: inspection.imports,
-    exports: inspection.exports,
+    exports: exports.exact,
+    generated_exports: exports.generated,
     defined_memories: inspection.defined_memories,
     observed_sizes: inspection.sizes,
     size_caps: sizeCaps,
@@ -278,7 +326,7 @@ function snapshotEntry(inspection, sizeCaps) {
 
 export function makeSnapshot(rustInspection, rustGlueSizes, moonInspection) {
   return {
-    schema_version: 1,
+    schema_version: CONTRACT_SCHEMA_VERSION,
     bridge_import_module: BRIDGE_IMPORT_MODULE,
     artifacts: {
       rust_bridge: snapshotEntry(rustInspection, DEFAULT_SIZE_CAPS.rust_bridge),
@@ -292,7 +340,7 @@ export function makeSnapshot(rustInspection, rustGlueSizes, moonInspection) {
 }
 
 export function checkContract(snapshot, rustInspection, rustGlueSizes, moonInspection) {
-  if (snapshot?.schema_version !== 1) {
+  if (snapshot?.schema_version !== CONTRACT_SCHEMA_VERSION) {
     throw new Error(`unsupported Wasm contract schema ${snapshot?.schema_version}`);
   }
   if (snapshot.bridge_import_module !== BRIDGE_IMPORT_MODULE) {
@@ -323,8 +371,15 @@ export function checkContract(snapshot, rustInspection, rustGlueSizes, moonInspe
     ["Rust bridge", expectedRust, rustInspection],
     ["MoonBit canary", expectedMoon, moonInspection],
   ]) {
+    const exports = contractExports(actual.exports);
     assertExact(label, "imports", expected.imports, actual.imports);
-    assertExact(label, "exports", expected.exports, actual.exports);
+    assertExact(label, "exports", expected.exports, exports.exact);
+    assertExact(
+      label,
+      "generated exports",
+      expected.generated_exports,
+      exports.generated,
+    );
     assertExact(
       label,
       "defined memory limits",

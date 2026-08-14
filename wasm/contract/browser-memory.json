@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "bridge_import_module": "opendal_mbt_bridge",
   "artifacts": {
     "rust_bridge": {
@@ -374,14 +374,14 @@
         {
           "name": "opendal_mbt_wasm_teardown",
           "kind": "function"
-        },
+        }
+      ],
+      "generated_exports": [
         {
-          "name": "wasm_bindgen__convert__closures_____invoke__h0d75f8712a5f6417",
-          "kind": "function"
-        },
-        {
-          "name": "wasm_bindgen__convert__closures_____invoke__hacf999f7d4cb3596",
-          "kind": "function"
+          "name_prefix": "wasm_bindgen__convert__closures_____invoke__h",
+          "hash_encoding": "lower_hex_16",
+          "kind": "function",
+          "count": 2
         }
       ],
       "defined_memories": [
@@ -738,6 +738,7 @@
           "kind": "function"
         }
       ],
+      "generated_exports": [],
       "defined_memories": [
         {
           "minimum_pages": 1,
