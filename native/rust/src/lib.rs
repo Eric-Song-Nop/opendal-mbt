@@ -4,7 +4,7 @@
 
 mod abi;
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::ffi::c_void;
 use std::future::Future;
 use std::mem::{align_of, offset_of, size_of};
@@ -33,6 +33,9 @@ use tokio::runtime::Runtime;
 use tokio::task::AbortHandle;
 
 const MAX_OUTPUT_BYTES: u64 = i32::MAX as u64;
+const MAX_ASYNC_LIST_ENTRIES: usize = 65_536;
+const MAX_ASYNC_LIST_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
+const METADATA_SNAPSHOT_FIXED_BYTES: usize = 84;
 const BINDING_VERSION: &str = env!("CARGO_PKG_VERSION");
 const OPENDAL_VERSION: &str = "0.58.1";
 #[cfg(feature = "profile-standard")]
@@ -256,6 +259,8 @@ struct StructHeaderV1 {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AsyncResultKind {
     Buffer,
+    Bool,
+    Lister,
     Metadata,
     ReadStream,
     Writer,
@@ -265,6 +270,8 @@ enum AsyncResultKind {
 enum AsyncPayload {
     None,
     Buffer(Box<BufferV1>),
+    Bool(u32),
+    Lister(Box<ListerV1>),
     Metadata(Box<MetadataV1>),
     ReadStream(Box<AsyncReadStreamV1>),
     Writer(Box<AsyncWriterV1>),
@@ -2034,7 +2041,9 @@ fn close_lister_state(lister: &ListerV1) {
         lister.state.clear_poison();
         match previous {
             ListerStateV1::Open(inner) => Some(inner),
-            ListerStateV1::Exhausted | ListerStateV1::Closed => None,
+            ListerStateV1::Materialized(_) | ListerStateV1::Exhausted | ListerStateV1::Closed => {
+                None
+            }
         }
     };
     if let Some(inner) = open {
@@ -3829,6 +3838,15 @@ unsafe extern "C" fn lister_next(
         let current = std::mem::replace(&mut *state, ListerStateV1::Exhausted);
         let mut inner = match current {
             ListerStateV1::Open(inner) => inner,
+            ListerStateV1::Materialized(mut entries) => match entries.pop_front() {
+                Some(entry) => {
+                    *state = ListerStateV1::Materialized(entries);
+                    // SAFETY: the output was validated and remains exclusively writable.
+                    unsafe { out_entry.write(Box::into_raw(Box::new(entry))) };
+                    return STATUS_OK;
+                }
+                None => return STATUS_END,
+            },
             ListerStateV1::Exhausted => return STATUS_END,
             ListerStateV1::Closed => {
                 *state = ListerStateV1::Closed;
@@ -5106,6 +5124,441 @@ unsafe fn finish_async_payload_take<T>(
     }
 }
 
+unsafe fn finish_async_task_start(
+    out_task: *mut *mut AsyncTaskV1,
+    out_error: *mut *mut ErrorV1,
+    start: impl FnOnce() -> CallResult<Box<AsyncTaskV1>>,
+) -> Status {
+    // SAFETY: outputs are cleared before inputs are inspected or work starts.
+    let outputs = [
+        unsafe { clear_required_output(out_task, ptr::null_mut()) },
+        unsafe { clear_error_output(out_error) },
+    ];
+    if let Err(failure) = combine_output_validation(outputs) {
+        return unsafe { finish_failure(failure, out_error) };
+    }
+    match start() {
+        Ok(task) => {
+            // SAFETY: required output was validated above.
+            unsafe { out_task.write(Box::into_raw(task)) };
+            STATUS_OK
+        }
+        Err(failure) => unsafe { finish_failure(failure, out_error) },
+    }
+}
+
+fn async_outcome<T>(
+    kind: AsyncResultKind,
+    result: CallResult<T>,
+    into_payload: impl FnOnce(T) -> AsyncPayload,
+) -> AsyncOutcome {
+    match result {
+        Ok(value) => AsyncOutcome::success(kind, into_payload(value)),
+        Err(failure) => AsyncOutcome::failure(kind, failure),
+    }
+}
+
+fn abi_visible_metadata_snapshot(metadata: &Metadata) -> Metadata {
+    let mut snapshot = Metadata::new(metadata.mode())
+        .with_is_current(metadata.is_current())
+        .with_is_deleted(metadata.is_deleted())
+        .with_content_length(metadata.content_length());
+    if let Some(value) = metadata.last_modified() {
+        snapshot.set_last_modified(value);
+    }
+    if let Some(value) = metadata.cache_control() {
+        snapshot.set_cache_control(value);
+    }
+    if let Some(value) = metadata.content_disposition() {
+        snapshot.set_content_disposition(value);
+    }
+    if let Some(value) = metadata.content_encoding() {
+        snapshot.set_content_encoding(value);
+    }
+    if let Some(value) = metadata.content_md5() {
+        snapshot.set_content_md5(value);
+    }
+    if let Some(value) = metadata.content_type() {
+        snapshot.set_content_type(value);
+    }
+    if let Some(value) = metadata.etag() {
+        snapshot.set_etag(value);
+    }
+    if let Some(value) = metadata.version() {
+        snapshot.set_version(value);
+    }
+    snapshot
+}
+
+fn async_list_entry_snapshot(mut entry: EntryV1) -> EntryV1 {
+    entry.metadata = abi_visible_metadata_snapshot(&entry.metadata);
+    entry
+}
+
+fn async_list_entry_bytes(entry: &EntryV1) -> CallResult<usize> {
+    let metadata = &entry.metadata;
+    let mut total = METADATA_SNAPSHOT_FIXED_BYTES
+        .checked_add(entry.path.len())
+        .and_then(|value| value.checked_add(entry.name.len()))
+        .ok_or_else(|| buffer_too_large("async list result size overflowed"))?;
+    for value in [
+        metadata.cache_control(),
+        metadata.content_disposition(),
+        metadata.content_encoding(),
+        metadata.content_md5(),
+        metadata.content_type(),
+        metadata.etag(),
+        metadata.version(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        total = total
+            .checked_add(value.len())
+            .ok_or_else(|| buffer_too_large("async list result size overflowed"))?;
+    }
+    Ok(total)
+}
+
+fn async_list_next_total(
+    entry_count: usize,
+    total_bytes: usize,
+    entry: &EntryV1,
+) -> CallResult<usize> {
+    let next_bytes = total_bytes
+        .checked_add(async_list_entry_bytes(entry)?)
+        .ok_or_else(|| buffer_too_large("async list result size overflowed"))?;
+    if entry_count >= MAX_ASYNC_LIST_ENTRIES || next_bytes > MAX_ASYNC_LIST_OUTPUT_BYTES {
+        return Err(buffer_too_large(format!(
+            "async list exceeds {MAX_ASYNC_LIST_ENTRIES} entries or {MAX_ASYNC_LIST_OUTPUT_BYTES} owned bytes"
+        )));
+    }
+    Ok(next_bytes)
+}
+
+async fn collect_async_lister(
+    operator: opendal::Operator,
+    path: String,
+    options: ListOptions,
+) -> CallResult<Box<ListerV1>> {
+    let mut lister = operator
+        .lister_options(&path, options)
+        .await
+        .map_err(opendal_error)?;
+    let mut entries = VecDeque::new();
+    let mut total_bytes = 0usize;
+    while let Some(entry) = lister.try_next().await.map_err(opendal_error)? {
+        let entry = async_list_entry_snapshot(checked_entry(entry)?);
+        let next_bytes = async_list_next_total(entries.len(), total_bytes, &entry)?;
+        entries.try_reserve(1).map_err(|_| {
+            binding_error(
+                ERROR_UNEXPECTED,
+                "Unexpected",
+                "async list could not reserve owned entry storage",
+            )
+        })?;
+        entries.push_back(entry);
+        total_bytes = next_bytes;
+    }
+    Ok(Box::new(ListerV1 {
+        state: Mutex::new(ListerStateV1::Materialized(entries)),
+    }))
+}
+
+unsafe extern "C" fn async_operator_check_start(
+    operator: *mut OperatorV1,
+    completion_fd: i32,
+    out_task: *mut *mut AsyncTaskV1,
+    out_error: *mut *mut ErrorV1,
+) -> Status {
+    catch_status(|| {
+        let start = || {
+            // SAFETY: opaque handle validity is a caller lifetime obligation.
+            let operator = unsafe { borrow_required(operator.cast_const())? }
+                .async_inner
+                .clone();
+            let launch = AsyncLaunch::prepare(completion_fd)?;
+            let future = async move {
+                async_outcome(
+                    AsyncResultKind::Unit,
+                    operator.check().await.map_err(opendal_error),
+                    |_| AsyncPayload::Unit,
+                )
+            };
+            let (task, _) = launch.spawn(AsyncResultKind::Unit, None, future);
+            Ok(task)
+        };
+        // SAFETY: output pointer validity is part of this extern function's caller contract.
+        unsafe { finish_async_task_start(out_task, out_error, start) }
+    })
+}
+
+unsafe extern "C" fn async_operator_exists_start(
+    operator: *mut OperatorV1,
+    path: *const BytesViewV1,
+    completion_fd: i32,
+    out_task: *mut *mut AsyncTaskV1,
+    out_error: *mut *mut ErrorV1,
+) -> Status {
+    catch_status(|| {
+        let start = || {
+            // SAFETY: the handle and path carrier are copied synchronously.
+            let operator = unsafe { borrow_required(operator.cast_const())? }
+                .async_inner
+                .clone();
+            let path = unsafe { read_text(path, "path")? };
+            let launch = AsyncLaunch::prepare(completion_fd)?;
+            let future = async move {
+                async_outcome(
+                    AsyncResultKind::Bool,
+                    operator.exists(&path).await.map_err(opendal_error),
+                    |exists| AsyncPayload::Bool(u32::from(exists)),
+                )
+            };
+            let (task, _) = launch.spawn(AsyncResultKind::Bool, None, future);
+            Ok(task)
+        };
+        // SAFETY: output pointer validity is part of this extern function's caller contract.
+        unsafe { finish_async_task_start(out_task, out_error, start) }
+    })
+}
+
+unsafe extern "C" fn async_operator_stat_start(
+    operator: *mut OperatorV1,
+    path: *const BytesViewV1,
+    options: *const StatOptionsV1,
+    completion_fd: i32,
+    out_task: *mut *mut AsyncTaskV1,
+    out_error: *mut *mut ErrorV1,
+) -> Status {
+    catch_status(|| {
+        let start = || {
+            // SAFETY: the handle, path, and option carriers are copied now.
+            let operator = unsafe { borrow_required(operator.cast_const())? }
+                .async_inner
+                .clone();
+            let path = unsafe { read_text(path, "path")? };
+            let options = unsafe { parse_stat_options(options)? };
+            let launch = AsyncLaunch::prepare(completion_fd)?;
+            let future = async move {
+                let result = operator
+                    .stat_options(&path, options)
+                    .await
+                    .map_err(opendal_error)
+                    .and_then(checked_metadata)
+                    .map(Box::new);
+                async_outcome(AsyncResultKind::Metadata, result, AsyncPayload::Metadata)
+            };
+            let (task, _) = launch.spawn(AsyncResultKind::Metadata, None, future);
+            Ok(task)
+        };
+        // SAFETY: output pointer validity is part of this extern function's caller contract.
+        unsafe { finish_async_task_start(out_task, out_error, start) }
+    })
+}
+
+unsafe extern "C" fn async_operator_write_start(
+    operator: *mut OperatorV1,
+    path: *const BytesViewV1,
+    data: *const BytesViewV1,
+    options: *const WriteOptionsV1,
+    completion_fd: i32,
+    out_task: *mut *mut AsyncTaskV1,
+    out_error: *mut *mut ErrorV1,
+) -> Status {
+    catch_status(|| {
+        let start = || {
+            // SAFETY: the handle, path, bytes, and option carriers are copied now.
+            let operator = unsafe { borrow_required(operator.cast_const())? }
+                .async_inner
+                .clone();
+            let path = unsafe { read_text(path, "path")? };
+            let data = unsafe { read_binary(data)? };
+            let options = unsafe { parse_write_options(options)? };
+            let launch = AsyncLaunch::prepare(completion_fd)?;
+            let future = async move {
+                let result = operator
+                    .write_options(&path, data, options)
+                    .await
+                    .map_err(opendal_error)
+                    .and_then(checked_metadata)
+                    .map(Box::new);
+                async_outcome(AsyncResultKind::Metadata, result, AsyncPayload::Metadata)
+            };
+            let (task, _) = launch.spawn(AsyncResultKind::Metadata, None, future);
+            Ok(task)
+        };
+        // SAFETY: output pointer validity is part of this extern function's caller contract.
+        unsafe { finish_async_task_start(out_task, out_error, start) }
+    })
+}
+
+unsafe extern "C" fn async_operator_create_dir_start(
+    operator: *mut OperatorV1,
+    path: *const BytesViewV1,
+    completion_fd: i32,
+    out_task: *mut *mut AsyncTaskV1,
+    out_error: *mut *mut ErrorV1,
+) -> Status {
+    catch_status(|| {
+        let start = || {
+            // SAFETY: the handle and path carrier are copied synchronously.
+            let operator = unsafe { borrow_required(operator.cast_const())? }
+                .async_inner
+                .clone();
+            let path = unsafe { read_text(path, "path")? };
+            let launch = AsyncLaunch::prepare(completion_fd)?;
+            let future = async move {
+                async_outcome(
+                    AsyncResultKind::Unit,
+                    operator.create_dir(&path).await.map_err(opendal_error),
+                    |_| AsyncPayload::Unit,
+                )
+            };
+            let (task, _) = launch.spawn(AsyncResultKind::Unit, None, future);
+            Ok(task)
+        };
+        // SAFETY: output pointer validity is part of this extern function's caller contract.
+        unsafe { finish_async_task_start(out_task, out_error, start) }
+    })
+}
+
+unsafe extern "C" fn async_operator_delete_start(
+    operator: *mut OperatorV1,
+    path: *const BytesViewV1,
+    options: *const DeleteOptionsV1,
+    completion_fd: i32,
+    out_task: *mut *mut AsyncTaskV1,
+    out_error: *mut *mut ErrorV1,
+) -> Status {
+    catch_status(|| {
+        let start = || {
+            // SAFETY: the handle, path, and option carriers are copied now.
+            let operator = unsafe { borrow_required(operator.cast_const())? }
+                .async_inner
+                .clone();
+            let path = unsafe { read_text(path, "path")? };
+            let options = unsafe { parse_delete_options(options)? };
+            let launch = AsyncLaunch::prepare(completion_fd)?;
+            let future = async move {
+                async_outcome(
+                    AsyncResultKind::Unit,
+                    operator
+                        .delete_options(&path, options)
+                        .await
+                        .map_err(opendal_error),
+                    |_| AsyncPayload::Unit,
+                )
+            };
+            let (task, _) = launch.spawn(AsyncResultKind::Unit, None, future);
+            Ok(task)
+        };
+        // SAFETY: output pointer validity is part of this extern function's caller contract.
+        unsafe { finish_async_task_start(out_task, out_error, start) }
+    })
+}
+
+unsafe extern "C" fn async_operator_list_start(
+    operator: *mut OperatorV1,
+    path: *const BytesViewV1,
+    options: *const ListOptionsV1,
+    completion_fd: i32,
+    out_task: *mut *mut AsyncTaskV1,
+    out_error: *mut *mut ErrorV1,
+) -> Status {
+    catch_status(|| {
+        let start = || {
+            // SAFETY: the handle, path, and option carriers are copied now.
+            let operator = unsafe { borrow_required(operator.cast_const())? }
+                .async_inner
+                .clone();
+            let path = unsafe { read_text(path, "path")? };
+            let options = unsafe { parse_list_options(options)? };
+            let launch = AsyncLaunch::prepare(completion_fd)?;
+            let future = async move {
+                async_outcome(
+                    AsyncResultKind::Lister,
+                    collect_async_lister(operator, path, options).await,
+                    AsyncPayload::Lister,
+                )
+            };
+            let (task, _) = launch.spawn(AsyncResultKind::Lister, None, future);
+            Ok(task)
+        };
+        // SAFETY: output pointer validity is part of this extern function's caller contract.
+        unsafe { finish_async_task_start(out_task, out_error, start) }
+    })
+}
+
+unsafe extern "C" fn async_operator_copy_start(
+    operator: *mut OperatorV1,
+    source: *const BytesViewV1,
+    destination: *const BytesViewV1,
+    completion_fd: i32,
+    out_task: *mut *mut AsyncTaskV1,
+    out_error: *mut *mut ErrorV1,
+) -> Status {
+    catch_status(|| {
+        let start = || {
+            // SAFETY: the handle and both path carriers are copied synchronously.
+            let operator = unsafe { borrow_required(operator.cast_const())? }
+                .async_inner
+                .clone();
+            let source = unsafe { read_text(source, "source path")? };
+            let destination = unsafe { read_text(destination, "destination path")? };
+            let launch = AsyncLaunch::prepare(completion_fd)?;
+            let future = async move {
+                let result = operator
+                    .copy(&source, &destination)
+                    .await
+                    .map_err(opendal_error)
+                    .and_then(checked_metadata)
+                    .map(Box::new);
+                async_outcome(AsyncResultKind::Metadata, result, AsyncPayload::Metadata)
+            };
+            let (task, _) = launch.spawn(AsyncResultKind::Metadata, None, future);
+            Ok(task)
+        };
+        // SAFETY: output pointer validity is part of this extern function's caller contract.
+        unsafe { finish_async_task_start(out_task, out_error, start) }
+    })
+}
+
+unsafe extern "C" fn async_operator_rename_start(
+    operator: *mut OperatorV1,
+    source: *const BytesViewV1,
+    destination: *const BytesViewV1,
+    completion_fd: i32,
+    out_task: *mut *mut AsyncTaskV1,
+    out_error: *mut *mut ErrorV1,
+) -> Status {
+    catch_status(|| {
+        let start = || {
+            // SAFETY: the handle and both path carriers are copied synchronously.
+            let operator = unsafe { borrow_required(operator.cast_const())? }
+                .async_inner
+                .clone();
+            let source = unsafe { read_text(source, "source path")? };
+            let destination = unsafe { read_text(destination, "destination path")? };
+            let launch = AsyncLaunch::prepare(completion_fd)?;
+            let future = async move {
+                async_outcome(
+                    AsyncResultKind::Unit,
+                    operator
+                        .rename(&source, &destination)
+                        .await
+                        .map_err(opendal_error),
+                    |_| AsyncPayload::Unit,
+                )
+            };
+            let (task, _) = launch.spawn(AsyncResultKind::Unit, None, future);
+            Ok(task)
+        };
+        // SAFETY: output pointer validity is part of this extern function's caller contract.
+        unsafe { finish_async_task_start(out_task, out_error, start) }
+    })
+}
+
 unsafe extern "C" fn async_operator_read_start(
     operator: *mut OperatorV1,
     path: *const BytesViewV1,
@@ -5694,6 +6147,72 @@ unsafe extern "C" fn async_task_take_unit(
     })
 }
 
+unsafe extern "C" fn async_task_take_bool(
+    task: *mut AsyncTaskV1,
+    out_value: *mut u32,
+    out_error: *mut *mut ErrorV1,
+) -> Status {
+    catch_status(|| {
+        // SAFETY: outputs are validated and cleared before the task is inspected.
+        let outputs = [unsafe { clear_required_output(out_value, 0) }, unsafe {
+            clear_error_output(out_error)
+        }];
+        if let Err(failure) = combine_output_validation(outputs) {
+            return unsafe { finish_failure(failure, out_error) };
+        }
+        // SAFETY: opaque handle validity is a caller lifetime obligation.
+        let task = match unsafe { borrow_required(task.cast_const()) } {
+            Ok(task) => task,
+            Err(failure) => return unsafe { finish_failure(failure, out_error) },
+        };
+        let outcome = match task.shared.take(AsyncResultKind::Bool) {
+            Ok(outcome) => outcome,
+            Err(failure) => return unsafe { finish_failure(failure, out_error) },
+        };
+        match outcome.status {
+            STATUS_OK => match outcome.payload {
+                AsyncPayload::Bool(value) if value <= 1 && outcome.error.is_none() => {
+                    // SAFETY: required output was validated and cleared above.
+                    unsafe { out_value.write(value) };
+                    STATUS_OK
+                }
+                _ => STATUS_ABI_MISMATCH,
+            },
+            STATUS_ERROR => match outcome.error {
+                Some(error) => {
+                    if !out_error.is_null() {
+                        // SAFETY: optional output was validated and cleared above.
+                        unsafe { out_error.write(Box::into_raw(error)) };
+                    }
+                    STATUS_ERROR
+                }
+                None => STATUS_ERROR,
+            },
+            STATUS_ABI_MISMATCH | STATUS_PANIC => outcome.status,
+            _ => STATUS_ABI_MISMATCH,
+        }
+    })
+}
+
+unsafe extern "C" fn async_task_take_lister(
+    task: *mut AsyncTaskV1,
+    out_lister: *mut *mut ListerV1,
+    out_error: *mut *mut ErrorV1,
+) -> Status {
+    catch_status(|| unsafe {
+        finish_async_payload_take(
+            task,
+            AsyncResultKind::Lister,
+            out_lister,
+            out_error,
+            |payload| match payload {
+                AsyncPayload::Lister(value) => Some(value),
+                _ => None,
+            },
+        )
+    })
+}
+
 unsafe extern "C" fn async_task_free(task: *mut AsyncTaskV1) {
     let _ = catch_unwind(AssertUnwindSafe(|| {
         if task.is_null() {
@@ -5733,7 +6252,11 @@ fn stage_api() -> Option<ApiV1> {
             | CONCURRENCY_LIMIT_FEATURE_BITS
             | FEATURE_BATCH_DELETE
             | FEATURE_COPIER
-            | if cfg!(unix) { FEATURE_ASYNC } else { 0 },
+            | if cfg!(unix) {
+                FEATURE_ASYNC | FEATURE_ASYNC_CORE
+            } else {
+                0
+            },
         max_output_bytes: MAX_OUTPUT_BYTES,
         library_info: Some(library_info),
         error_view: Some(error_view),
@@ -5812,6 +6335,17 @@ fn stage_api() -> Option<ApiV1> {
         async_task_take_writer: Some(async_task_take_writer),
         async_task_take_unit: Some(async_task_take_unit),
         async_task_free: Some(async_task_free),
+        async_operator_check_start: Some(async_operator_check_start),
+        async_operator_exists_start: Some(async_operator_exists_start),
+        async_operator_stat_start: Some(async_operator_stat_start),
+        async_operator_write_start: Some(async_operator_write_start),
+        async_operator_create_dir_start: Some(async_operator_create_dir_start),
+        async_operator_delete_start: Some(async_operator_delete_start),
+        async_operator_list_start: Some(async_operator_list_start),
+        async_operator_copy_start: Some(async_operator_copy_start),
+        async_operator_rename_start: Some(async_operator_rename_start),
+        async_task_take_bool: Some(async_task_take_bool),
+        async_task_take_lister: Some(async_task_take_lister),
     })
 }
 
@@ -5919,6 +6453,17 @@ unsafe fn install_api(base: *mut u8, caller_size: usize, staged: &ApiV1) {
     install_field!(async_task_take_writer);
     install_field!(async_task_take_unit);
     install_field!(async_task_free);
+    install_field!(async_operator_check_start);
+    install_field!(async_operator_exists_start);
+    install_field!(async_operator_stat_start);
+    install_field!(async_operator_write_start);
+    install_field!(async_operator_create_dir_start);
+    install_field!(async_operator_delete_start);
+    install_field!(async_operator_list_start);
+    install_field!(async_operator_copy_start);
+    install_field!(async_operator_rename_start);
+    install_field!(async_task_take_bool);
+    install_field!(async_task_take_lister);
 }
 
 /// Negotiate the stable v1 function table.
@@ -6602,6 +7147,7 @@ mod tests {
         name: String,
         mode: u32,
         content_length: u64,
+        content_type: Option<String>,
     }
 
     fn copy_view(view: BytesViewV1) -> Vec<u8> {
@@ -6661,6 +7207,14 @@ mod tests {
             name: String::from_utf8(copy_view(entry_view.name)).expect("entry name is UTF-8"),
             mode: metadata_view.mode,
             content_length: metadata_view.content_length,
+            content_type: if metadata_view.present_bits & METADATA_CONTENT_TYPE_PRESENT != 0 {
+                Some(
+                    String::from_utf8(copy_view(metadata_view.content_type))
+                        .expect("entry content type is UTF-8"),
+                )
+            } else {
+                None
+            },
         };
         // SAFETY: this test owns the entry snapshot exactly once.
         unsafe { api.entry_free.expect("BASE entry free is installed")(entry) };
@@ -7181,7 +7735,11 @@ mod tests {
                 | CONCURRENCY_LIMIT_FEATURE_BITS
                 | FEATURE_BATCH_DELETE
                 | FEATURE_COPIER
-                | if cfg!(unix) { FEATURE_ASYNC } else { 0 },
+                | if cfg!(unix) {
+                    FEATURE_ASYNC | FEATURE_ASYNC_CORE
+                } else {
+                    0
+                },
         );
         assert!(api.library_info.is_some());
         assert!(api.operator_new.is_some());
@@ -7250,6 +7808,17 @@ mod tests {
         assert!(api.async_task_take_writer.is_some());
         assert!(api.async_task_take_unit.is_some());
         assert!(api.async_task_free.is_some());
+        assert!(api.async_operator_check_start.is_some());
+        assert!(api.async_operator_exists_start.is_some());
+        assert!(api.async_operator_stat_start.is_some());
+        assert!(api.async_operator_write_start.is_some());
+        assert!(api.async_operator_create_dir_start.is_some());
+        assert!(api.async_operator_delete_start.is_some());
+        assert!(api.async_operator_list_start.is_some());
+        assert!(api.async_operator_copy_start.is_some());
+        assert!(api.async_operator_rename_start.is_some());
+        assert!(api.async_task_take_bool.is_some());
+        assert!(api.async_task_take_lister.is_some());
     }
 
     #[cfg(feature = "profile-standard")]
@@ -7745,6 +8314,17 @@ mod tests {
             async_task_take_writer,
             async_task_take_unit,
             async_task_free,
+            async_operator_check_start,
+            async_operator_exists_start,
+            async_operator_stat_start,
+            async_operator_write_start,
+            async_operator_create_dir_start,
+            async_operator_delete_start,
+            async_operator_list_start,
+            async_operator_copy_start,
+            async_operator_rename_start,
+            async_task_take_bool,
+            async_task_take_lister,
         );
 
         for caller_size in API_PREFIX_SIZE..=size_of::<ApiV1>() + 16 {
@@ -7849,6 +8429,70 @@ mod tests {
             ),
             (0, 500_000_000),
         );
+    }
+
+    #[test]
+    fn async_list_snapshot_drops_hidden_metadata_and_enforces_exact_bounds() {
+        let mut user_metadata = std::collections::HashMap::new();
+        user_metadata.insert("hidden-key".to_owned(), "hidden-value".repeat(1_024));
+        let timestamp = raw::Timestamp::new(17, 250_000_000).expect("test timestamp is in range");
+        let mut metadata = Metadata::new(EntryMode::FILE).with_user_metadata(user_metadata);
+        metadata
+            .set_is_current(false)
+            .set_is_deleted(true)
+            .set_content_length(41)
+            .set_last_modified(timestamp)
+            .set_cache_control("max-age=60")
+            .set_content_disposition("inline")
+            .set_content_encoding("gzip")
+            .set_content_md5("digest")
+            .set_content_type("application/octet-stream")
+            .set_etag("etag")
+            .set_version("version");
+        let entry = async_list_entry_snapshot(EntryV1 {
+            path: "owned/file.bin".to_owned(),
+            name: "file.bin".to_owned(),
+            metadata,
+        });
+
+        assert!(entry.metadata.user_metadata().is_none());
+        assert_eq!(entry.metadata.mode(), EntryMode::FILE);
+        assert_eq!(entry.metadata.is_current(), Some(false));
+        assert!(entry.metadata.is_deleted());
+        assert_eq!(entry.metadata.content_length(), 41);
+        assert_eq!(entry.metadata.last_modified(), Some(timestamp));
+        assert_eq!(entry.metadata.cache_control(), Some("max-age=60"));
+        assert_eq!(entry.metadata.content_disposition(), Some("inline"));
+        assert_eq!(entry.metadata.content_encoding(), Some("gzip"));
+        assert_eq!(entry.metadata.content_md5(), Some("digest"));
+        assert_eq!(
+            entry.metadata.content_type(),
+            Some("application/octet-stream")
+        );
+        assert_eq!(entry.metadata.etag(), Some("etag"));
+        assert_eq!(entry.metadata.version(), Some("version"));
+
+        let entry_bytes = async_list_entry_bytes(&entry)
+            .unwrap_or_else(|_| panic!("visible snapshot has a bounded encoded size"));
+        assert!(entry_bytes < MAX_ASYNC_LIST_OUTPUT_BYTES);
+        assert_eq!(
+            async_list_next_total(
+                MAX_ASYNC_LIST_ENTRIES - 1,
+                MAX_ASYNC_LIST_OUTPUT_BYTES - entry_bytes,
+                &entry,
+            )
+            .unwrap_or_else(|_| panic!("the exact byte and count boundary is accepted")),
+            MAX_ASYNC_LIST_OUTPUT_BYTES,
+        );
+        assert!(
+            async_list_next_total(
+                MAX_ASYNC_LIST_ENTRIES - 1,
+                MAX_ASYNC_LIST_OUTPUT_BYTES - entry_bytes + 1,
+                &entry,
+            )
+            .is_err()
+        );
+        assert!(async_list_next_total(MAX_ASYNC_LIST_ENTRIES, 0, &entry).is_err());
     }
 
     #[test]
@@ -10309,6 +10953,119 @@ mod tests {
                 .expect("completion writer closes after its one byte"),
             0,
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn async_core_typed_takes_are_atomic_and_preserve_owned_entries() {
+        let api = api();
+        let take_bool = api
+            .async_task_take_bool
+            .expect("ASYNC_CORE bool take is installed");
+        let take_lister = api
+            .async_task_take_lister
+            .expect("ASYNC_CORE lister take is installed");
+        let task_free = api.async_task_free.expect("ASYNC task free is installed");
+
+        let (mut bool_reader, launch) = async_launch_pair();
+        let (task, _) = launch.spawn(AsyncResultKind::Bool, None, async {
+            AsyncOutcome::success(AsyncResultKind::Bool, AsyncPayload::Bool(1))
+        });
+        let task = Box::into_raw(task);
+        read_one_completion(&mut bool_reader);
+
+        let mut wrong_lister = NonNull::<ListerV1>::dangling().as_ptr();
+        let mut error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the live task intentionally receives the wrong typed take;
+        // both outputs are writable and must be cleared atomically.
+        assert_eq!(
+            unsafe { take_lister(task, &mut wrong_lister, &mut error) },
+            STATUS_ERROR,
+        );
+        assert!(wrong_lister.is_null());
+        assert_eq!(take_error_kind(&api, error), ERROR_INVALID_ARGUMENT);
+
+        let mut value = u32::MAX;
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the wrong-kind attempt above left the matching result intact.
+        assert_eq!(
+            unsafe { take_bool(task, &mut value, &mut error) },
+            STATUS_OK
+        );
+        assert_eq!(value, 1);
+        assert!(error.is_null());
+
+        value = u32::MAX;
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: a second take is rejected and clears its required output.
+        assert_eq!(
+            unsafe { take_bool(task, &mut value, &mut error) },
+            STATUS_ERROR,
+        );
+        assert_eq!(value, 0);
+        assert_eq!(take_error_kind(&api, error), ERROR_RESOURCE_CLOSED);
+        // SAFETY: this test owns the taken task exactly once.
+        unsafe { task_free(task) };
+
+        let (mut false_reader, launch) = async_launch_pair();
+        let (false_task, _) = launch.spawn(AsyncResultKind::Bool, None, async {
+            AsyncOutcome::success(AsyncResultKind::Bool, AsyncPayload::Bool(0))
+        });
+        let false_task = Box::into_raw(false_task);
+        read_one_completion(&mut false_reader);
+        value = u32::MAX;
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the completed bool task and outputs remain live for this call.
+        assert_eq!(
+            unsafe { take_bool(false_task, &mut value, &mut error) },
+            STATUS_OK,
+        );
+        assert_eq!(value, 0);
+        assert!(error.is_null());
+        // SAFETY: this test owns the taken task exactly once.
+        unsafe { task_free(false_task) };
+
+        let metadata = Metadata::new(EntryMode::FILE)
+            .with_content_length(7)
+            .with_content_type("application/octet-stream".to_owned());
+        let lister = Box::new(ListerV1 {
+            state: Mutex::new(ListerStateV1::Materialized(VecDeque::from([EntryV1 {
+                path: "owned/file.bin".to_owned(),
+                name: "file.bin".to_owned(),
+                metadata,
+            }]))),
+        });
+        let (mut lister_reader, launch) = async_launch_pair();
+        let (lister_task, _) = launch.spawn(AsyncResultKind::Lister, None, async move {
+            AsyncOutcome::success(AsyncResultKind::Lister, AsyncPayload::Lister(lister))
+        });
+        let lister_task = Box::into_raw(lister_task);
+        read_one_completion(&mut lister_reader);
+        let mut owned_lister = NonNull::<ListerV1>::dangling().as_ptr();
+        error = NonNull::<ErrorV1>::dangling().as_ptr();
+        // SAFETY: the completed lister task and outputs remain live for this call.
+        assert_eq!(
+            unsafe { take_lister(lister_task, &mut owned_lister, &mut error) },
+            STATUS_OK,
+        );
+        assert!(!owned_lister.is_null());
+        assert!(error.is_null());
+        assert_eq!(
+            collect_lister(&api, owned_lister),
+            vec![ListedEntry {
+                path: "owned/file.bin".to_owned(),
+                name: "file.bin".to_owned(),
+                mode: ENTRY_MODE_FILE,
+                content_length: 7,
+                content_type: Some("application/octet-stream".to_owned()),
+            }],
+        );
+        // SAFETY: the lister and taken task each have one remaining owner.
+        unsafe {
+            api.lister_close.expect("LISTING close is installed")(owned_lister);
+            api.lister_free.expect("LISTING free is installed")(owned_lister);
+            task_free(lister_task);
+        }
     }
 
     #[cfg(unix)]

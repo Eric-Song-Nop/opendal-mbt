@@ -12,8 +12,8 @@
 ABI_STATIC_ASSERT(sizeof(opendal_mbt_status_t) == 4,
                   "transport status must be 32-bit");
 ABI_STATIC_ASSERT(OPENDAL_MBT_ABI_V1_MAJOR == 1 &&
-                      OPENDAL_MBT_ABI_V1_MINOR == 7,
-                  "Phase 5E requires ABI v1.7");
+                      OPENDAL_MBT_ABI_V1_MINOR == 8,
+                  "core async parity requires ABI v1.8");
 ABI_STATIC_ASSERT(sizeof(opendal_mbt_bool_t) == 4,
                   "ABI boolean must be 32-bit");
 ABI_STATIC_ASSERT(sizeof(opendal_mbt_bytes_view_v1_t) == 16,
@@ -104,8 +104,13 @@ ABI_STATIC_ASSERT(offsetof(opendal_mbt_api_v1_t,
                   "v1.7 async group must start at the v1.6 table tail");
 ABI_STATIC_ASSERT(offsetof(opendal_mbt_api_v1_t, async_task_free) == 624,
                   "v1.7 async task free offset drifted");
-ABI_STATIC_ASSERT(sizeof(opendal_mbt_api_v1_t) == 632,
-                  "v1.7 function table size drifted");
+ABI_STATIC_ASSERT(
+    offsetof(opendal_mbt_api_v1_t, async_operator_check_start) == 632,
+    "v1.8 core async group must start at the v1.7 table tail");
+ABI_STATIC_ASSERT(offsetof(opendal_mbt_api_v1_t, async_task_take_lister) == 712,
+                  "v1.8 async lister take offset drifted");
+ABI_STATIC_ASSERT(sizeof(opendal_mbt_api_v1_t) == 720,
+                  "v1.8 function table size drifted");
 #endif
 ABI_STATIC_ASSERT(OPENDAL_MBT_API_V1_FIELD_END(library_info) <=
                       OPENDAL_MBT_API_V1_FIELD_END(error_view),
@@ -151,6 +156,30 @@ ABI_STATIC_ASSERT(OPENDAL_MBT_API_V1_FIELD_END(copier_free) <=
                       OPENDAL_MBT_API_V1_FIELD_END(async_operator_read_start) <=
                           OPENDAL_MBT_API_V1_FIELD_END(async_task_free),
                   "v1.7 async append order drifted");
+ABI_STATIC_ASSERT(
+    OPENDAL_MBT_API_V1_FIELD_END(async_task_free) <=
+            OPENDAL_MBT_API_V1_FIELD_END(async_operator_check_start) &&
+        OPENDAL_MBT_API_V1_FIELD_END(async_operator_check_start) <=
+            OPENDAL_MBT_API_V1_FIELD_END(async_operator_exists_start) &&
+        OPENDAL_MBT_API_V1_FIELD_END(async_operator_exists_start) <=
+            OPENDAL_MBT_API_V1_FIELD_END(async_operator_stat_start) &&
+        OPENDAL_MBT_API_V1_FIELD_END(async_operator_stat_start) <=
+            OPENDAL_MBT_API_V1_FIELD_END(async_operator_write_start) &&
+        OPENDAL_MBT_API_V1_FIELD_END(async_operator_write_start) <=
+            OPENDAL_MBT_API_V1_FIELD_END(async_operator_create_dir_start) &&
+        OPENDAL_MBT_API_V1_FIELD_END(async_operator_create_dir_start) <=
+            OPENDAL_MBT_API_V1_FIELD_END(async_operator_delete_start) &&
+        OPENDAL_MBT_API_V1_FIELD_END(async_operator_delete_start) <=
+            OPENDAL_MBT_API_V1_FIELD_END(async_operator_list_start) &&
+        OPENDAL_MBT_API_V1_FIELD_END(async_operator_list_start) <=
+            OPENDAL_MBT_API_V1_FIELD_END(async_operator_copy_start) &&
+        OPENDAL_MBT_API_V1_FIELD_END(async_operator_copy_start) <=
+            OPENDAL_MBT_API_V1_FIELD_END(async_operator_rename_start) &&
+        OPENDAL_MBT_API_V1_FIELD_END(async_operator_rename_start) <=
+            OPENDAL_MBT_API_V1_FIELD_END(async_task_take_bool) &&
+        OPENDAL_MBT_API_V1_FIELD_END(async_task_take_bool) <=
+            OPENDAL_MBT_API_V1_FIELD_END(async_task_take_lister),
+    "v1.8 core async append order drifted");
 ABI_STATIC_ASSERT((OPENDAL_MBT_FEATURE_BATCH_DELETE &
                    OPENDAL_MBT_FEATURE_COPIER) == 0,
                   "v1.6 feature bits must be independent");
@@ -159,6 +188,11 @@ ABI_STATIC_ASSERT(
      (OPENDAL_MBT_FEATURE_CONCURRENCY_LIMIT |
       OPENDAL_MBT_FEATURE_BATCH_DELETE | OPENDAL_MBT_FEATURE_COPIER)) == 0,
     "v1.7 async feature bit must be independent");
+ABI_STATIC_ASSERT(
+    (OPENDAL_MBT_FEATURE_ASYNC_CORE &
+     (OPENDAL_MBT_FEATURE_ASYNC | OPENDAL_MBT_FEATURE_BATCH_DELETE |
+      OPENDAL_MBT_FEATURE_COPIER)) == 0,
+    "v1.8 core async feature bit must be independent");
 ABI_STATIC_ASSERT(OPENDAL_MBT_READ_OPTIONS_V1_MIN_SIZE <=
                       sizeof(opendal_mbt_read_options_v1_t),
                   "read options v1.0 prefix drifted");
