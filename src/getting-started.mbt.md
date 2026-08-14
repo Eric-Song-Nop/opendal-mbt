@@ -177,4 +177,6 @@ stateful stream or writer operation makes that resource terminal when progress
 or commit status may be unknown.
 
 Continue with [Connecting](connecting.mbt.md) for profile and typed S3 setup,
-then use the recipes in [Common tasks](tasks.mbt.md).
+read [Using OpenDAL in a browser](browser-guide.mbt.md) for OPFS, browser S3,
+CORS/CSP, JS-only operations, and deployment, then use the recipes in
+[Common tasks](tasks.mbt.md).

@@ -16,11 +16,12 @@ fi
 
 for required_file in \
   LICENSE README.mbt.md getting-started.mbt.md connecting.mbt.md \
-  tasks.mbt.md build.js src/moon.pkg src/README.mbt.md \
+  tasks.mbt.md browser-guide.mbt.md build.js src/moon.pkg src/README.mbt.md \
   src/browser/moon.pkg src/browser/embedded_runtime.generated.mbt \
   src/browser/embedded.mbt src/browser_demo/moon.pkg \
   src/browser_demo/launcher.mbt src/browser_demo/main.mbt \
   src/getting-started.mbt.md src/connecting.mbt.md src/tasks.mbt.md \
+  src/browser-guide.mbt.md \
   native/artifact-selection.json native/artifacts.json \
   native/artifacts-standard.json \
   native/include/opendal_mbt.h; do

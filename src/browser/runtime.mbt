@@ -2,9 +2,10 @@
 /// URLs for the version-matched JavaScript runtime, wasm-bindgen module, and
 /// OpenDAL bridge WebAssembly binary.
 ///
-/// `Runtime::load` imports these browser assets once. The embedded distribution
-/// layer added by the next stack PR supplies these values automatically; this
-/// explicit form remains useful to bundlers and custom CDNs.
+/// `Runtime::load` imports these browser assets once. The ordinary
+/// `Runtime::new` and `AsyncOperator::new` paths use the embedded distribution
+/// automatically; this explicit form remains useful to bundlers and custom
+/// CDNs.
 pub struct BrowserAssets {
   runtime_module_url : String
   bridge_module_url : String

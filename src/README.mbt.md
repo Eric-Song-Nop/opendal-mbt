@@ -39,8 +39,9 @@ The current source facade implements:
   and listers;
 - typed `OpenDalError` values and capability inspection.
 
-The generated public interface is
-[`src/pkg.generated.mbti`](pkg.generated.mbti).
+The checked-in native public interface is
+[`src/pkg.generated.mbti`](pkg.generated.mbti). Use `moon ide doc --target js
+'@opendal'` for the target-specific browser surface.
 
 ## Install a release
 
@@ -74,6 +75,12 @@ later builds reuse Moon's shared cache. JavaScript builds use the embedded
 browser runtime and do not download a native archive. The current prebuild hook
 requires Node.js 18 or newer; native builds also require `tar`. Consumers do
 not need Rust, Cargo, or this repository.
+
+Only Moon's `native` and `js` targets are supported. `wasm` and `wasm-gc` are
+not browser aliases for this binding; browser applications compile to the JS
+target, which hosts the embedded OpenDAL core Wasm runtime. Portable native
+async operations run as Rust Tokio tasks and wake Moon through a nonblocking
+completion pipe; browser operations use Promises and `AbortSignal`.
 
 Contributors testing the Phase 5 source stack use the checked-out repository:
 
@@ -135,6 +142,9 @@ runtime. CI then executes both the freshly rebuilt bridge and the packaged
 embedded bridge in real Chrome. A browser host page's Content Security Policy
 must allow WebAssembly compilation, normally by including
 `script-src 'wasm-unsafe-eval'`; the published demo sets this policy itself.
+See [Using OpenDAL in a browser](browser-guide.mbt.md) for OPFS and browser S3
+configuration, CORS and hosting requirements, JS-only operations, runtime
+ownership, cancellation, and hard bridge limits.
 
 ## First operation
 
@@ -197,6 +207,8 @@ operation, and path on either target.
   exercise the pinned `v0.2.0` candidate, then choose synchronous or async I/O.
 - [Connecting](connecting.mbt.md) — understand profiles and construct memory,
   filesystem, and typed S3 operators.
+- [Using OpenDAL in a browser](browser-guide.mbt.md) — select the JS target,
+  use the embedded runtime, configure OPFS or S3, and deploy it safely.
 - [Common tasks](tasks.mbt.md) — recipes for streams, abort, presign, layers,
   batch deletion, Copier, async I/O, and the blocking core.
 - [Roadmap](../docs/roadmap.md) — completed Phase 5 slices and the remaining
