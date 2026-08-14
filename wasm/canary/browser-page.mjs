@@ -79,6 +79,12 @@ try {
     3,
     "16 MiB asynchronous bulk transfer",
   );
+  const bulkInfoTransferBytes =
+    exports.opendal_mbt_wasm_canary_bulk_info_transfer_bytes();
+  assert(
+    bulkInfoTransferBytes > 0,
+    "operator info transfer byte count was empty",
+  );
   assert(
     bridge.opendal_mbt_wasm_live_handle_count() === bulkLiveBefore,
     "16 MiB bulk transfer canary left live handles",
@@ -91,7 +97,7 @@ try {
   );
   assert(
     transferAfter.bridgeToMoonCalls - transferBefore.bridgeToMoonCalls ===
-      bulkTransferChunks,
+      bulkTransferChunks + 3,
     "bridge-to-Moon calls did not scale with the 256 KiB chunk count",
   );
   assert(
@@ -101,7 +107,7 @@ try {
   );
   assert(
     transferAfter.bridgeToMoonBytes - transferBefore.bridgeToMoonBytes ===
-      bulkTransferBytes,
+      bulkTransferBytes + bulkInfoTransferBytes,
     "bridge-to-Moon bulk byte count was not exact",
   );
   assert(

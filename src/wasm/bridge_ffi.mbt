@@ -168,19 +168,13 @@ fn bridge_metadata_mode(handle : UInt) -> Int = "opendal_mbt_bridge" "opendal_mb
 fn bridge_metadata_release(handle : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_metadata_release"
 
 ///|
-fn bridge_last_error_code() -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_last_error_code"
-
-///|
 fn bridge_last_error_take() -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_last_error_take"
 
 ///|
 fn bridge_last_error_clear() -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_last_error_clear"
 
 ///|
-fn bridge_error_code(handle : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_error_code"
-
-///|
-fn bridge_error_message(handle : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_error_message"
+fn bridge_error_snapshot_take(handle : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_error_snapshot_take"
 
 ///|
 fn bridge_error_release(handle : UInt) -> UInt = "opendal_mbt_bridge" "opendal_mbt_wasm_error_release"

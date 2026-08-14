@@ -4,7 +4,7 @@ import { pathToFileURL } from "node:url";
 
 import { loadOpenDalMoonBit } from "../loader/index.mjs";
 
-const expectedAbiVersion = 0x0001_0004;
+const expectedAbiVersion = 0x0001_0005;
 const bulkTransferBytes = 16 * 1024 * 1024;
 const bulkTransferChunks = bulkTransferBytes / (256 * 1024);
 
@@ -50,6 +50,9 @@ async function assertBulkTransfer(runtime) {
     3,
     "16 MiB asynchronous bulk transfer",
   );
+  const infoTransferBytes =
+    runtime.exports.opendal_mbt_wasm_canary_bulk_info_transfer_bytes();
+  assert(infoTransferBytes > 0, "operator info transfer byte count was empty");
   assert(
     bridge.opendal_mbt_wasm_live_handle_count() === liveBefore,
     "16 MiB bulk canary left live resource handles",
@@ -61,7 +64,8 @@ async function assertBulkTransfer(runtime) {
     "Moon-to-bridge calls did not scale with the 256 KiB chunk count",
   );
   assert(
-    after.bridgeToMoonCalls - before.bridgeToMoonCalls === bulkTransferChunks,
+    after.bridgeToMoonCalls - before.bridgeToMoonCalls ===
+      bulkTransferChunks + 3,
     "bridge-to-Moon calls did not scale with the 256 KiB chunk count",
   );
   assert(
@@ -70,7 +74,8 @@ async function assertBulkTransfer(runtime) {
     "Moon-to-bridge bulk byte count was not exact",
   );
   assert(
-    after.bridgeToMoonBytes - before.bridgeToMoonBytes === bulkTransferBytes,
+    after.bridgeToMoonBytes - before.bridgeToMoonBytes ===
+      bulkTransferBytes + infoTransferBytes,
     "bridge-to-Moon bulk byte count was not exact",
   );
   assert(

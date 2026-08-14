@@ -1,29 +1,80 @@
 ///|
-/// A stable error snapshot copied out of the Rust Wasm bridge.
-pub suberror WasmError {
-  WasmError(Int, String)
-} derive(Eq, Debug)
+/// OpenDAL's retry classification for an operation failure.
+pub enum ErrorStatus {
+  Permanent
+  Temporary
+  Persistent
+  UnknownStatus(Int)
+} derive(Eq, @debug.Debug)
 
 ///|
-/// Return the stable bridge error code.
-pub fn WasmError::code(self : WasmError) -> Int {
-  match self {
-    WasmError(code, _) => code
-  }
+/// Stable error categories exposed by the MoonBit binding.
+pub enum ErrorKind {
+  Unexpected
+  Unsupported
+  ConfigInvalid
+  NotFound
+  PermissionDenied
+  IsADirectory
+  NotADirectory
+  AlreadyExists
+  RateLimited
+  IsSameFile
+  ConditionNotMatch
+  RangeNotSatisfied
+  InvalidArgument
+  ResourceClosed
+  BufferTooLarge
+  AbiMismatch
+  UnknownKind(Int, String)
+} derive(Eq, @debug.Debug)
+
+///|
+/// The operation being attempted when an error occurred.
+#warnings("-unused_constructor")
+pub enum Operation {
+  NewOperator
+  Check
+  Exists
+  CreateDir
+  Read
+  Write
+  Stat
+  Delete
+  List
+  Copy
+  Rename
+} derive(Eq, @debug.Debug)
+
+///|
+/// Structured context attached to a storage failure.
+pub struct ErrorInfo {
+  kind : ErrorKind
+  status : ErrorStatus
+  message : String
+  operation : Operation
+  path : String?
+  destination_path : String?
+} derive(Eq, @debug.Debug)
+
+///|
+/// The checked error effect raised by all fallible OpenDAL operations.
+pub suberror OpenDalError {
+  OpenDalError(ErrorInfo)
+} derive(Eq, @debug.Debug)
+
+///|
+priv struct ErrorContext {
+  operation : Operation
+  path : String?
+  destination_path : String?
 }
 
 ///|
-/// Return the owned diagnostic message supplied by the bridge.
-pub fn WasmError::message(self : WasmError) -> String {
-  match self {
-    WasmError(_, message) => message
-  }
-}
-
-///|
-/// Return true when OpenDAL reported that the requested path does not exist.
-pub fn WasmError::is_not_found(self : WasmError) -> Bool {
-  self.code() == 7
+priv struct BridgeErrorSnapshot {
+  kind : ErrorKind
+  status : ErrorStatus
+  message : String
 }
 
 ///|
@@ -185,6 +236,7 @@ pub struct OperatorInfo {
 /// A generation-checked operator handle owned by the Rust Wasm bridge.
 pub struct Operator {
   priv mut handle : UInt
+  priv info_snapshot : OperatorInfo
 }
 
 ///|

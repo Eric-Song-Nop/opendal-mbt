@@ -236,6 +236,10 @@
           "kind": "function"
         },
         {
+          "name": "opendal_mbt_wasm_error_snapshot_take",
+          "kind": "function"
+        },
+        {
           "name": "opendal_mbt_wasm_feature_flags",
           "kind": "function"
         },
@@ -391,9 +395,9 @@
         }
       ],
       "observed_sizes": {
-        "raw": 957365,
-        "gzip": 315590,
-        "brotli": 239529
+        "raw": 963695,
+        "gzip": 317726,
+        "brotli": 240045
       },
       "size_caps": {
         "raw": 1100000,
@@ -404,8 +408,8 @@
     "rust_bridge_glue": {
       "observed_sizes": {
         "raw": 9940,
-        "gzip": 2673,
-        "brotli": 2355
+        "gzip": 2674,
+        "brotli": 2356
       },
       "size_caps": {
         "raw": 16384,
@@ -507,17 +511,12 @@
         },
         {
           "module": "opendal_mbt_bridge",
-          "name": "opendal_mbt_wasm_error_code",
-          "kind": "function"
-        },
-        {
-          "module": "opendal_mbt_bridge",
-          "name": "opendal_mbt_wasm_error_message",
-          "kind": "function"
-        },
-        {
-          "module": "opendal_mbt_bridge",
           "name": "opendal_mbt_wasm_error_release",
+          "kind": "function"
+        },
+        {
+          "module": "opendal_mbt_bridge",
+          "name": "opendal_mbt_wasm_error_snapshot_take",
           "kind": "function"
         },
         {
@@ -528,11 +527,6 @@
         {
           "module": "opendal_mbt_bridge",
           "name": "opendal_mbt_wasm_last_error_clear",
-          "kind": "function"
-        },
-        {
-          "module": "opendal_mbt_bridge",
-          "name": "opendal_mbt_wasm_last_error_code",
           "kind": "function"
         },
         {
@@ -690,6 +684,10 @@
           "kind": "function"
         },
         {
+          "name": "opendal_mbt_wasm_canary_bulk_info_transfer_bytes",
+          "kind": "function"
+        },
+        {
           "name": "opendal_mbt_wasm_canary_bulk_stage",
           "kind": "function"
         },
@@ -746,9 +744,9 @@
         }
       ],
       "observed_sizes": {
-        "raw": 45120,
-        "gzip": 17697,
-        "brotli": 14940
+        "raw": 51533,
+        "gzip": 20237,
+        "brotli": 17070
       },
       "size_caps": {
         "raw": 65536,
