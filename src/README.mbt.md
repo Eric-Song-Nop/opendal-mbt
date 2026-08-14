@@ -127,10 +127,11 @@ async fn browser_round_trip() {
 `Runtime::load(BrowserAssets)` remains available when an application wants to
 serve version-matched runtime, glue, and Wasm URLs itself. Maintainers refresh
 the checked-in embedded source with `make browser-embed-generate` and validate
-it with `make browser-embed-check`; the check decompresses and byte-compares
-the Wasm so equivalent deflate streams from different Node/zlib versions do
-not cause false failures. A browser host page's Content Security Policy must
-allow WebAssembly compilation, normally by including
+it with `make browser-embed-check`; the check verifies the compressed payload,
+its source fingerprint, exported Wasm interface, generated glue, and Promise
+runtime. CI then executes both the freshly rebuilt bridge and the packaged
+embedded bridge in real Chrome. A browser host page's Content Security Policy
+must allow WebAssembly compilation, normally by including
 `script-src 'wasm-unsafe-eval'`; the published demo sets this policy itself.
 
 ## First operation

@@ -90,6 +90,6 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: browser-embed-diagnostics
-          path: target/browser-embed/release/*_bg.wasm
+          path: target/browser-embed/release/opendal_mbt_browser_bridge*
           if-no-files-found: ignore
           retention-days: 1

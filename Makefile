@@ -39,6 +39,12 @@ BROWSER_EMBED_GLUE := $(BROWSER_EMBED_DIR)/$(BROWSER_BRIDGE_STEM).js
 BROWSER_EMBED_WASM := $(BROWSER_EMBED_DIR)/$(BROWSER_BRIDGE_STEM)_bg.wasm
 BROWSER_EMBED_OUTPUT := $(CURDIR)/src/browser/embedded_runtime.generated.mbt
 BROWSER_RUNTIME := $(CURDIR)/wasm/browser-runtime/index.mjs
+BROWSER_EMBED_SOURCES := Cargo.lock Cargo.toml Makefile rust-toolchain.toml \
+	scripts/generate-browser-embed.mjs wasm/browser-bridge/Cargo.toml
+BROWSER_EMBED_SOURCE_DIRS := wasm/browser-bridge/src
+BROWSER_EMBED_SOURCE_ARGS := \
+	$(foreach source,$(BROWSER_EMBED_SOURCES),--source "$(source)") \
+	$(foreach directory,$(BROWSER_EMBED_SOURCE_DIRS),--source-dir "$(directory)")
 
 
 .PHONY: native rust-test moon-deps moon-check moon-test coverage abi-smoke c-example \
@@ -116,11 +122,12 @@ browser-embed-generate: browser-embed-bridge
 		--wasm "$(BROWSER_EMBED_WASM)" \
 		--runtime "$(BROWSER_RUNTIME)" \
 		--output "$(BROWSER_EMBED_OUTPUT)" \
+		$(BROWSER_EMBED_SOURCE_ARGS) \
 		--wasm-bindgen-version "$(WASM_BINDGEN_VERSION)"
 
-# The check decompresses the committed payload and byte-compares it with the
-# bridge. It intentionally does not require different Node/zlib releases to
-# choose the same valid deflate stream.
+# The check validates the committed payload, source fingerprint, current ABI,
+# glue, and runtime. Rust/LLVM and zlib may emit equivalent bytes differently
+# across maintainer hosts; CI executes both bridge builds in real Chrome.
 browser-embed-check: browser-embed-bridge
 	node --check scripts/generate-browser-embed.mjs
 	node scripts/generate-browser-embed.mjs \
@@ -128,6 +135,7 @@ browser-embed-check: browser-embed-bridge
 		--wasm "$(BROWSER_EMBED_WASM)" \
 		--runtime "$(BROWSER_RUNTIME)" \
 		--output "$(BROWSER_EMBED_OUTPUT)" \
+		$(BROWSER_EMBED_SOURCE_ARGS) \
 		--wasm-bindgen-version "$(WASM_BINDGEN_VERSION)" \
 		--check
 

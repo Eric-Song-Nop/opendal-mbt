@@ -3,6 +3,7 @@
 // glue sha256 4ce8d5caf8828582bbecf39c490f1d398161c036c1700114ffe06a6c31a9368d
 // wasm sha256 48949cdbe4343ebad8a335dce059cb9b8b522527e1d1edd4a5da981da2936645; gzip sha256 57db348aa0254cb1d8908a476262e44c651c9668d43e0a7ff4a2d0efa9172c95
 // runtime sha256 7f0ae4bed6fa9ac4964c13bddf56a77302e40ef16a7749e3f52a0139b313441d
+// sources sha256 ece16056e51578a25b81d1e8c801afd430c11210d1a4dea620e5938141cf83b1
 
 ///|
 extern "js" fn embedded_wasm_part_0() -> String =
@@ -24803,6 +24804,7 @@ extern "js" fn load_embedded_js_runtime(
   #|     .stream()
   #|     .pipeThrough(new DecompressionStream("gzip"))
   #|   const wasmBytes = new Uint8Array(await new Response(stream).arrayBuffer())
+  #| // opendal-mbt:wasm-bindgen-glue:start
   #| let wasm_bindgen = (function(exports) {
   #|     let script_src;
   #|     if (typeof document !== 'undefined' && document.currentScript !== null) {
@@ -25286,6 +25288,7 @@ extern "js" fn load_embedded_js_runtime(
   #|     return Object.assign(__wbg_init, { initSync }, exports);
   #| })({ __proto__: null });
   #| 
+  #| // opendal-mbt:wasm-bindgen-glue:end
   #| const ABI_VERSION = 0x0001_0007;
   #| const REQUIRED_FEATURE_FLAGS = 0x0000_fffc;
   #| 
