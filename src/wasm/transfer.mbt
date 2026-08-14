@@ -1,11 +1,12 @@
 ///|
-const EXPECTED_ABI_VERSION = 0x0001_0006U
+const EXPECTED_ABI_VERSION = 0x0001_0007U
 
 ///|
 // The public facade requires the resource, task, generic-operator, mutation,
-// listing, bulk-transfer, structured-error, and metadata/options features.
+// listing, bulk-transfer, structured-error, metadata/options, and core async
+// parity features.
 // Memory and the poll-once adapter remain fixture-only bridge capabilities.
-const REQUIRED_FEATURE_FLAGS = 0x0000_07fcU
+const REQUIRED_FEATURE_FLAGS = 0x0000_0ffcU
 
 ///|
 const ERROR_SNAPSHOT_HEADER_LENGTH = 24

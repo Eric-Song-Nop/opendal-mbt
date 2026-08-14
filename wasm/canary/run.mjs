@@ -4,8 +4,8 @@ import { pathToFileURL } from "node:url";
 
 import { loadOpenDalMoonBit } from "../loader/index.mjs";
 
-const expectedAbiVersion = 0x0001_0006;
-const expectedFeatureFlags = 0x0000_07ff;
+const expectedAbiVersion = 0x0001_0007;
+const expectedFeatureFlags = 0x0000_0fff;
 const bulkTransferBytes = 16 * 1024 * 1024;
 const bulkTransferChunks = bulkTransferBytes / (256 * 1024);
 const metadataSnapshotBytes = 84;
@@ -119,7 +119,7 @@ async function assertAsyncLifecycle(runtime, iteration) {
   );
   await waitFor(
     () => runtime.exports.opendal_mbt_wasm_canary_async_stage(),
-    9,
+    13,
     `asynchronous OpenDAL lifecycle ${iteration}`,
   );
   assert(

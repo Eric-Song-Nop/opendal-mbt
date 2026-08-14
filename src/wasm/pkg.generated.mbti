@@ -23,11 +23,15 @@ pub impl Show for OpenDalError
 pub struct AsyncOperator {
   // private fields
 }
+pub fn AsyncOperator::check_callback(Self, callback~ : (Result[Unit, OpenDalError]) -> Unit) -> Task raise OpenDalError
 pub fn AsyncOperator::close(Self) -> Unit
+pub fn AsyncOperator::copy_callback(Self, StringView, StringView, callback~ : (Result[Metadata, OpenDalError]) -> Unit) -> Task raise OpenDalError
 pub fn AsyncOperator::create_dir_callback(Self, StringView, callback~ : (Result[Unit, OpenDalError]) -> Unit) -> Task raise OpenDalError
-pub fn AsyncOperator::delete_callback(Self, StringView, callback~ : (Result[Unit, OpenDalError]) -> Unit, version? : StringView, recursive? : Bool) -> Task raise OpenDalError
-pub fn AsyncOperator::list_callback(Self, StringView, callback~ : (Result[Array[Entry], OpenDalError]) -> Unit, recursive? : Bool, limit? : UInt64, start_after? : StringView) -> Task raise OpenDalError
+pub fn AsyncOperator::delete_callback(Self, StringView, version? : StringView, recursive? : Bool, callback~ : (Result[Unit, OpenDalError]) -> Unit) -> Task raise OpenDalError
+pub fn AsyncOperator::exists_callback(Self, StringView, callback~ : (Result[Bool, OpenDalError]) -> Unit) -> Task raise OpenDalError
+pub fn AsyncOperator::list_callback(Self, StringView, recursive? : Bool, limit? : UInt64, start_after? : StringView, callback~ : (Result[Array[Entry], OpenDalError]) -> Unit) -> Task raise OpenDalError
 pub fn AsyncOperator::read_callback(Self, StringView, range? : ByteRange, version? : StringView, if_match? : StringView, if_none_match? : StringView, callback~ : (Result[Bytes, OpenDalError]) -> Unit) -> Task raise OpenDalError
+pub fn AsyncOperator::rename_callback(Self, StringView, StringView, callback~ : (Result[Unit, OpenDalError]) -> Unit) -> Task raise OpenDalError
 pub fn AsyncOperator::stat_callback(Self, StringView, version? : StringView, if_match? : StringView, if_none_match? : StringView, callback~ : (Result[Metadata, OpenDalError]) -> Unit) -> Task raise OpenDalError
 pub fn AsyncOperator::write_callback(Self, StringView, BytesView, append? : Bool, content_type? : StringView, content_disposition? : StringView, content_encoding? : StringView, cache_control? : StringView, if_match? : StringView, if_none_match? : StringView, callback~ : (Result[Metadata, OpenDalError]) -> Unit) -> Task raise OpenDalError
 

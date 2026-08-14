@@ -17,6 +17,18 @@ const COMPLETION_DELETE = 5U
 const COMPLETION_LIST = 6U
 
 ///|
+const COMPLETION_CHECK = 7U
+
+///|
+const COMPLETION_EXISTS = 8U
+
+///|
+const COMPLETION_COPY = 9U
+
+///|
+const COMPLETION_RENAME = 10U
+
+///|
 priv enum CompletionTake {
   CompletionLocalMismatch
   CompletionBridgeFailure
@@ -291,6 +303,160 @@ fn finish_metadata_operation(
 }
 
 ///|
+fn finish_bool_operation(
+  operation : Task,
+  task : UInt,
+  expected_kind : UInt,
+  name : String,
+  context : ErrorContext,
+  callback : (Result[Bool, OpenDalError]) -> Unit,
+) -> Unit {
+  match operation.take_completion(task) {
+    CompletionLocalMismatch =>
+      callback(
+        Err(
+          local_error(
+            ResourceClosed,
+            "\{name} task no longer owns the pending callback",
+            context,
+          ),
+        ),
+      )
+    CompletionBridgeFailure =>
+      callback(
+        Err(
+          take_bridge_error(
+            ResourceClosed,
+            "\{name} task became ready without a completion",
+            context,
+          ),
+        ),
+      )
+    CompletionTaken(completion) => {
+      let kind = bridge_completion_kind(completion)
+      let status = bridge_completion_status(completion)
+      if kind != expected_kind {
+        ignore(bridge_completion_release(completion))
+        callback(
+          Err(
+            local_error(
+              AbiMismatch,
+              "\{name} task returned the wrong completion kind",
+              context,
+            ),
+          ),
+        )
+      } else if status != 0U {
+        callback(Err(completion_error(completion, "\{name} failed", context)))
+      } else {
+        let value = bridge_completion_take_bool(completion)
+        match value {
+          0 => callback(Ok(false))
+          1 => callback(Ok(true))
+          -1 => {
+            let error = take_bridge_error(
+              Unexpected,
+              "could not take the \{name} result",
+              context,
+            )
+            ignore(bridge_completion_release(completion))
+            callback(Err(error))
+          }
+          _ => {
+            ignore(bridge_completion_release(completion))
+            callback(
+              Err(
+                local_error(
+                  AbiMismatch,
+                  "\{name} task returned a non-canonical boolean",
+                  context,
+                ),
+              ),
+            )
+          }
+        }
+      }
+    }
+  }
+}
+
+///|
+/// Start a callback-based asynchronous connectivity check.
+///
+/// The callback is delivered from a later microtask or timer turn, never from
+/// the initiating call stack.
+pub fn AsyncOperator::check_callback(
+  self : AsyncOperator,
+  callback~ : (Result[Unit, OpenDalError]) -> Unit,
+) -> Task raise OpenDalError {
+  let context = error_context(Check)
+  if self.native.handle == 0U {
+    raise local_error(ResourceClosed, "operator is closed", context)
+  }
+  ignore(bridge_last_error_clear())
+  let task = bridge_operator_check_start(self.native.handle)
+  if task == 0U {
+    raise_last_bridge_error(
+      Unexpected,
+      "could not start an asynchronous check",
+      context,
+    )
+  }
+  let operation : Task = { handle: task, state: Pending }
+  start_wait(operation, task => {
+    finish_unit_operation(
+      operation,
+      task,
+      COMPLETION_CHECK,
+      "check",
+      context,
+      callback,
+    )
+  })
+  operation
+}
+
+///|
+/// Start a callback-based asynchronous existence check.
+///
+/// Only NotFound becomes `false`; all other backend failures remain errors.
+pub fn AsyncOperator::exists_callback(
+  self : AsyncOperator,
+  path : StringView,
+  callback~ : (Result[Bool, OpenDalError]) -> Unit,
+) -> Task raise OpenDalError {
+  let path = path.to_owned()
+  let context = error_context(Exists, path~)
+  if self.native.handle == 0U {
+    raise local_error(ResourceClosed, "operator is closed", context)
+  }
+  ignore(bridge_last_error_clear())
+  let handles : Array[UInt] = []
+  defer release_bridge_inputs(handles)
+  let path_handle = copy_bridge_input(path, handles, context)
+  let task = bridge_operator_exists_start(self.native.handle, path_handle)
+  if task == 0U {
+    raise_last_bridge_error(
+      Unexpected,
+      "could not start an asynchronous exists",
+      context,
+    )
+  }
+  let operation : Task = { handle: task, state: Pending }
+  start_wait(operation, task => {
+    finish_bool_operation(
+      operation,
+      task,
+      COMPLETION_EXISTS,
+      "exists",
+      context,
+      callback,
+    )
+  })
+  operation
+}
+
+///|
 /// Start a callback-based asynchronous write and return its metadata.
 ///
 /// The callback is delivered from a later microtask or timer turn, never from
@@ -541,6 +707,101 @@ pub fn AsyncOperator::stat_callback(
 }
 
 ///|
+/// Start a callback-based native copy and return destination metadata.
+///
+/// The bridge requires the base backend's copy capability and never simulates
+/// this operation with read plus write.
+pub fn AsyncOperator::copy_callback(
+  self : AsyncOperator,
+  source : StringView,
+  destination : StringView,
+  callback~ : (Result[Metadata, OpenDalError]) -> Unit,
+) -> Task raise OpenDalError {
+  let source = source.to_owned()
+  let destination = destination.to_owned()
+  let context = error_context(Copy, path=source, destination_path=destination)
+  if self.native.handle == 0U {
+    raise local_error(ResourceClosed, "operator is closed", context)
+  }
+  ignore(bridge_last_error_clear())
+  let handles : Array[UInt] = []
+  defer release_bridge_inputs(handles)
+  let source_handle = copy_bridge_input(source, handles, context)
+  let destination_handle = copy_bridge_input(destination, handles, context)
+  let task = bridge_operator_copy_start(
+    self.native.handle,
+    source_handle,
+    destination_handle,
+  )
+  if task == 0U {
+    raise_last_bridge_error(
+      Unexpected,
+      "could not start an asynchronous copy",
+      context,
+    )
+  }
+  let operation : Task = { handle: task, state: Pending }
+  start_wait(operation, task => {
+    finish_metadata_operation(
+      operation,
+      task,
+      COMPLETION_COPY,
+      "copy",
+      context,
+      callback,
+    )
+  })
+  operation
+}
+
+///|
+/// Start a callback-based native rename.
+///
+/// This operation is never simulated with copy plus delete.
+pub fn AsyncOperator::rename_callback(
+  self : AsyncOperator,
+  source : StringView,
+  destination : StringView,
+  callback~ : (Result[Unit, OpenDalError]) -> Unit,
+) -> Task raise OpenDalError {
+  let source = source.to_owned()
+  let destination = destination.to_owned()
+  let context = error_context(Rename, path=source, destination_path=destination)
+  if self.native.handle == 0U {
+    raise local_error(ResourceClosed, "operator is closed", context)
+  }
+  ignore(bridge_last_error_clear())
+  let handles : Array[UInt] = []
+  defer release_bridge_inputs(handles)
+  let source_handle = copy_bridge_input(source, handles, context)
+  let destination_handle = copy_bridge_input(destination, handles, context)
+  let task = bridge_operator_rename_start(
+    self.native.handle,
+    source_handle,
+    destination_handle,
+  )
+  if task == 0U {
+    raise_last_bridge_error(
+      Unexpected,
+      "could not start an asynchronous rename",
+      context,
+    )
+  }
+  let operation : Task = { handle: task, state: Pending }
+  start_wait(operation, task => {
+    finish_unit_operation(
+      operation,
+      task,
+      COMPLETION_RENAME,
+      "rename",
+      context,
+      callback,
+    )
+  })
+  operation
+}
+
+///|
 /// Start callback-based recursive directory creation.
 ///
 /// The path must end with `/`. The callback is always delivered from a later
@@ -589,9 +850,9 @@ pub fn AsyncOperator::create_dir_callback(
 pub fn AsyncOperator::delete_callback(
   self : AsyncOperator,
   path : StringView,
-  callback~ : (Result[Unit, OpenDalError]) -> Unit,
   version? : StringView,
   recursive? : Bool = false,
+  callback~ : (Result[Unit, OpenDalError]) -> Unit,
 ) -> Task raise OpenDalError {
   let path = path.to_owned()
   let context = error_context(Delete, path~)
@@ -705,10 +966,10 @@ fn materialize_entry_list(
 pub fn AsyncOperator::list_callback(
   self : AsyncOperator,
   path : StringView,
-  callback~ : (Result[Array[Entry], OpenDalError]) -> Unit,
   recursive? : Bool = false,
   limit? : UInt64,
   start_after? : StringView,
+  callback~ : (Result[Array[Entry], OpenDalError]) -> Unit,
 ) -> Task raise OpenDalError {
   let path = path.to_owned()
   let context = error_context(List, path~)

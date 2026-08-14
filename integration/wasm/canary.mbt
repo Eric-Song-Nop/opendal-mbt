@@ -23,28 +23,40 @@ const ASYNC_IDLE = 0
 const ASYNC_CREATE_DIR_PENDING = 1
 
 ///|
-const ASYNC_WRITE_PENDING = 2
+const ASYNC_CHECK_PENDING = 2
 
 ///|
-const ASYNC_READ_PENDING = 3
+const ASYNC_WRITE_PENDING = 3
 
 ///|
-const ASYNC_STAT_PENDING = 4
+const ASYNC_EXISTS_PENDING = 4
 
 ///|
-const ASYNC_LIST_PENDING = 5
+const ASYNC_COPY_PENDING = 5
 
 ///|
-const ASYNC_DELETE_PENDING = 6
+const ASYNC_RENAME_PENDING = 6
 
 ///|
-const ASYNC_DELETE_AGAIN_PENDING = 7
+const ASYNC_READ_PENDING = 7
 
 ///|
-const ASYNC_MISSING_PENDING = 8
+const ASYNC_STAT_PENDING = 8
 
 ///|
-const ASYNC_OK = 9
+const ASYNC_LIST_PENDING = 9
+
+///|
+const ASYNC_DELETE_PENDING = 10
+
+///|
+const ASYNC_DELETE_AGAIN_PENDING = 11
+
+///|
+const ASYNC_MISSING_PENDING = 12
+
+///|
+const ASYNC_OK = 13
 
 ///|
 const ASYNC_ERROR = -1
@@ -153,6 +165,34 @@ fn is_expected_read_not_found(
 }
 
 ///|
+fn is_expected_copy_unsupported(
+  error : @opendal.OpenDalError,
+  source : String,
+  destination : String,
+) -> Bool {
+  let info = error.info()
+  info.kind is Unsupported &&
+  info.status is Permanent &&
+  info.operation is Copy &&
+  info.path == Some(source) &&
+  info.destination_path == Some(destination)
+}
+
+///|
+fn is_expected_rename_unsupported(
+  error : @opendal.OpenDalError,
+  source : String,
+  destination : String,
+) -> Bool {
+  let info = error.info()
+  info.kind is Unsupported &&
+  info.status is Permanent &&
+  info.operation is Rename &&
+  info.path == Some(source) &&
+  info.destination_path == Some(destination)
+}
+
+///|
 fn fail_async_lifecycle() -> Unit {
   if async_operation.val is Some(operation) {
     operation.close()
@@ -194,16 +234,12 @@ fn start_async_delete_again(operator : @opendal.Operator) -> Unit {
   async_stage.val = ASYNC_DELETE_AGAIN_PENDING
   let operation = operator
     .as_async()
-    .delete_callback(
-      "canary/async/",
-      callback=result => {
-        match result {
-          Ok(_) => start_async_missing(operator)
-          Err(_) => fail_async_lifecycle()
-        }
-      },
-      recursive=true,
-    ) catch {
+    .delete_callback("canary/async/", recursive=true, callback=result => {
+      match result {
+        Ok(_) => start_async_missing(operator)
+        Err(_) => fail_async_lifecycle()
+      }
+    }) catch {
       _ => {
         fail_async_lifecycle()
         return
@@ -217,16 +253,12 @@ fn start_async_delete(operator : @opendal.Operator) -> Unit {
   async_stage.val = ASYNC_DELETE_PENDING
   let operation = operator
     .as_async()
-    .delete_callback(
-      "canary/async/",
-      callback=result => {
-        match result {
-          Ok(_) => start_async_delete_again(operator)
-          Err(_) => fail_async_lifecycle()
-        }
-      },
-      recursive=true,
-    ) catch {
+    .delete_callback("canary/async/", recursive=true, callback=result => {
+      match result {
+        Ok(_) => start_async_delete_again(operator)
+        Err(_) => fail_async_lifecycle()
+      }
+    }) catch {
       _ => {
         fail_async_lifecycle()
         return
@@ -259,35 +291,30 @@ fn start_async_list(operator : @opendal.Operator, payload : Bytes) -> Unit {
   async_stage.val = ASYNC_LIST_PENDING
   let operation = operator
     .as_async()
-    .list_callback(
-      "canary/async/",
-      callback=result => {
-        match result {
-          Ok(entries) => {
-            let mut found_file = false
-            let mut found_directory = false
-            for entry in entries {
-              if entry.path == "canary/async/data.bin" &&
-                entry.name == "data.bin" &&
-                entry.is_file() &&
-                entry.metadata.content_length == payload.length().to_uint64() {
-                found_file = true
-              } else if entry.path == "canary/async/" && entry.is_dir() {
-                found_directory = true
-              }
-            }
-            if found_file && found_directory {
-              start_async_delete(operator)
-            } else {
-              fail_async_lifecycle()
+    .list_callback("canary/async/", recursive=true, limit=2UL, callback=result => {
+      match result {
+        Ok(entries) => {
+          let mut found_file = false
+          let mut found_directory = false
+          for entry in entries {
+            if entry.path == "canary/async/data.bin" &&
+              entry.name == "data.bin" &&
+              entry.is_file() &&
+              entry.metadata.content_length == payload.length().to_uint64() {
+              found_file = true
+            } else if entry.path == "canary/async/" && entry.is_dir() {
+              found_directory = true
             }
           }
-          Err(_) => fail_async_lifecycle()
+          if found_file && found_directory {
+            start_async_delete(operator)
+          } else {
+            fail_async_lifecycle()
+          }
         }
-      },
-      recursive=true,
-      limit=2UL,
-    ) catch {
+        Err(_) => fail_async_lifecycle()
+      }
+    }) catch {
       _ => {
         fail_async_lifecycle()
         return
@@ -305,6 +332,69 @@ fn start_async_stat(operator : @opendal.Operator, payload : Bytes) -> Unit {
       match result {
         Ok(metadata) if has_async_write_metadata(metadata, payload) =>
           start_async_list(operator, payload)
+        _ => fail_async_lifecycle()
+      }
+    }) catch {
+      _ => {
+        fail_async_lifecycle()
+        return
+      }
+    }
+  async_operation.val = Some(operation)
+}
+
+///|
+fn start_async_rename(operator : @opendal.Operator, payload : Bytes) -> Unit {
+  let source = "canary/async/data.bin"
+  let destination = "canary/async/renamed.bin"
+  async_stage.val = ASYNC_RENAME_PENDING
+  let operation = operator
+    .as_async()
+    .rename_callback(source, destination, callback=result => {
+      match result {
+        Err(error) if is_expected_rename_unsupported(error, source, destination) =>
+          start_async_read(operator, payload)
+        _ => fail_async_lifecycle()
+      }
+    }) catch {
+      _ => {
+        fail_async_lifecycle()
+        return
+      }
+    }
+  async_operation.val = Some(operation)
+}
+
+///|
+fn start_async_copy(operator : @opendal.Operator, payload : Bytes) -> Unit {
+  let source = "canary/async/data.bin"
+  let destination = "canary/async/copied.bin"
+  async_stage.val = ASYNC_COPY_PENDING
+  let operation = operator
+    .as_async()
+    .copy_callback(source, destination, callback=result => {
+      match result {
+        Err(error) if is_expected_copy_unsupported(error, source, destination) =>
+          start_async_rename(operator, payload)
+        _ => fail_async_lifecycle()
+      }
+    }) catch {
+      _ => {
+        fail_async_lifecycle()
+        return
+      }
+    }
+  async_operation.val = Some(operation)
+}
+
+///|
+fn start_async_exists(operator : @opendal.Operator, payload : Bytes) -> Unit {
+  async_stage.val = ASYNC_EXISTS_PENDING
+  let operation = operator
+    .as_async()
+    .exists_callback("canary/async/data.bin", callback=result => {
+      match result {
+        Ok(true) => start_async_copy(operator, payload)
         _ => fail_async_lifecycle()
       }
     }) catch {
@@ -360,11 +450,30 @@ fn start_async_write(operator : @opendal.Operator, payload : Bytes) -> Unit {
       callback=result => {
         match result {
           Ok(metadata) if has_async_write_metadata(metadata, payload) =>
-            start_async_read(operator, payload)
+            start_async_exists(operator, payload)
           _ => fail_async_lifecycle()
         }
       },
     ) catch {
+      _ => {
+        fail_async_lifecycle()
+        return
+      }
+    }
+  async_operation.val = Some(operation)
+}
+
+///|
+fn start_async_check(operator : @opendal.Operator, payload : Bytes) -> Unit {
+  async_stage.val = ASYNC_CHECK_PENDING
+  let operation = operator
+    .as_async()
+    .check_callback(callback=result => {
+      match result {
+        Ok(_) => start_async_write(operator, payload)
+        Err(_) => fail_async_lifecycle()
+      }
+    }) catch {
       _ => {
         fail_async_lifecycle()
         return
@@ -397,7 +506,9 @@ pub fn canary_async_start() -> Int {
     !info.capability.can_write() ||
     !info.capability.can_create_dir() ||
     !info.capability.can_delete() ||
-    !info.capability.can_list() {
+    !info.capability.can_list() ||
+    info.capability.can_copy() ||
+    info.capability.can_rename() {
     operator.close()
     return ASYNC_ERROR
   }
@@ -408,7 +519,7 @@ pub fn canary_async_start() -> Int {
     .as_async()
     .create_dir_callback("canary/async/", callback=result => {
       match result {
-        Ok(_) => start_async_write(operator, payload)
+        Ok(_) => start_async_check(operator, payload)
         Err(_) => fail_async_lifecycle()
       }
     }) catch {
