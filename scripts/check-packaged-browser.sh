@@ -71,7 +71,11 @@ link_tool() {
     ln -s "$tool_path" "$clean_bin/$tool_name"
   fi
 }
+# Google Chrome's Linux entry point is a shell wrapper that resolves its real
+# binary and prepares XDG state with these basic POSIX tools. They are runtime
+# launcher dependencies, not Rust, npm, or bundler build dependencies.
 for tool in moon moonc moonrun node sh ps \
+  readlink dirname mkdir touch cat \
   google-chrome-stable google-chrome chromium chromium-browser; do
   link_tool "$tool"
 done
@@ -82,6 +86,12 @@ if output=$(
   MOON_HOME="$test_moon_home"
   export PATH MOON_HOME
   unset CARGO_HOME RUSTUP_HOME FORCE_COLOR OPENDAL_MBT_NATIVE_LIB
+  for runtime_tool in readlink dirname mkdir touch cat; do
+    if ! command -v "$runtime_tool" >/dev/null 2>&1; then
+      echo "$runtime_tool is unavailable to the Chrome launcher" >&2
+      exit 1
+    fi
+  done
   for forbidden_tool in cargo rustc wasm-bindgen npm npx esbuild webpack rollup vite; do
     if command -v "$forbidden_tool" >/dev/null 2>&1; then
       echo "$forbidden_tool is visible during the packaged browser test" >&2

@@ -133,14 +133,6 @@ extern "js" fn launch_chrome() -> @js_async.Promise[String] =
   #|         "/Applications/Chromium.app/Contents/MacOS/Chromium",
   #|       )
   #|     }
-  #|     if (process.platform === "linux") {
-  #|       candidates.push(
-  #|         "/opt/google/chrome/chrome",
-  #|         "/opt/google/chrome/google-chrome",
-  #|         "/usr/lib/chromium/chromium",
-  #|         "/usr/lib/chromium-browser/chromium-browser",
-  #|       )
-  #|     }
   #|     if (process.platform === "win32") {
   #|       for (const base of [
   #|         process.env.PROGRAMFILES,
@@ -155,6 +147,7 @@ extern "js" fn launch_chrome() -> @js_async.Promise[String] =
   #|         "/opt/google/chrome/chrome",
   #|         "/opt/google/chrome/google-chrome",
   #|         "/usr/lib/chromium/chromium",
+  #|         "/usr/lib/chromium-browser/chromium-browser",
   #|         "/usr/bin/google-chrome-stable",
   #|         "/usr/bin/google-chrome",
   #|         "/usr/bin/chromium",
