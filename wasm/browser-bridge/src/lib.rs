@@ -12,10 +12,11 @@ use std::task::{Context, Poll, Waker};
 
 use futures_util::TryStreamExt;
 use opendal::{
-    BytesRange, ErrorKind, Metadata, Operator, OperatorRegistry, options, services::Memory,
+    Buffer, BufferStream, BytesRange, ErrorKind, Lister, Metadata, Operator, OperatorRegistry,
+    Writer, options, services::Memory,
 };
 
-const ABI_VERSION: u32 = 0x0001_0006;
+const ABI_VERSION: u32 = 0x0001_0007;
 const FEATURE_MEMORY_SERVICE: u32 = 1 << 0;
 const FEATURE_POLL_ONCE_CANARY: u32 = 1 << 1;
 const FEATURE_GENERATION_HANDLES: u32 = 1 << 2;
@@ -27,6 +28,11 @@ const FEATURE_BOUNDED_LIST: u32 = 1 << 7;
 const FEATURE_BULK_TRANSFER: u32 = 1 << 8;
 const FEATURE_STRUCTURED_ERRORS: u32 = 1 << 9;
 const FEATURE_METADATA_OPTIONS: u32 = 1 << 10;
+const FEATURE_COPY_RENAME: u32 = 1 << 11;
+const FEATURE_STATEFUL_READER: u32 = 1 << 12;
+const FEATURE_STATEFUL_WRITER: u32 = 1 << 13;
+const FEATURE_STATEFUL_LISTER: u32 = 1 << 14;
+const FEATURE_EXPLICIT_EOF: u32 = 1 << 15;
 const MAX_SLOTS: usize = u16::MAX as usize;
 const MAX_GENERATION: u16 = i16::MAX as u16;
 const MAX_BUFFER_LENGTH: usize = 64 * 1024 * 1024;
@@ -55,6 +61,7 @@ const ERROR_INVALID_ARGUMENT: u32 = 0x1001;
 const ERROR_RESOURCE_CLOSED: u32 = 0x1002;
 const ERROR_BUFFER_TOO_LARGE: u32 = 0x1003;
 const ERROR_ABI_MISMATCH: u32 = 0x1004;
+const ERROR_RESOURCE_BUSY: u32 = 0x1006;
 
 const ERROR_STATUS_PERMANENT: u32 = 1;
 const ERROR_STATUS_TEMPORARY: u32 = 2;
@@ -93,6 +100,16 @@ const COMPLETION_STAT: u32 = 3;
 const COMPLETION_CREATE_DIR: u32 = 4;
 const COMPLETION_DELETE: u32 = 5;
 const COMPLETION_LIST: u32 = 6;
+const COMPLETION_COPY: u32 = 7;
+const COMPLETION_RENAME: u32 = 8;
+const COMPLETION_OPEN_READER: u32 = 9;
+const COMPLETION_READER_NEXT: u32 = 10;
+const COMPLETION_OPEN_WRITER: u32 = 11;
+const COMPLETION_WRITER_WRITE: u32 = 12;
+const COMPLETION_WRITER_FINISH: u32 = 13;
+const COMPLETION_WRITER_ABORT: u32 = 14;
+const COMPLETION_OPEN_LISTER: u32 = 15;
+const COMPLETION_LISTER_NEXT: u32 = 16;
 
 const ENTRY_MODE_UNKNOWN: u32 = 0;
 const ENTRY_MODE_FILE: u32 = 1;
@@ -152,6 +169,10 @@ enum BridgeError {
     TaskConsumed { handle: u32 },
     #[error("the bridge instance has been torn down")]
     TornDown,
+    #[error("resource {handle} is closed")]
+    ResourceClosed { handle: u32 },
+    #[error("resource {handle} already has an operation in flight")]
+    ResourceBusy { handle: u32 },
     #[error(
         "list exceeds the binding limits of {MAX_LIST_ENTRIES} entries or {MAX_LIST_OUTPUT_BYTES} UTF-8 bytes"
     )]
@@ -183,6 +204,8 @@ impl BridgeError {
             Self::ListTooLarge => 15,
             Self::AllocationFailed => 16,
             Self::InvalidArgument { .. } => 17,
+            Self::ResourceClosed { .. } => 1,
+            Self::ResourceBusy { .. } => 18,
         }
     }
 
@@ -191,7 +214,9 @@ impl BridgeError {
             Self::InvalidHandle { .. }
             | Self::TaskNotReady { .. }
             | Self::TaskConsumed { .. }
-            | Self::TornDown => ERROR_RESOURCE_CLOSED,
+            | Self::TornDown
+            | Self::ResourceClosed { .. } => ERROR_RESOURCE_CLOSED,
+            Self::ResourceBusy { .. } => ERROR_RESOURCE_BUSY,
             Self::WrongResourceType { .. } => ERROR_ABI_MISMATCH,
             Self::IndexOutOfBounds { .. }
             | Self::InvalidByte { .. }
@@ -218,7 +243,9 @@ impl BridgeError {
             Self::InvalidHandle { .. }
             | Self::TaskNotReady { .. }
             | Self::TaskConsumed { .. }
-            | Self::TornDown => "ResourceClosed",
+            | Self::TornDown
+            | Self::ResourceClosed { .. } => "ResourceClosed",
+            Self::ResourceBusy { .. } => "ResourceBusy",
             Self::WrongResourceType { .. } => "AbiMismatch",
             Self::IndexOutOfBounds { .. }
             | Self::InvalidByte { .. }
@@ -445,6 +472,9 @@ enum ResourceKind {
     Task,
     Completion,
     EntryList,
+    ReadStream,
+    Writer,
+    Lister,
 }
 
 impl ResourceKind {
@@ -458,6 +488,9 @@ impl ResourceKind {
             Self::Task => "task",
             Self::Completion => "completion",
             Self::EntryList => "entry list",
+            Self::ReadStream => "read stream",
+            Self::Writer => "writer",
+            Self::Lister => "lister",
         }
     }
 }
@@ -474,6 +507,44 @@ struct EntrySnapshot {
     mode: u32,
     content_length: u64,
     metadata_snapshot: Vec<u8>,
+}
+
+struct ReadStreamCursor {
+    stream: BufferStream,
+    pending: Option<Buffer>,
+    max_chunk: usize,
+}
+
+enum ReadStreamState {
+    Open(Box<ReadStreamCursor>, u64),
+    Busy(u64),
+    End,
+    Failed,
+}
+
+enum WriterState {
+    Open(Box<Writer>, u64),
+    Busy(u64),
+    Finished(Box<Metadata>),
+    Aborted,
+    Failed,
+}
+
+enum ListerState {
+    Open(Box<Lister>, u64),
+    Busy(u64),
+    End,
+    Failed,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ResourceLease {
+    handle: u32,
+    kind: ResourceKind,
+    // A handle generation identifies the resource, while this token identifies
+    // one operation on that resource. An older ready task must not be able to
+    // terminalize a newer in-flight operation on the same handle.
+    operation: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -496,6 +567,9 @@ enum Resource {
     Task(Task),
     Completion(Completion),
     EntryList(Vec<EntrySnapshot>),
+    ReadStream(ReadStreamState),
+    Writer(WriterState),
+    Lister(ListerState),
 }
 
 impl Resource {
@@ -509,13 +583,16 @@ impl Resource {
             Self::Task(_) => ResourceKind::Task,
             Self::Completion(_) => ResourceKind::Completion,
             Self::EntryList(_) => ResourceKind::EntryList,
+            Self::ReadStream(_) => ResourceKind::ReadStream,
+            Self::Writer(_) => ResourceKind::Writer,
+            Self::Lister(_) => ResourceKind::Lister,
         }
     }
 }
 
 enum Task {
-    Pending,
-    Ready(Box<Completion>),
+    Pending(Option<ResourceLease>),
+    Ready(Box<Completion>, Option<ResourceLease>),
     Cancelled,
     Consumed,
 }
@@ -527,6 +604,16 @@ enum Completion {
     CreateDir(Result<(), BridgeError>),
     Delete(Result<(), BridgeError>),
     List(Result<Vec<EntrySnapshot>, BridgeError>),
+    Copy(Result<Box<Metadata>, BridgeError>),
+    Rename(Result<(), BridgeError>),
+    OpenReadStream(Result<Box<ReadStreamCursor>, BridgeError>),
+    ReadStreamNext(Result<Option<Vec<u8>>, BridgeError>),
+    OpenWriter(Result<Box<Writer>, BridgeError>),
+    WriterWrite(Result<(), BridgeError>),
+    WriterFinish(Result<Box<Metadata>, BridgeError>),
+    WriterAbort(Result<(), BridgeError>),
+    OpenLister(Result<Box<Lister>, BridgeError>),
+    ListerNext(Result<Option<EntrySnapshot>, BridgeError>),
 }
 
 impl Completion {
@@ -538,6 +625,16 @@ impl Completion {
             Self::CreateDir(_) => COMPLETION_CREATE_DIR,
             Self::Delete(_) => COMPLETION_DELETE,
             Self::List(_) => COMPLETION_LIST,
+            Self::Copy(_) => COMPLETION_COPY,
+            Self::Rename(_) => COMPLETION_RENAME,
+            Self::OpenReadStream(_) => COMPLETION_OPEN_READER,
+            Self::ReadStreamNext(_) => COMPLETION_READER_NEXT,
+            Self::OpenWriter(_) => COMPLETION_OPEN_WRITER,
+            Self::WriterWrite(_) => COMPLETION_WRITER_WRITE,
+            Self::WriterFinish(_) => COMPLETION_WRITER_FINISH,
+            Self::WriterAbort(_) => COMPLETION_WRITER_ABORT,
+            Self::OpenLister(_) => COMPLETION_OPEN_LISTER,
+            Self::ListerNext(_) => COMPLETION_LISTER_NEXT,
         }
     }
 
@@ -549,12 +646,32 @@ impl Completion {
             | Self::CreateDir(Err(error))
             | Self::Delete(Err(error))
             | Self::List(Err(error)) => Some(error),
+            Self::Copy(Err(error))
+            | Self::Rename(Err(error))
+            | Self::OpenReadStream(Err(error))
+            | Self::ReadStreamNext(Err(error))
+            | Self::OpenWriter(Err(error))
+            | Self::WriterWrite(Err(error))
+            | Self::WriterFinish(Err(error))
+            | Self::WriterAbort(Err(error))
+            | Self::OpenLister(Err(error))
+            | Self::ListerNext(Err(error)) => Some(error),
             Self::Write(Ok(_))
             | Self::Read(Ok(_))
             | Self::Stat(Ok(_))
             | Self::CreateDir(Ok(()))
             | Self::Delete(Ok(()))
             | Self::List(Ok(_)) => None,
+            Self::Copy(Ok(_))
+            | Self::Rename(Ok(()))
+            | Self::OpenReadStream(Ok(_))
+            | Self::ReadStreamNext(Ok(_))
+            | Self::OpenWriter(Ok(_))
+            | Self::WriterWrite(Ok(()))
+            | Self::WriterFinish(Ok(_))
+            | Self::WriterAbort(Ok(()))
+            | Self::OpenLister(Ok(_))
+            | Self::ListerNext(Ok(_)) => None,
         }
     }
 }
@@ -743,6 +860,31 @@ impl Arena {
         }
     }
 
+    fn read_stream_mut(&mut self, handle: u32) -> Result<&mut ReadStreamState, BridgeError> {
+        match self.resource_mut(handle)? {
+            Resource::ReadStream(stream) => Ok(stream),
+            resource => Err(wrong_resource_type(
+                handle,
+                ResourceKind::ReadStream,
+                resource,
+            )),
+        }
+    }
+
+    fn writer_mut(&mut self, handle: u32) -> Result<&mut WriterState, BridgeError> {
+        match self.resource_mut(handle)? {
+            Resource::Writer(writer) => Ok(writer),
+            resource => Err(wrong_resource_type(handle, ResourceKind::Writer, resource)),
+        }
+    }
+
+    fn lister_mut(&mut self, handle: u32) -> Result<&mut ListerState, BridgeError> {
+        match self.resource_mut(handle)? {
+            Resource::Lister(lister) => Ok(lister),
+            resource => Err(wrong_resource_type(handle, ResourceKind::Lister, resource)),
+        }
+    }
+
     fn ensure_insert_capacity_after_take(
         &self,
         handle: u32,
@@ -805,9 +947,20 @@ impl Arena {
 struct State {
     arena: Arena,
     last_error: Option<BridgeError>,
+    next_resource_operation: u64,
     forced_pending_poll_count: u32,
     force_pending_for_canary: bool,
     torn_down: bool,
+}
+
+fn allocate_resource_operation(state: &mut State) -> Result<u64, BridgeError> {
+    // Never wrap: reusing a token could make a very old task authoritative.
+    let operation = state
+        .next_resource_operation
+        .checked_add(1)
+        .ok_or(BridgeError::LengthOverflow)?;
+    state.next_resource_operation = operation;
+    Ok(operation)
 }
 
 thread_local! {
@@ -916,7 +1069,7 @@ where
 }
 
 fn start_task(future: impl Future<Output = Completion> + 'static) -> Result<u32, BridgeError> {
-    let handle = insert_resource(Resource::Task(Task::Pending))?;
+    let handle = insert_resource(Resource::Task(Task::Pending(None)))?;
     let force_pending = STATE.with(|state| state.borrow().force_pending_for_canary);
     wasm_bindgen_futures::spawn_local(async move {
         let completion = if force_pending {
@@ -933,11 +1086,173 @@ fn publish_task(handle: u32, completion: Completion) {
     STATE.with(|state| {
         let mut state = state.borrow_mut();
         if let Ok(task) = state.arena.task_mut(handle)
-            && matches!(task, Task::Pending)
+            && matches!(task, Task::Pending(None))
         {
-            *task = Task::Ready(Box::new(completion));
+            *task = Task::Ready(Box::new(completion), None);
         }
     });
+}
+
+enum ResourceUpdate {
+    ReadStream(ReadStreamUpdate),
+    Writer(WriterUpdate),
+    Lister(ListerUpdate),
+}
+
+enum ReadStreamUpdate {
+    Open(Box<ReadStreamCursor>),
+    End,
+    Failed,
+}
+
+enum WriterUpdate {
+    Open(Box<Writer>),
+    Finished(Box<Metadata>),
+    Aborted,
+    Failed,
+}
+
+enum ListerUpdate {
+    Open(Box<Lister>),
+    End,
+    Failed,
+}
+
+impl ResourceUpdate {
+    fn kind(&self) -> ResourceKind {
+        match self {
+            Self::ReadStream(_) => ResourceKind::ReadStream,
+            Self::Writer(_) => ResourceKind::Writer,
+            Self::Lister(_) => ResourceKind::Lister,
+        }
+    }
+}
+
+fn spawn_resource_task(
+    handle: u32,
+    lease: ResourceLease,
+    future: impl Future<Output = (ResourceUpdate, Completion)> + 'static,
+) {
+    let force_pending = STATE.with(|state| state.borrow().force_pending_for_canary);
+    wasm_bindgen_futures::spawn_local(async move {
+        let (update, completion) = if force_pending {
+            ForcePending::new(future).await
+        } else {
+            future.await
+        };
+        publish_resource_task(handle, lease, update, completion);
+    });
+}
+
+fn publish_resource_task(
+    task_handle: u32,
+    lease: ResourceLease,
+    update: ResourceUpdate,
+    completion: Completion,
+) {
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let task_is_pending = matches!(
+            state.arena.task(task_handle),
+            Ok(Task::Pending(Some(current))) if *current == lease
+        );
+        if !task_is_pending || update.kind() != lease.kind {
+            return;
+        }
+
+        match update {
+            ResourceUpdate::ReadStream(update) => {
+                if let Ok(current) = state.arena.read_stream_mut(lease.handle)
+                    && matches!(current, ReadStreamState::Busy(operation) if *operation == lease.operation)
+                {
+                    *current = match update {
+                        ReadStreamUpdate::Open(cursor) => {
+                            ReadStreamState::Open(cursor, lease.operation)
+                        }
+                        ReadStreamUpdate::End => ReadStreamState::End,
+                        ReadStreamUpdate::Failed => ReadStreamState::Failed,
+                    };
+                }
+            }
+            ResourceUpdate::Writer(update) => {
+                if let Ok(current) = state.arena.writer_mut(lease.handle)
+                    && matches!(current, WriterState::Busy(operation) if *operation == lease.operation)
+                {
+                    *current = match update {
+                        WriterUpdate::Open(writer) => WriterState::Open(writer, lease.operation),
+                        WriterUpdate::Finished(metadata) => WriterState::Finished(metadata),
+                        WriterUpdate::Aborted => WriterState::Aborted,
+                        WriterUpdate::Failed => WriterState::Failed,
+                    };
+                }
+            }
+            ResourceUpdate::Lister(update) => {
+                if let Ok(current) = state.arena.lister_mut(lease.handle)
+                    && matches!(current, ListerState::Busy(operation) if *operation == lease.operation)
+                {
+                    *current = match update {
+                        ListerUpdate::Open(lister) => {
+                            ListerState::Open(lister, lease.operation)
+                        }
+                        ListerUpdate::End => ListerState::End,
+                        ListerUpdate::Failed => ListerState::Failed,
+                    };
+                }
+            }
+        }
+
+        if let Ok(task) = state.arena.task_mut(task_handle)
+            && matches!(task, Task::Pending(Some(current)) if *current == lease)
+        {
+            *task = Task::Ready(Box::new(completion), Some(lease));
+        }
+    });
+}
+
+fn terminalize_lease(arena: &mut Arena, lease: ResourceLease) {
+    match lease.kind {
+        ResourceKind::ReadStream => {
+            if let Ok(stream) = arena.read_stream_mut(lease.handle)
+                && matches!(
+                    stream,
+                    ReadStreamState::Open(_, operation) | ReadStreamState::Busy(operation)
+                        if *operation == lease.operation
+                )
+            {
+                *stream = ReadStreamState::Failed;
+            }
+        }
+        ResourceKind::Writer => {
+            if let Ok(writer) = arena.writer_mut(lease.handle)
+                && matches!(
+                    writer,
+                    WriterState::Open(_, operation) | WriterState::Busy(operation)
+                        if *operation == lease.operation
+                )
+            {
+                *writer = WriterState::Failed;
+            }
+        }
+        ResourceKind::Lister => {
+            if let Ok(lister) = arena.lister_mut(lease.handle)
+                && matches!(
+                    lister,
+                    ListerState::Open(_, operation) | ListerState::Busy(operation)
+                        if *operation == lease.operation
+                )
+            {
+                *lister = ListerState::Failed;
+            }
+        }
+        _ => {}
+    }
+}
+
+fn task_lease(task: &Task) -> Option<ResourceLease> {
+    match task {
+        Task::Pending(lease) | Task::Ready(_, lease) => *lease,
+        Task::Cancelled | Task::Consumed => None,
+    }
 }
 
 fn path_and_operator(
@@ -1054,6 +1369,36 @@ fn write_options_from_scalars(
     })
 }
 
+fn read_stream_options_from_scalars(
+    chunk_size: u32,
+    range_kind: u32,
+    range_offset: u64,
+    range_length: u64,
+    version_handle: u32,
+    if_match_handle: u32,
+    if_none_match_handle: u32,
+) -> Result<(options::ReaderOptions, BytesRange, usize), BridgeError> {
+    let chunk_size = usize::try_from(chunk_size).map_err(|_| BridgeError::LengthOverflow)?;
+    if !(1..=MAX_TRANSFER_CHUNK).contains(&chunk_size) {
+        return Err(BridgeError::InvalidArgument {
+            message: format!(
+                "read stream chunk size must be 1..={MAX_TRANSFER_CHUNK}, found {chunk_size}"
+            ),
+        });
+    }
+    Ok((
+        options::ReaderOptions {
+            version: optional_owned_utf8_buffer(version_handle)?,
+            if_match: optional_owned_utf8_buffer(if_match_handle)?,
+            if_none_match: optional_owned_utf8_buffer(if_none_match_handle)?,
+            chunk: Some(chunk_size),
+            ..Default::default()
+        },
+        byte_range(range_kind, range_offset, range_length)?,
+        chunk_size,
+    ))
+}
+
 fn ensure_suffix_is_native(operator: &Operator, range: &BytesRange) -> Result<(), BridgeError> {
     if range.is_suffix() && !operator.base_service().capability_dyn().read_with_suffix {
         return Err(BridgeError::from(opendal::Error::new(
@@ -1122,6 +1467,223 @@ fn start_write_task(
     })
 }
 
+fn start_copy_task(
+    operator_handle: u32,
+    from_handle: u32,
+    to_handle: u32,
+) -> Result<u32, BridgeError> {
+    let (operator, from, to) = STATE.with(|state| -> Result<_, BridgeError> {
+        let state = state.borrow();
+        let operator = state.arena.operator(operator_handle)?.clone();
+        let from = std::str::from_utf8(state.arena.buffer(from_handle)?)
+            .map_err(|_| BridgeError::InvalidUtf8)
+            .and_then(try_owned_string)?;
+        let to = std::str::from_utf8(state.arena.buffer(to_handle)?)
+            .map_err(|_| BridgeError::InvalidUtf8)
+            .and_then(try_owned_string)?;
+        Ok((operator, from, to))
+    })?;
+    start_task(async move {
+        Completion::Copy(
+            operator
+                .copy(&from, &to)
+                .await
+                .map(Box::new)
+                .map_err(BridgeError::from),
+        )
+    })
+}
+
+fn start_rename_task(
+    operator_handle: u32,
+    from_handle: u32,
+    to_handle: u32,
+) -> Result<u32, BridgeError> {
+    let (operator, from, to) = STATE.with(|state| -> Result<_, BridgeError> {
+        let state = state.borrow();
+        let operator = state.arena.operator(operator_handle)?.clone();
+        let from = std::str::from_utf8(state.arena.buffer(from_handle)?)
+            .map_err(|_| BridgeError::InvalidUtf8)
+            .and_then(try_owned_string)?;
+        let to = std::str::from_utf8(state.arena.buffer(to_handle)?)
+            .map_err(|_| BridgeError::InvalidUtf8)
+            .and_then(try_owned_string)?;
+        Ok((operator, from, to))
+    })?;
+    start_task(async move {
+        Completion::Rename(operator.rename(&from, &to).await.map_err(BridgeError::from))
+    })
+}
+
+fn copy_stream_chunk(
+    buffer: Buffer,
+    max_chunk: usize,
+) -> Result<(Vec<u8>, Option<Buffer>), BridgeError> {
+    let mut buffer = buffer;
+    let length = buffer.len().min(max_chunk);
+    let chunk = buffer.split_to(length);
+    let remainder = (!buffer.is_empty()).then_some(buffer);
+    try_owned_opendal_buffer(chunk).map(|chunk| (chunk, remainder))
+}
+
+async fn read_stream_next(mut cursor: Box<ReadStreamCursor>) -> (ResourceUpdate, Completion) {
+    let next = match cursor.pending.take() {
+        Some(buffer) => Ok(Some(buffer)),
+        None => cursor.stream.try_next().await.map_err(BridgeError::from),
+    };
+    match next {
+        Ok(Some(buffer)) => match copy_stream_chunk(buffer, cursor.max_chunk) {
+            Ok((chunk, remainder)) => {
+                cursor.pending = remainder;
+                (
+                    ResourceUpdate::ReadStream(ReadStreamUpdate::Open(cursor)),
+                    Completion::ReadStreamNext(Ok(Some(chunk))),
+                )
+            }
+            Err(error) => (
+                ResourceUpdate::ReadStream(ReadStreamUpdate::Failed),
+                Completion::ReadStreamNext(Err(error)),
+            ),
+        },
+        Ok(None) => (
+            ResourceUpdate::ReadStream(ReadStreamUpdate::End),
+            Completion::ReadStreamNext(Ok(None)),
+        ),
+        Err(error) => (
+            ResourceUpdate::ReadStream(ReadStreamUpdate::Failed),
+            Completion::ReadStreamNext(Err(error)),
+        ),
+    }
+}
+
+fn reserve_read_stream_next(
+    handle: u32,
+) -> Result<(u32, ResourceLease, Box<ReadStreamCursor>), BridgeError> {
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        if state.torn_down {
+            return Err(BridgeError::TornDown);
+        }
+        if !state.arena.can_insert() {
+            return Err(BridgeError::HandleLimit);
+        }
+        let operation = allocate_resource_operation(&mut state)?;
+        let stream = state.arena.read_stream_mut(handle)?;
+        let (cursor, previous_operation) =
+            match std::mem::replace(stream, ReadStreamState::Busy(operation)) {
+                ReadStreamState::Open(cursor, previous_operation) => (cursor, previous_operation),
+                ReadStreamState::Busy(active_operation) => {
+                    *stream = ReadStreamState::Busy(active_operation);
+                    return Err(BridgeError::ResourceBusy { handle });
+                }
+                terminal @ (ReadStreamState::End | ReadStreamState::Failed) => {
+                    *stream = terminal;
+                    return Err(BridgeError::ResourceClosed { handle });
+                }
+            };
+        let lease = ResourceLease {
+            handle,
+            kind: ResourceKind::ReadStream,
+            operation,
+        };
+        match state
+            .arena
+            .insert(Resource::Task(Task::Pending(Some(lease))))
+        {
+            Ok(task) => Ok((task, lease, cursor)),
+            Err(error) => {
+                *state.arena.read_stream_mut(handle)? =
+                    ReadStreamState::Open(cursor, previous_operation);
+                Err(error)
+            }
+        }
+    })
+}
+
+fn reserve_writer_call(handle: u32) -> Result<(u32, ResourceLease, Box<Writer>), BridgeError> {
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        if state.torn_down {
+            return Err(BridgeError::TornDown);
+        }
+        if !state.arena.can_insert() {
+            return Err(BridgeError::HandleLimit);
+        }
+        let operation = allocate_resource_operation(&mut state)?;
+        let writer = state.arena.writer_mut(handle)?;
+        let (inner, previous_operation) =
+            match std::mem::replace(writer, WriterState::Busy(operation)) {
+                WriterState::Open(inner, previous_operation) => (inner, previous_operation),
+                WriterState::Busy(active_operation) => {
+                    *writer = WriterState::Busy(active_operation);
+                    return Err(BridgeError::ResourceBusy { handle });
+                }
+                terminal @ (WriterState::Finished(_)
+                | WriterState::Aborted
+                | WriterState::Failed) => {
+                    *writer = terminal;
+                    return Err(BridgeError::ResourceClosed { handle });
+                }
+            };
+        let lease = ResourceLease {
+            handle,
+            kind: ResourceKind::Writer,
+            operation,
+        };
+        match state
+            .arena
+            .insert(Resource::Task(Task::Pending(Some(lease))))
+        {
+            Ok(task) => Ok((task, lease, inner)),
+            Err(error) => {
+                *state.arena.writer_mut(handle)? = WriterState::Open(inner, previous_operation);
+                Err(error)
+            }
+        }
+    })
+}
+
+fn reserve_lister_next(handle: u32) -> Result<(u32, ResourceLease, Box<Lister>), BridgeError> {
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        if state.torn_down {
+            return Err(BridgeError::TornDown);
+        }
+        if !state.arena.can_insert() {
+            return Err(BridgeError::HandleLimit);
+        }
+        let operation = allocate_resource_operation(&mut state)?;
+        let lister = state.arena.lister_mut(handle)?;
+        let (inner, previous_operation) =
+            match std::mem::replace(lister, ListerState::Busy(operation)) {
+                ListerState::Open(inner, previous_operation) => (inner, previous_operation),
+                ListerState::Busy(active_operation) => {
+                    *lister = ListerState::Busy(active_operation);
+                    return Err(BridgeError::ResourceBusy { handle });
+                }
+                terminal @ (ListerState::End | ListerState::Failed) => {
+                    *lister = terminal;
+                    return Err(BridgeError::ResourceClosed { handle });
+                }
+            };
+        let lease = ResourceLease {
+            handle,
+            kind: ResourceKind::Lister,
+            operation,
+        };
+        match state
+            .arena
+            .insert(Resource::Task(Task::Pending(Some(lease))))
+        {
+            Ok(task) => Ok((task, lease, inner)),
+            Err(error) => {
+                *state.arena.lister_mut(handle)? = ListerState::Open(inner, previous_operation);
+                Err(error)
+            }
+        }
+    })
+}
+
 fn try_owned_string(value: &str) -> Result<String, BridgeError> {
     let mut owned = String::new();
     owned
@@ -1156,6 +1718,17 @@ fn try_owned_opendal_buffer(buffer: opendal::Buffer) -> Result<Vec<u8>, BridgeEr
         owned.extend_from_slice(&chunk);
     }
     Ok(owned)
+}
+
+fn owned_writer_chunk(handle: u32) -> Result<Vec<u8>, BridgeError> {
+    STATE.with(|state| {
+        let state = state.borrow();
+        let data = state.arena.buffer(handle)?;
+        if data.len() > MAX_TRANSFER_CHUNK {
+            return Err(BridgeError::BufferTooLarge);
+        }
+        try_owned_bytes(data)
+    })
 }
 
 fn checked_buffer_window(
@@ -1221,6 +1794,31 @@ fn push_entry_snapshot(
     Ok(())
 }
 
+fn entry_snapshot(entry: opendal::Entry) -> Result<EntrySnapshot, BridgeError> {
+    let name = try_owned_string(entry.name())?;
+    let (path, metadata) = entry.into_parts();
+    let mode = match metadata.mode() {
+        opendal::EntryMode::FILE => ENTRY_MODE_FILE,
+        opendal::EntryMode::DIR => ENTRY_MODE_DIRECTORY,
+        opendal::EntryMode::Unknown => ENTRY_MODE_UNKNOWN,
+    };
+    let content_length = metadata.content_length();
+    let metadata_snapshot = metadata_snapshot_bytes(&metadata)?;
+    let _encoded_length = path
+        .len()
+        .checked_add(name.len())
+        .and_then(|length| length.checked_add(metadata_snapshot.len()))
+        .filter(|length| *length <= MAX_LIST_OUTPUT_BYTES)
+        .ok_or(BridgeError::ListTooLarge)?;
+    Ok(EntrySnapshot {
+        path,
+        name,
+        mode,
+        content_length,
+        metadata_snapshot,
+    })
+}
+
 async fn collect_list(
     operator: Operator,
     path: String,
@@ -1239,25 +1837,10 @@ async fn collect_list(
     let mut entries = Vec::new();
     let mut total_bytes = 0;
     while let Some(entry) = lister.try_next().await.map_err(BridgeError::from)? {
-        let name = try_owned_string(entry.name())?;
-        let (path, metadata) = entry.into_parts();
-        let mode = match metadata.mode() {
-            opendal::EntryMode::FILE => ENTRY_MODE_FILE,
-            opendal::EntryMode::DIR => ENTRY_MODE_DIRECTORY,
-            opendal::EntryMode::Unknown => ENTRY_MODE_UNKNOWN,
-        };
-        let content_length = metadata.content_length();
-        let metadata_snapshot = metadata_snapshot_bytes(&metadata)?;
         push_entry_snapshot(
             &mut entries,
             &mut total_bytes,
-            EntrySnapshot {
-                path,
-                name,
-                mode,
-                content_length,
-                metadata_snapshot,
-            },
+            entry_snapshot(entry)?,
             PRODUCTION_LIST_BOUNDS,
         )?;
     }
@@ -1403,6 +1986,11 @@ pub extern "C" fn opendal_mbt_wasm_feature_flags() -> u32 {
         | FEATURE_BULK_TRANSFER
         | FEATURE_STRUCTURED_ERRORS
         | FEATURE_METADATA_OPTIONS
+        | FEATURE_COPY_RENAME
+        | FEATURE_STATEFUL_READER
+        | FEATURE_STATEFUL_WRITER
+        | FEATURE_STATEFUL_LISTER
+        | FEATURE_EXPLICIT_EOF
 }
 
 /// Returns how many forced-delay tasks reached an actual pending poll.
@@ -1938,6 +2526,310 @@ pub extern "C" fn opendal_mbt_wasm_operator_list_start(
     handle_or_record_error(result)
 }
 
+/// Starts an asynchronous server-side copy and returns destination metadata.
+#[unsafe(no_mangle)]
+pub extern "C" fn opendal_mbt_wasm_operator_copy_start(
+    operator_handle: u32,
+    from_handle: u32,
+    to_handle: u32,
+) -> u32 {
+    handle_or_record_error(start_copy_task(operator_handle, from_handle, to_handle))
+}
+
+/// Starts an asynchronous server-side rename.
+#[unsafe(no_mangle)]
+pub extern "C" fn opendal_mbt_wasm_operator_rename_start(
+    operator_handle: u32,
+    from_handle: u32,
+    to_handle: u32,
+) -> u32 {
+    handle_or_record_error(start_rename_task(operator_handle, from_handle, to_handle))
+}
+
+/// Opens a stateful, bounded read stream through an asynchronous task.
+#[allow(clippy::too_many_arguments, reason = "mirrors the frozen scalar ABI")]
+#[unsafe(no_mangle)]
+pub extern "C" fn opendal_mbt_wasm_operator_read_stream_start_v1(
+    operator_handle: u32,
+    path_handle: u32,
+    chunk_size: u32,
+    range_kind: u32,
+    range_offset: u64,
+    range_length: u64,
+    version_handle: u32,
+    if_match_handle: u32,
+    if_none_match_handle: u32,
+) -> u32 {
+    let options = read_stream_options_from_scalars(
+        chunk_size,
+        range_kind,
+        range_offset,
+        range_length,
+        version_handle,
+        if_match_handle,
+        if_none_match_handle,
+    );
+    let result = options.and_then(|(reader_options, range, max_chunk)| {
+        let (operator, path) = path_and_operator(operator_handle, path_handle)?;
+        ensure_suffix_is_native(&operator, &range)?;
+        start_task(async move {
+            let result = async {
+                let reader = operator
+                    .reader_options(&path, reader_options)
+                    .await
+                    .map_err(BridgeError::from)?;
+                let stream = reader.into_stream(range).await.map_err(BridgeError::from)?;
+                Ok(Box::new(ReadStreamCursor {
+                    stream,
+                    pending: None,
+                    max_chunk,
+                }))
+            }
+            .await;
+            Completion::OpenReadStream(result)
+        })
+    });
+    handle_or_record_error(result)
+}
+
+/// Starts one bounded read from a stateful read stream.
+#[unsafe(no_mangle)]
+pub extern "C" fn opendal_mbt_wasm_read_stream_next_start(handle: u32) -> u32 {
+    let result = reserve_read_stream_next(handle).map(|(task, lease, cursor)| {
+        spawn_resource_task(task, lease, read_stream_next(cursor));
+        task
+    });
+    handle_or_record_error(result)
+}
+
+/// Releases a read stream. A pending operation can never restore it afterwards.
+#[unsafe(no_mangle)]
+pub extern "C" fn opendal_mbt_wasm_read_stream_release(handle: u32) -> u32 {
+    release_resource(handle, ResourceKind::ReadStream)
+}
+
+/// Opens a stateful writer through an asynchronous task.
+#[allow(clippy::too_many_arguments, reason = "mirrors the frozen scalar ABI")]
+#[unsafe(no_mangle)]
+pub extern "C" fn opendal_mbt_wasm_operator_writer_start_v1(
+    operator_handle: u32,
+    path_handle: u32,
+    append: u32,
+    content_type_handle: u32,
+    content_disposition_handle: u32,
+    content_encoding_handle: u32,
+    cache_control_handle: u32,
+    if_match_handle: u32,
+    if_none_match_handle: u32,
+) -> u32 {
+    let options = write_options_from_scalars(
+        append,
+        content_type_handle,
+        content_disposition_handle,
+        content_encoding_handle,
+        cache_control_handle,
+        if_match_handle,
+        if_none_match_handle,
+    );
+    let result = options.and_then(|write_options| {
+        let (operator, path) = path_and_operator(operator_handle, path_handle)?;
+        start_task(async move {
+            Completion::OpenWriter(
+                operator
+                    .writer_options(&path, write_options)
+                    .await
+                    .map(Box::new)
+                    .map_err(BridgeError::from),
+            )
+        })
+    });
+    handle_or_record_error(result)
+}
+
+/// Writes one synchronously copied, bounded chunk through a stateful writer.
+#[unsafe(no_mangle)]
+pub extern "C" fn opendal_mbt_wasm_writer_write_start(writer_handle: u32, data_handle: u32) -> u32 {
+    let data = owned_writer_chunk(data_handle);
+    let result = data.and_then(|data| {
+        reserve_writer_call(writer_handle).map(|(task, lease, mut writer)| {
+            spawn_resource_task(task, lease, async move {
+                match writer.write(Buffer::from(data)).await {
+                    Ok(()) => (
+                        ResourceUpdate::Writer(WriterUpdate::Open(writer)),
+                        Completion::WriterWrite(Ok(())),
+                    ),
+                    Err(error) => (
+                        ResourceUpdate::Writer(WriterUpdate::Failed),
+                        Completion::WriterWrite(Err(BridgeError::from(error))),
+                    ),
+                }
+            });
+            task
+        })
+    });
+    handle_or_record_error(result)
+}
+
+/// Commits a stateful writer and returns destination metadata.
+#[unsafe(no_mangle)]
+pub extern "C" fn opendal_mbt_wasm_writer_finish_start(writer_handle: u32) -> u32 {
+    let finished = STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        match state.arena.writer_mut(writer_handle)? {
+            WriterState::Finished(metadata) => Ok(Some(metadata.clone())),
+            WriterState::Open(_, _) => Ok(None),
+            WriterState::Busy(_) => Err(BridgeError::ResourceBusy {
+                handle: writer_handle,
+            }),
+            WriterState::Aborted | WriterState::Failed => Err(BridgeError::ResourceClosed {
+                handle: writer_handle,
+            }),
+        }
+    });
+    let result = finished.and_then(|finished| match finished {
+        Some(metadata) => start_task(async move { Completion::WriterFinish(Ok(metadata)) }),
+        None => reserve_writer_call(writer_handle).map(|(task, lease, mut writer)| {
+            spawn_resource_task(task, lease, async move {
+                match writer.close().await {
+                    Ok(metadata) => {
+                        let metadata = Box::new(metadata);
+                        (
+                            ResourceUpdate::Writer(WriterUpdate::Finished(metadata.clone())),
+                            Completion::WriterFinish(Ok(metadata)),
+                        )
+                    }
+                    Err(error) => (
+                        ResourceUpdate::Writer(WriterUpdate::Failed),
+                        Completion::WriterFinish(Err(BridgeError::from(error))),
+                    ),
+                }
+            });
+            task
+        }),
+    });
+    handle_or_record_error(result)
+}
+
+/// Aborts a writer. Abort is terminal and repeated aborts are successful.
+#[unsafe(no_mangle)]
+pub extern "C" fn opendal_mbt_wasm_writer_abort_start(writer_handle: u32) -> u32 {
+    let repeated = STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        match state.arena.writer_mut(writer_handle)? {
+            WriterState::Aborted => Ok(true),
+            WriterState::Open(_, _) => Ok(false),
+            WriterState::Busy(_) => Err(BridgeError::ResourceBusy {
+                handle: writer_handle,
+            }),
+            WriterState::Finished(_) | WriterState::Failed => Err(BridgeError::ResourceClosed {
+                handle: writer_handle,
+            }),
+        }
+    });
+    let result = repeated.and_then(|repeated| {
+        if repeated {
+            return start_task(async { Completion::WriterAbort(Ok(())) });
+        }
+        reserve_writer_call(writer_handle).map(|(task, lease, mut writer)| {
+            spawn_resource_task(task, lease, async move {
+                match writer.abort().await {
+                    Ok(()) => (
+                        ResourceUpdate::Writer(WriterUpdate::Aborted),
+                        Completion::WriterAbort(Ok(())),
+                    ),
+                    Err(error) => (
+                        ResourceUpdate::Writer(WriterUpdate::Failed),
+                        Completion::WriterAbort(Err(BridgeError::from(error))),
+                    ),
+                }
+            });
+            task
+        })
+    });
+    handle_or_record_error(result)
+}
+
+/// Releases a writer and makes any pending operation terminal.
+#[unsafe(no_mangle)]
+pub extern "C" fn opendal_mbt_wasm_writer_release(handle: u32) -> u32 {
+    release_resource(handle, ResourceKind::Writer)
+}
+
+/// Opens a stateful lister through an asynchronous task.
+#[unsafe(no_mangle)]
+pub extern "C" fn opendal_mbt_wasm_operator_lister_start(
+    operator_handle: u32,
+    path_handle: u32,
+    recursive: u32,
+    has_limit: u32,
+    limit: u64,
+    start_after_handle: u32,
+) -> u32 {
+    let options = scalar_bool(recursive, "recursive").and_then(|recursive| {
+        optional_list_limit(has_limit, limit).map(|limit| (recursive, limit))
+    });
+    let inputs = options.and_then(|(recursive, limit)| {
+        path_and_operator(operator_handle, path_handle).and_then(|(operator, path)| {
+            let start_after = optional_owned_utf8_buffer(start_after_handle)?;
+            Ok((operator, path, recursive, limit, start_after))
+        })
+    });
+    let result = inputs.and_then(|(operator, path, recursive, limit, start_after)| {
+        start_task(async move {
+            let result = async {
+                let mut request = operator.lister_with(&path).recursive(recursive);
+                if let Some(limit) = limit {
+                    request = request.limit(limit);
+                }
+                if let Some(start_after) = &start_after {
+                    request = request.start_after(start_after);
+                }
+                request.await.map(Box::new).map_err(BridgeError::from)
+            }
+            .await;
+            Completion::OpenLister(result)
+        })
+    });
+    handle_or_record_error(result)
+}
+
+/// Starts one stateful lister step, returning one entry or explicit EOF.
+#[unsafe(no_mangle)]
+pub extern "C" fn opendal_mbt_wasm_lister_next_start(handle: u32) -> u32 {
+    let result = reserve_lister_next(handle).map(|(task, lease, mut lister)| {
+        spawn_resource_task(task, lease, async move {
+            match lister.try_next().await.map_err(BridgeError::from) {
+                Ok(Some(entry)) => match entry_snapshot(entry) {
+                    Ok(entry) => (
+                        ResourceUpdate::Lister(ListerUpdate::Open(lister)),
+                        Completion::ListerNext(Ok(Some(entry))),
+                    ),
+                    Err(error) => (
+                        ResourceUpdate::Lister(ListerUpdate::Failed),
+                        Completion::ListerNext(Err(error)),
+                    ),
+                },
+                Ok(None) => (
+                    ResourceUpdate::Lister(ListerUpdate::End),
+                    Completion::ListerNext(Ok(None)),
+                ),
+                Err(error) => (
+                    ResourceUpdate::Lister(ListerUpdate::Failed),
+                    Completion::ListerNext(Err(error)),
+                ),
+            }
+        });
+        task
+    });
+    handle_or_record_error(result)
+}
+
+/// Releases a lister. A pending operation can never restore it afterwards.
+#[unsafe(no_mangle)]
+pub extern "C" fn opendal_mbt_wasm_lister_release(handle: u32) -> u32 {
+    release_resource(handle, ResourceKind::Lister)
+}
+
 fn handle_or_record_error(result: Result<u32, BridgeError>) -> u32 {
     match result {
         Ok(handle) => handle,
@@ -1954,8 +2846,8 @@ pub extern "C" fn opendal_mbt_wasm_task_state(handle: u32) -> u32 {
     let result = STATE.with(|state| {
         let state = state.borrow();
         Ok(match state.arena.task(handle)? {
-            Task::Pending => TASK_PENDING,
-            Task::Ready(_) => TASK_READY,
+            Task::Pending(_) => TASK_PENDING,
+            Task::Ready(_, _) => TASK_READY,
             Task::Cancelled => TASK_CANCELLED,
             Task::Consumed => TASK_CONSUMED,
         })
@@ -1981,9 +2873,9 @@ pub extern "C" fn opendal_mbt_wasm_task_take(handle: u32) -> u32 {
         }
         let task = state.arena.task_mut(handle)?;
         match std::mem::replace(task, Task::Consumed) {
-            Task::Ready(completion) => state.arena.insert(Resource::Completion(*completion)),
-            Task::Pending => {
-                *task = Task::Pending;
+            Task::Ready(completion, _) => state.arena.insert(Resource::Completion(*completion)),
+            Task::Pending(lease) => {
+                *task = Task::Pending(lease);
                 Err(BridgeError::TaskNotReady { handle })
             }
             Task::Cancelled => {
@@ -2004,9 +2896,13 @@ pub extern "C" fn opendal_mbt_wasm_task_take(handle: u32) -> u32 {
 pub extern "C" fn opendal_mbt_wasm_task_cancel(handle: u32) -> u32 {
     let result = STATE.with(|state| {
         let mut state = state.borrow_mut();
+        let lease = task_lease(state.arena.task(handle)?);
+        if let Some(lease) = lease {
+            terminalize_lease(&mut state.arena, lease);
+        }
         let task = state.arena.task_mut(handle)?;
         match task {
-            Task::Pending | Task::Ready(_) => *task = Task::Cancelled,
+            Task::Pending(_) | Task::Ready(_, _) => *task = Task::Cancelled,
             Task::Cancelled | Task::Consumed => {}
         }
         Ok(())
@@ -2017,7 +2913,15 @@ pub extern "C" fn opendal_mbt_wasm_task_cancel(handle: u32) -> u32 {
 /// Releases a task and any unconsumed completion it still owns.
 #[unsafe(no_mangle)]
 pub extern "C" fn opendal_mbt_wasm_task_release(handle: u32) -> u32 {
-    release_resource(handle, ResourceKind::Task)
+    let result = STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let lease = task_lease(state.arena.task(handle)?);
+        if let Some(lease) = lease {
+            terminalize_lease(&mut state.arena, lease);
+        }
+        state.arena.release(handle, ResourceKind::Task)
+    });
+    status(result)
 }
 
 /// Returns the completion operation kind, or `0` on failure.
@@ -2048,6 +2952,26 @@ pub extern "C" fn opendal_mbt_wasm_completion_status(handle: u32) -> u32 {
             Completion::CreateDir(result) => result.as_ref().map_or_else(BridgeError::code, |_| 0),
             Completion::Delete(result) => result.as_ref().map_or_else(BridgeError::code, |_| 0),
             Completion::List(result) => result.as_ref().map_or_else(BridgeError::code, |_| 0),
+            Completion::Copy(result) => result.as_ref().map_or_else(BridgeError::code, |_| 0),
+            Completion::Rename(result) => result.as_ref().map_or_else(BridgeError::code, |_| 0),
+            Completion::OpenReadStream(result) => {
+                result.as_ref().map_or_else(BridgeError::code, |_| 0)
+            }
+            Completion::ReadStreamNext(result) => {
+                result.as_ref().map_or_else(BridgeError::code, |_| 0)
+            }
+            Completion::OpenWriter(result) => result.as_ref().map_or_else(BridgeError::code, |_| 0),
+            Completion::WriterWrite(result) => {
+                result.as_ref().map_or_else(BridgeError::code, |_| 0)
+            }
+            Completion::WriterFinish(result) => {
+                result.as_ref().map_or_else(BridgeError::code, |_| 0)
+            }
+            Completion::WriterAbort(result) => {
+                result.as_ref().map_or_else(BridgeError::code, |_| 0)
+            }
+            Completion::OpenLister(result) => result.as_ref().map_or_else(BridgeError::code, |_| 0),
+            Completion::ListerNext(result) => result.as_ref().map_or_else(BridgeError::code, |_| 0),
         })
     });
     match result {
@@ -2056,14 +2980,107 @@ pub extern "C" fn opendal_mbt_wasm_completion_status(handle: u32) -> u32 {
     }
 }
 
+fn completion_is_end_value(handle: u32) -> Result<bool, BridgeError> {
+    STATE.with(|state| {
+        let state = state.borrow();
+        match state.arena.completion(handle)? {
+            Completion::ReadStreamNext(Ok(value)) => Ok(value.is_none()),
+            Completion::ListerNext(Ok(value)) => Ok(value.is_none()),
+            Completion::ReadStreamNext(Err(error)) | Completion::ListerNext(Err(error)) => {
+                Err(error.clone())
+            }
+            completion => Err(BridgeError::WrongResourceType {
+                handle,
+                expected: "next completion",
+                actual: match completion.kind() {
+                    COMPLETION_READ => "read completion",
+                    COMPLETION_LIST => "list completion",
+                    _ => "non-next completion",
+                },
+            }),
+        }
+    })
+}
+
+/// Inspects a next completion without consuming it (`1` EOF, `0` value, `-1` error).
+#[unsafe(no_mangle)]
+pub extern "C" fn opendal_mbt_wasm_completion_is_end(handle: u32) -> i32 {
+    match completion_is_end_value(handle) {
+        Ok(is_end) => i32::from(is_end),
+        Err(error) => {
+            record_error(error);
+            SCALAR_ERROR
+        }
+    }
+}
+
+/// Moves a successful open-read-stream result into a read-stream handle.
+#[unsafe(no_mangle)]
+pub extern "C" fn opendal_mbt_wasm_completion_take_read_stream(handle: u32) -> u32 {
+    let result =
+        take_successful_completion(handle, COMPLETION_OPEN_READER, true).and_then(|completion| {
+            let Completion::OpenReadStream(Ok(cursor)) = completion else {
+                unreachable!("completion kind and status checked before removal")
+            };
+            insert_resource(Resource::ReadStream(ReadStreamState::Open(cursor, 0)))
+        });
+    handle_or_record_error(result)
+}
+
+/// Moves a successful open-writer result into a writer handle.
+#[unsafe(no_mangle)]
+pub extern "C" fn opendal_mbt_wasm_completion_take_writer(handle: u32) -> u32 {
+    let result =
+        take_successful_completion(handle, COMPLETION_OPEN_WRITER, true).and_then(|completion| {
+            let Completion::OpenWriter(Ok(writer)) = completion else {
+                unreachable!("completion kind and status checked before removal")
+            };
+            insert_resource(Resource::Writer(WriterState::Open(writer, 0)))
+        });
+    handle_or_record_error(result)
+}
+
+/// Moves a successful open-lister result into a lister handle.
+#[unsafe(no_mangle)]
+pub extern "C" fn opendal_mbt_wasm_completion_take_lister(handle: u32) -> u32 {
+    let result =
+        take_successful_completion(handle, COMPLETION_OPEN_LISTER, true).and_then(|completion| {
+            let Completion::OpenLister(Ok(lister)) = completion else {
+                unreachable!("completion kind and status checked before removal")
+            };
+            insert_resource(Resource::Lister(ListerState::Open(lister, 0)))
+        });
+    handle_or_record_error(result)
+}
+
 /// Moves a successful read result into a buffer handle, or returns `0`.
 #[unsafe(no_mangle)]
 pub extern "C" fn opendal_mbt_wasm_completion_take_buffer(handle: u32) -> u32 {
-    let result = take_successful_completion(handle, COMPLETION_READ).and_then(|completion| {
-        let Completion::Read(Ok(buffer)) = completion else {
-            unreachable!("completion kind and status checked before removal")
-        };
-        insert_buffer(buffer)
+    let kind = STATE.with(|state| {
+        let state = state.borrow();
+        state.arena.completion(handle).map(Completion::kind)
+    });
+    let result = kind.and_then(|kind| match kind {
+        COMPLETION_READ => {
+            take_successful_completion(handle, COMPLETION_READ, true).and_then(|completion| {
+                let Completion::Read(Ok(buffer)) = completion else {
+                    unreachable!("completion kind and status checked before removal")
+                };
+                insert_buffer(buffer)
+            })
+        }
+        COMPLETION_READER_NEXT => {
+            let is_end = completion_is_end_value(handle)?;
+            take_successful_completion(handle, COMPLETION_READER_NEXT, !is_end).and_then(
+                |completion| {
+                    let Completion::ReadStreamNext(Ok(buffer)) = completion else {
+                        unreachable!("completion kind and status checked before removal")
+                    };
+                    buffer.map_or(Ok(0), insert_buffer)
+                },
+            )
+        }
+        actual => Err(wrong_completion_type(handle, COMPLETION_READ, actual)),
     });
     handle_or_record_error(result)
 }
@@ -2071,15 +3088,30 @@ pub extern "C" fn opendal_mbt_wasm_completion_take_buffer(handle: u32) -> u32 {
 /// Moves a successful stat result into a metadata handle, or returns `0`.
 #[unsafe(no_mangle)]
 pub extern "C" fn opendal_mbt_wasm_completion_take_metadata(handle: u32) -> u32 {
-    let result = take_successful_completion(handle, COMPLETION_STAT).and_then(|completion| {
-        let Completion::Stat(Ok(metadata)) = completion else {
-            unreachable!("completion kind and status checked before removal")
-        };
-        STATE.with(|state| {
-            state
-                .borrow_mut()
-                .arena
-                .insert(Resource::Metadata(*metadata))
+    let kind = STATE.with(|state| {
+        let state = state.borrow();
+        state.arena.completion(handle).map(Completion::kind)
+    });
+    let result = kind.and_then(|kind| {
+        if !matches!(
+            kind,
+            COMPLETION_STAT | COMPLETION_COPY | COMPLETION_WRITER_FINISH
+        ) {
+            return Err(wrong_completion_type(handle, COMPLETION_STAT, kind));
+        }
+        take_successful_completion(handle, kind, true).and_then(|completion| {
+            let metadata = match completion {
+                Completion::Stat(Ok(metadata))
+                | Completion::Copy(Ok(metadata))
+                | Completion::WriterFinish(Ok(metadata)) => metadata,
+                _ => unreachable!("metadata completion kind checked before removal"),
+            };
+            STATE.with(|state| {
+                state
+                    .borrow_mut()
+                    .arena
+                    .insert(Resource::Metadata(*metadata))
+            })
         })
     });
     handle_or_record_error(result)
@@ -2094,10 +3126,14 @@ pub extern "C" fn opendal_mbt_wasm_completion_take_metadata_snapshot(handle: u32
         let mut state = state.borrow_mut();
         let completion = state.arena.completion(handle)?;
         let snapshot = match completion {
-            Completion::Write(Ok(metadata)) | Completion::Stat(Ok(metadata)) => {
-                metadata_snapshot_bytes(metadata)?
-            }
-            Completion::Write(Err(error)) | Completion::Stat(Err(error)) => {
+            Completion::Write(Ok(metadata))
+            | Completion::Stat(Ok(metadata))
+            | Completion::Copy(Ok(metadata))
+            | Completion::WriterFinish(Ok(metadata)) => metadata_snapshot_bytes(metadata)?,
+            Completion::Write(Err(error))
+            | Completion::Stat(Err(error))
+            | Completion::Copy(Err(error))
+            | Completion::WriterFinish(Err(error)) => {
                 return Err(error.clone());
             }
             completion => {
@@ -2109,6 +3145,14 @@ pub extern "C" fn opendal_mbt_wasm_completion_take_metadata_snapshot(handle: u32
                         COMPLETION_CREATE_DIR => "create-dir completion",
                         COMPLETION_DELETE => "delete completion",
                         COMPLETION_LIST => "list completion",
+                        COMPLETION_RENAME => "rename completion",
+                        COMPLETION_OPEN_READER => "open-read-stream completion",
+                        COMPLETION_READER_NEXT => "read-stream-next completion",
+                        COMPLETION_OPEN_WRITER => "open-writer completion",
+                        COMPLETION_WRITER_WRITE => "writer-write completion",
+                        COMPLETION_WRITER_ABORT => "writer-abort completion",
+                        COMPLETION_OPEN_LISTER => "open-lister completion",
+                        COMPLETION_LISTER_NEXT => "lister-next completion",
                         _ => "completion",
                     },
                 });
@@ -2119,7 +3163,12 @@ pub extern "C" fn opendal_mbt_wasm_completion_take_metadata_snapshot(handle: u32
             .ensure_insert_capacity_after_take(handle, ResourceKind::Completion)?;
         let resource = state.arena.take(handle, ResourceKind::Completion)?;
         match resource {
-            Resource::Completion(Completion::Write(Ok(_)) | Completion::Stat(Ok(_))) => {}
+            Resource::Completion(
+                Completion::Write(Ok(_))
+                | Completion::Stat(Ok(_))
+                | Completion::Copy(Ok(_))
+                | Completion::WriterFinish(Ok(_)),
+            ) => {}
             _ => unreachable!("metadata completion was checked before removal"),
         }
         match state.arena.insert(Resource::Buffer(snapshot)) {
@@ -2135,21 +3184,52 @@ pub extern "C" fn opendal_mbt_wasm_completion_take_metadata_snapshot(handle: u32
 /// Moves a successful list result into an owned entry-list handle.
 #[unsafe(no_mangle)]
 pub extern "C" fn opendal_mbt_wasm_completion_take_entry_list(handle: u32) -> u32 {
-    let result = take_successful_completion(handle, COMPLETION_LIST).and_then(|completion| {
-        let Completion::List(Ok(entries)) = completion else {
-            unreachable!("completion kind and status checked before removal")
-        };
-        STATE.with(|state| {
-            state
-                .borrow_mut()
-                .arena
-                .insert(Resource::EntryList(entries))
-        })
+    let kind = STATE.with(|state| {
+        let state = state.borrow();
+        state.arena.completion(handle).map(Completion::kind)
+    });
+    let result = kind.and_then(|kind| match kind {
+        COMPLETION_LIST => {
+            take_successful_completion(handle, COMPLETION_LIST, true).and_then(|completion| {
+                let Completion::List(Ok(entries)) = completion else {
+                    unreachable!("completion kind and status checked before removal")
+                };
+                STATE.with(|state| {
+                    state
+                        .borrow_mut()
+                        .arena
+                        .insert(Resource::EntryList(entries))
+                })
+            })
+        }
+        COMPLETION_LISTER_NEXT => {
+            let is_end = completion_is_end_value(handle)?;
+            take_successful_completion(handle, COMPLETION_LISTER_NEXT, !is_end).and_then(
+                |completion| {
+                    let Completion::ListerNext(Ok(entry)) = completion else {
+                        unreachable!("completion kind and status checked before removal")
+                    };
+                    entry.map_or(Ok(0), |entry| {
+                        STATE.with(|state| {
+                            state
+                                .borrow_mut()
+                                .arena
+                                .insert(Resource::EntryList(vec![entry]))
+                        })
+                    })
+                },
+            )
+        }
+        actual => Err(wrong_completion_type(handle, COMPLETION_LIST, actual)),
     });
     handle_or_record_error(result)
 }
 
-fn take_successful_completion(handle: u32, expected_kind: u32) -> Result<Completion, BridgeError> {
+fn take_successful_completion(
+    handle: u32,
+    expected_kind: u32,
+    needs_replacement: bool,
+) -> Result<Completion, BridgeError> {
     STATE.with(|state| {
         let mut state = state.borrow_mut();
         let completion = state.arena.completion(handle)?;
@@ -2165,9 +3245,16 @@ fn take_successful_completion(handle: u32, expected_kind: u32) -> Result<Complet
         {
             return Err(BridgeError::BufferTooLarge);
         }
-        state
-            .arena
-            .ensure_insert_capacity_after_take(handle, ResourceKind::Completion)?;
+        if let Completion::ReadStreamNext(Ok(Some(buffer))) = completion
+            && buffer.len() > MAX_TRANSFER_CHUNK
+        {
+            return Err(BridgeError::BufferTooLarge);
+        }
+        if needs_replacement {
+            state
+                .arena
+                .ensure_insert_capacity_after_take(handle, ResourceKind::Completion)?;
+        }
         let resource = state.arena.take(handle, ResourceKind::Completion)?;
         let Resource::Completion(completion) = resource else {
             unreachable!("arena checked completion resource type")
@@ -2184,6 +3271,16 @@ fn wrong_completion_type(handle: u32, expected: u32, actual: u32) -> BridgeError
         COMPLETION_CREATE_DIR => "create-dir completion",
         COMPLETION_DELETE => "delete completion",
         COMPLETION_LIST => "list completion",
+        COMPLETION_COPY => "copy completion",
+        COMPLETION_RENAME => "rename completion",
+        COMPLETION_OPEN_READER => "open-read-stream completion",
+        COMPLETION_READER_NEXT => "read-stream-next completion",
+        COMPLETION_OPEN_WRITER => "open-writer completion",
+        COMPLETION_WRITER_WRITE => "writer-write completion",
+        COMPLETION_WRITER_FINISH => "writer-finish completion",
+        COMPLETION_WRITER_ABORT => "writer-abort completion",
+        COMPLETION_OPEN_LISTER => "open-lister completion",
+        COMPLETION_LISTER_NEXT => "lister-next completion",
         _ => "completion",
     };
     BridgeError::WrongResourceType {
@@ -2206,6 +3303,16 @@ pub extern "C" fn opendal_mbt_wasm_completion_take_error(handle: u32) -> u32 {
             Completion::CreateDir(result) => result.is_err(),
             Completion::Delete(result) => result.is_err(),
             Completion::List(result) => result.is_err(),
+            Completion::Copy(result) => result.is_err(),
+            Completion::Rename(result) => result.is_err(),
+            Completion::OpenReadStream(result) => result.is_err(),
+            Completion::ReadStreamNext(result) => result.is_err(),
+            Completion::OpenWriter(result) => result.is_err(),
+            Completion::WriterWrite(result) => result.is_err(),
+            Completion::WriterFinish(result) => result.is_err(),
+            Completion::WriterAbort(result) => result.is_err(),
+            Completion::OpenLister(result) => result.is_err(),
+            Completion::ListerNext(result) => result.is_err(),
         };
         if !is_error {
             return Err(BridgeError::WrongResourceType {
@@ -2227,13 +3334,33 @@ pub extern "C" fn opendal_mbt_wasm_completion_take_error(handle: u32) -> u32 {
             | Completion::Stat(Err(error))
             | Completion::CreateDir(Err(error))
             | Completion::Delete(Err(error))
-            | Completion::List(Err(error)) => error,
+            | Completion::List(Err(error))
+            | Completion::Copy(Err(error))
+            | Completion::Rename(Err(error))
+            | Completion::OpenReadStream(Err(error))
+            | Completion::ReadStreamNext(Err(error))
+            | Completion::OpenWriter(Err(error))
+            | Completion::WriterWrite(Err(error))
+            | Completion::WriterFinish(Err(error))
+            | Completion::WriterAbort(Err(error))
+            | Completion::OpenLister(Err(error))
+            | Completion::ListerNext(Err(error)) => error,
             Completion::Write(Ok(_))
             | Completion::Read(Ok(_))
             | Completion::Stat(Ok(_))
             | Completion::CreateDir(Ok(()))
             | Completion::Delete(Ok(()))
-            | Completion::List(Ok(_)) => unreachable!("success checked before removal"),
+            | Completion::List(Ok(_))
+            | Completion::Copy(Ok(_))
+            | Completion::Rename(Ok(()))
+            | Completion::OpenReadStream(Ok(_))
+            | Completion::ReadStreamNext(Ok(_))
+            | Completion::OpenWriter(Ok(_))
+            | Completion::WriterWrite(Ok(()))
+            | Completion::WriterFinish(Ok(_))
+            | Completion::WriterAbort(Ok(()))
+            | Completion::OpenLister(Ok(_))
+            | Completion::ListerNext(Ok(_)) => unreachable!("success checked before removal"),
         };
         state.arena.insert(Resource::Error(error))
     });
@@ -3297,7 +4424,8 @@ mod tests {
             (Completion::CreateDir(Ok(())), COMPLETION_CREATE_DIR),
             (Completion::Delete(Ok(())), COMPLETION_DELETE),
         ] {
-            let task = insert_test_resource(Resource::Task(Task::Ready(Box::new(completion))));
+            let task =
+                insert_test_resource(Resource::Task(Task::Ready(Box::new(completion), None)));
             let completion = opendal_mbt_wasm_task_take(task);
             assert_ne!(completion, 0);
             assert_eq!(opendal_mbt_wasm_completion_kind(completion), expected_kind);
@@ -3469,9 +4597,10 @@ mod tests {
     #[test]
     fn ready_task_moves_its_completion_exactly_once() {
         reset_state();
-        let task = insert_test_resource(Resource::Task(Task::Ready(Box::new(Completion::Read(
-            Ok(vec![0, 255, 42]),
-        )))));
+        let task = insert_test_resource(Resource::Task(Task::Ready(
+            Box::new(Completion::Read(Ok(vec![0, 255, 42]))),
+            None,
+        )));
 
         let completion = opendal_mbt_wasm_task_take(task);
         assert_ne!(completion, 0);
@@ -3548,7 +4677,7 @@ mod tests {
     #[test]
     fn cancellation_and_release_make_late_completion_inert() {
         reset_state();
-        let stale = insert_test_resource(Resource::Task(Task::Pending));
+        let stale = insert_test_resource(Resource::Task(Task::Pending(None)));
 
         assert_eq!(opendal_mbt_wasm_task_cancel(stale), STATUS_OK);
         assert_eq!(opendal_mbt_wasm_task_state(stale), TASK_CANCELLED);
@@ -3575,9 +4704,12 @@ mod tests {
     #[test]
     fn cancellation_wins_over_an_unclaimed_ready_result() {
         reset_state();
-        let task = insert_test_resource(Resource::Task(Task::Ready(Box::new(Completion::Write(
-            Ok(Box::new(Metadata::new(opendal::EntryMode::FILE))),
-        )))));
+        let task = insert_test_resource(Resource::Task(Task::Ready(
+            Box::new(Completion::Write(Ok(Box::new(Metadata::new(
+                opendal::EntryMode::FILE,
+            ))))),
+            None,
+        )));
 
         assert_eq!(opendal_mbt_wasm_task_cancel(task), STATUS_OK);
         assert_eq!(opendal_mbt_wasm_task_state(task), TASK_CANCELLED);
@@ -3590,7 +4722,7 @@ mod tests {
     #[test]
     fn teardown_is_permanent_and_late_completion_cannot_revive_state() {
         reset_state();
-        let task = insert_test_resource(Resource::Task(Task::Pending));
+        let task = insert_test_resource(Resource::Task(Task::Pending(None)));
 
         assert_eq!(opendal_mbt_wasm_teardown(), STATUS_OK);
         assert_eq!(opendal_mbt_wasm_teardown(), STATUS_OK);
@@ -3603,6 +4735,515 @@ mod tests {
         assert_eq!(opendal_mbt_wasm_buffer_new(), 0);
         assert_eq!(opendal_mbt_wasm_last_error_code(), 14);
         assert_eq!(opendal_mbt_wasm_last_error_take(), 0);
+        assert_eq!(opendal_mbt_wasm_live_handle_count(), 0);
+        reset_state();
+    }
+
+    #[test]
+    fn streaming_feature_bits_and_completion_kinds_are_stable() {
+        assert_eq!(ABI_VERSION, 0x0001_0007);
+        let features = opendal_mbt_wasm_feature_flags();
+        assert_ne!(features & FEATURE_COPY_RENAME, 0);
+        assert_ne!(features & FEATURE_STATEFUL_READER, 0);
+        assert_ne!(features & FEATURE_STATEFUL_WRITER, 0);
+        assert_ne!(features & FEATURE_STATEFUL_LISTER, 0);
+        assert_ne!(features & FEATURE_EXPLICIT_EOF, 0);
+        assert_eq!(
+            Completion::Copy(Ok(Box::new(Metadata::new(opendal::EntryMode::FILE)))).kind(),
+            7
+        );
+        assert_eq!(Completion::Rename(Ok(())).kind(), 8);
+        assert_eq!(Completion::ReadStreamNext(Ok(None)).kind(), 10);
+        assert_eq!(Completion::WriterWrite(Ok(())).kind(), 12);
+        assert_eq!(
+            Completion::WriterFinish(Ok(Box::new(Metadata::new(opendal::EntryMode::FILE)))).kind(),
+            13
+        );
+        assert_eq!(Completion::WriterAbort(Ok(())).kind(), 14);
+        assert_eq!(Completion::ListerNext(Ok(None)).kind(), 16);
+    }
+
+    #[test]
+    fn stream_chunk_limits_accept_the_boundary_and_reject_one_more() {
+        reset_state();
+        assert!(
+            read_stream_options_from_scalars(MAX_TRANSFER_CHUNK as u32, RANGE_FULL, 0, 0, 0, 0, 0,)
+                .is_ok()
+        );
+        assert!(matches!(
+            read_stream_options_from_scalars(0, RANGE_FULL, 0, 0, 0, 0, 0),
+            Err(BridgeError::InvalidArgument { .. })
+        ));
+        assert!(matches!(
+            read_stream_options_from_scalars(
+                MAX_TRANSFER_CHUNK as u32 + 1,
+                RANGE_FULL,
+                0,
+                0,
+                0,
+                0,
+                0,
+            ),
+            Err(BridgeError::InvalidArgument { .. })
+        ));
+
+        let accepted = insert_test_resource(Resource::Buffer(vec![0; MAX_TRANSFER_CHUNK]));
+        let rejected = insert_test_resource(Resource::Buffer(vec![0; MAX_TRANSFER_CHUNK + 1]));
+        assert_eq!(
+            owned_writer_chunk(accepted).unwrap().len(),
+            MAX_TRANSFER_CHUNK
+        );
+        assert!(matches!(
+            owned_writer_chunk(rejected),
+            Err(BridgeError::BufferTooLarge)
+        ));
+        assert_eq!(opendal_mbt_wasm_buffer_release(accepted), STATUS_OK);
+        assert_eq!(opendal_mbt_wasm_buffer_release(rejected), STATUS_OK);
+        assert_eq!(opendal_mbt_wasm_live_handle_count(), 0);
+        reset_state();
+    }
+
+    #[test]
+    fn explicit_eof_is_non_consuming_and_distinguishes_empty_values() {
+        reset_state();
+        let eof = insert_test_resource(Resource::Completion(Completion::ReadStreamNext(Ok(None))));
+        assert_eq!(opendal_mbt_wasm_completion_is_end(eof), 1);
+        assert_eq!(opendal_mbt_wasm_completion_is_end(eof), 1);
+        assert_eq!(
+            opendal_mbt_wasm_completion_kind(eof),
+            COMPLETION_READER_NEXT
+        );
+        assert_eq!(opendal_mbt_wasm_completion_take_buffer(eof), 0);
+
+        let empty = insert_test_resource(Resource::Completion(Completion::ReadStreamNext(Ok(
+            Some(Vec::new()),
+        ))));
+        assert_eq!(opendal_mbt_wasm_completion_is_end(empty), 0);
+        assert_eq!(opendal_mbt_wasm_completion_is_end(empty), 0);
+        let buffer = opendal_mbt_wasm_completion_take_buffer(empty);
+        assert_ne!(buffer, 0);
+        assert_eq!(opendal_mbt_wasm_buffer_len(buffer), 0);
+        assert_eq!(opendal_mbt_wasm_buffer_release(buffer), STATUS_OK);
+
+        let lister_eof =
+            insert_test_resource(Resource::Completion(Completion::ListerNext(Ok(None))));
+        assert_eq!(opendal_mbt_wasm_completion_is_end(lister_eof), 1);
+        assert_eq!(opendal_mbt_wasm_completion_is_end(lister_eof), 1);
+        assert_eq!(opendal_mbt_wasm_completion_take_entry_list(lister_eof), 0);
+        assert_eq!(opendal_mbt_wasm_live_handle_count(), 0);
+        reset_state();
+    }
+
+    #[test]
+    fn copy_rename_and_metadata_completions_match_opendal() {
+        reset_state();
+        let operator = Operator::new(Memory::default()).unwrap();
+        poll_once(operator.write("source", b"payload".to_vec()))
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            poll_once(operator.copy("source", "copy")).unwrap(),
+            Err(error) if error.kind() == ErrorKind::Unsupported
+        ));
+        assert!(matches!(
+            poll_once(operator.rename("source", "renamed")).unwrap(),
+            Err(error) if error.kind() == ErrorKind::Unsupported
+        ));
+
+        let metadata = Metadata::new(opendal::EntryMode::FILE).with_content_length(7);
+        let completion = insert_test_resource(Resource::Completion(Completion::Copy(Ok(
+            Box::new(metadata),
+        ))));
+        assert_eq!(
+            opendal_mbt_wasm_completion_kind(completion),
+            COMPLETION_COPY
+        );
+        let snapshot = opendal_mbt_wasm_completion_take_metadata_snapshot(completion);
+        assert_ne!(snapshot, 0);
+        assert_eq!(snapshot_u64(&take_test_buffer(snapshot), 32), 7);
+
+        let completion = insert_test_resource(Resource::Completion(Completion::Rename(Ok(()))));
+        assert_eq!(
+            opendal_mbt_wasm_completion_kind(completion),
+            COMPLETION_RENAME
+        );
+        assert_eq!(opendal_mbt_wasm_completion_status(completion), STATUS_OK);
+        assert_eq!(opendal_mbt_wasm_completion_release(completion), STATUS_OK);
+        assert_eq!(opendal_mbt_wasm_live_handle_count(), 0);
+        reset_state();
+    }
+
+    #[test]
+    fn actual_reader_is_bounded_and_reaches_explicit_eof() {
+        reset_state();
+        let operator = Operator::new(Memory::default()).unwrap();
+        let data = vec![9; MAX_TRANSFER_CHUNK * 2 + 17];
+        poll_once(operator.write("large", data.clone()))
+            .unwrap()
+            .unwrap();
+        let reader = poll_once(operator.reader_options(
+            "large",
+            options::ReaderOptions {
+                chunk: Some(MAX_TRANSFER_CHUNK),
+                ..Default::default()
+            },
+        ))
+        .unwrap()
+        .unwrap();
+        let stream = poll_once(reader.into_stream(BytesRange::default()))
+            .unwrap()
+            .unwrap();
+        let mut cursor = Box::new(ReadStreamCursor {
+            stream,
+            pending: None,
+            max_chunk: MAX_TRANSFER_CHUNK,
+        });
+        let mut collected = Vec::new();
+        loop {
+            let (update, completion) = poll_once(read_stream_next(cursor)).unwrap();
+            match completion {
+                Completion::ReadStreamNext(Ok(Some(chunk))) => {
+                    assert!(!chunk.is_empty());
+                    assert!(chunk.len() <= MAX_TRANSFER_CHUNK);
+                    collected.extend_from_slice(&chunk);
+                    let ResourceUpdate::ReadStream(ReadStreamUpdate::Open(next)) = update else {
+                        panic!("successful chunk must reopen the stream")
+                    };
+                    cursor = next;
+                }
+                Completion::ReadStreamNext(Ok(None)) => {
+                    assert!(matches!(
+                        update,
+                        ResourceUpdate::ReadStream(ReadStreamUpdate::End)
+                    ));
+                    break;
+                }
+                Completion::ReadStreamNext(Err(error)) => panic!("unexpected read error: {error}"),
+                _ => panic!("unexpected completion kind"),
+            }
+        }
+        assert_eq!(collected, data);
+        assert_eq!(opendal_mbt_wasm_live_handle_count(), 0);
+        reset_state();
+    }
+
+    #[test]
+    fn actual_writer_and_lister_use_stateful_opendal_resources() {
+        reset_state();
+        let operator = Operator::new(Memory::default()).unwrap();
+        let mut writer = poll_once(operator.writer("tree/value")).unwrap().unwrap();
+        poll_once(writer.write(vec![3; MAX_TRANSFER_CHUNK]))
+            .unwrap()
+            .unwrap();
+        let metadata = poll_once(writer.close()).unwrap().unwrap();
+        assert_eq!(metadata.content_length(), MAX_TRANSFER_CHUNK as u64);
+
+        let mut lister = poll_once(operator.lister("tree/")).unwrap().unwrap();
+        let entry = poll_once(lister.try_next()).unwrap().unwrap().unwrap();
+        let entry = entry_snapshot(entry).unwrap();
+        assert_eq!(entry.path, "tree/value");
+        assert_eq!(entry.content_length, MAX_TRANSFER_CHUNK as u64);
+        assert!(poll_once(lister.try_next()).unwrap().unwrap().is_none());
+
+        let mut aborted = poll_once(operator.writer("aborted")).unwrap().unwrap();
+        poll_once(aborted.write(b"uncommitted".to_vec()))
+            .unwrap()
+            .unwrap();
+        poll_once(aborted.abort()).unwrap().unwrap();
+        assert!(matches!(
+            poll_once(operator.stat("aborted")).unwrap(),
+            Err(error) if error.kind() == ErrorKind::NotFound
+        ));
+        assert_eq!(opendal_mbt_wasm_live_handle_count(), 0);
+        reset_state();
+    }
+
+    #[test]
+    fn resource_busy_closed_and_error_states_are_explicit() {
+        reset_state();
+        let reader = insert_test_resource(Resource::ReadStream(ReadStreamState::Busy(1)));
+        let writer = insert_test_resource(Resource::Writer(WriterState::Busy(2)));
+        let lister = insert_test_resource(Resource::Lister(ListerState::Busy(3)));
+        assert!(matches!(
+            reserve_read_stream_next(reader),
+            Err(BridgeError::ResourceBusy { handle }) if handle == reader
+        ));
+        assert!(matches!(
+            reserve_writer_call(writer),
+            Err(BridgeError::ResourceBusy { handle }) if handle == writer
+        ));
+        assert!(matches!(
+            reserve_lister_next(lister),
+            Err(BridgeError::ResourceBusy { handle }) if handle == lister
+        ));
+        assert_eq!(
+            BridgeError::ResourceBusy { handle: writer }.kind(),
+            ERROR_RESOURCE_BUSY
+        );
+
+        STATE.with(|state| {
+            let mut state = state.borrow_mut();
+            *state.arena.read_stream_mut(reader).unwrap() = ReadStreamState::End;
+            *state.arena.writer_mut(writer).unwrap() = WriterState::Aborted;
+            *state.arena.lister_mut(lister).unwrap() = ListerState::Failed;
+        });
+        assert!(matches!(
+            reserve_read_stream_next(reader),
+            Err(BridgeError::ResourceClosed { .. })
+        ));
+        assert!(matches!(
+            reserve_writer_call(writer),
+            Err(BridgeError::ResourceClosed { .. })
+        ));
+        assert!(matches!(
+            reserve_lister_next(lister),
+            Err(BridgeError::ResourceClosed { .. })
+        ));
+        assert_eq!(opendal_mbt_wasm_read_stream_release(reader), STATUS_OK);
+        assert_eq!(opendal_mbt_wasm_writer_release(writer), STATUS_OK);
+        assert_eq!(opendal_mbt_wasm_lister_release(lister), STATUS_OK);
+        assert_eq!(opendal_mbt_wasm_live_handle_count(), 0);
+        reset_state();
+    }
+
+    #[test]
+    fn cancellation_and_release_terminalize_leased_resources_without_resurrection() {
+        reset_state();
+        let operator = Operator::new(Memory::default()).unwrap();
+        let writer = poll_once(operator.writer("cancelled")).unwrap().unwrap();
+        let writer_handle = insert_test_resource(Resource::Writer(WriterState::Busy(1)));
+        let lease = ResourceLease {
+            handle: writer_handle,
+            kind: ResourceKind::Writer,
+            operation: 1,
+        };
+        let task = insert_test_resource(Resource::Task(Task::Pending(Some(lease))));
+        assert_eq!(opendal_mbt_wasm_task_cancel(task), STATUS_OK);
+        assert!(STATE.with(|state| matches!(
+            state.borrow_mut().arena.writer_mut(writer_handle).unwrap(),
+            WriterState::Failed
+        )));
+        publish_resource_task(
+            task,
+            lease,
+            ResourceUpdate::Writer(WriterUpdate::Open(Box::new(writer))),
+            Completion::WriterWrite(Ok(())),
+        );
+        assert_eq!(opendal_mbt_wasm_task_state(task), TASK_CANCELLED);
+        assert!(STATE.with(|state| matches!(
+            state.borrow_mut().arena.writer_mut(writer_handle).unwrap(),
+            WriterState::Failed
+        )));
+        assert_eq!(opendal_mbt_wasm_task_release(task), STATUS_OK);
+        assert_eq!(opendal_mbt_wasm_writer_release(writer_handle), STATUS_OK);
+
+        let late_writer = poll_once(operator.writer("late")).unwrap().unwrap();
+        let stale = insert_test_resource(Resource::Writer(WriterState::Busy(2)));
+        let stale_lease = ResourceLease {
+            handle: stale,
+            kind: ResourceKind::Writer,
+            operation: 2,
+        };
+        let late_task = insert_test_resource(Resource::Task(Task::Pending(Some(stale_lease))));
+        assert_eq!(opendal_mbt_wasm_writer_release(stale), STATUS_OK);
+        let current = opendal_mbt_wasm_buffer_new();
+        assert_ne!(current, stale);
+        publish_resource_task(
+            late_task,
+            stale_lease,
+            ResourceUpdate::Writer(WriterUpdate::Open(Box::new(late_writer))),
+            Completion::WriterWrite(Ok(())),
+        );
+        assert_eq!(opendal_mbt_wasm_buffer_len(current), 0);
+        assert_eq!(opendal_mbt_wasm_task_state(late_task), TASK_READY);
+        let completion = opendal_mbt_wasm_task_take(late_task);
+        assert_eq!(
+            opendal_mbt_wasm_completion_kind(completion),
+            COMPLETION_WRITER_WRITE
+        );
+        assert_eq!(opendal_mbt_wasm_completion_release(completion), STATUS_OK);
+        assert_eq!(opendal_mbt_wasm_task_release(late_task), STATUS_OK);
+        assert_eq!(opendal_mbt_wasm_buffer_release(current), STATUS_OK);
+        assert_eq!(opendal_mbt_wasm_live_handle_count(), 0);
+        reset_state();
+    }
+
+    #[test]
+    fn old_ready_task_cannot_terminalize_a_newer_writer_operation() {
+        for cancel_old_task in [true, false] {
+            reset_state();
+            let operator = Operator::new(Memory::default()).unwrap();
+            let writer = poll_once(operator.writer("operation-token"))
+                .unwrap()
+                .unwrap();
+            let writer_handle =
+                insert_test_resource(Resource::Writer(WriterState::Open(Box::new(writer), 0)));
+
+            let (task_a, lease_a, writer_a) = reserve_writer_call(writer_handle).unwrap();
+            publish_resource_task(
+                task_a,
+                lease_a,
+                ResourceUpdate::Writer(WriterUpdate::Open(writer_a)),
+                Completion::WriterWrite(Ok(())),
+            );
+            assert_eq!(opendal_mbt_wasm_task_state(task_a), TASK_READY);
+
+            let (task_b, lease_b, writer_b) = reserve_writer_call(writer_handle).unwrap();
+            assert_ne!(lease_a.operation, lease_b.operation);
+            assert!(STATE.with(|state| matches!(
+                state.borrow_mut().arena.writer_mut(writer_handle).unwrap(),
+                WriterState::Busy(operation) if *operation == lease_b.operation
+            )));
+
+            if cancel_old_task {
+                assert_eq!(opendal_mbt_wasm_task_cancel(task_a), STATUS_OK);
+            } else {
+                assert_eq!(opendal_mbt_wasm_task_release(task_a), STATUS_OK);
+            }
+            assert!(STATE.with(|state| matches!(
+                state.borrow_mut().arena.writer_mut(writer_handle).unwrap(),
+                WriterState::Busy(operation) if *operation == lease_b.operation
+            )));
+
+            publish_resource_task(
+                task_b,
+                lease_b,
+                ResourceUpdate::Writer(WriterUpdate::Open(writer_b)),
+                Completion::WriterWrite(Ok(())),
+            );
+            assert!(STATE.with(|state| matches!(
+                state.borrow_mut().arena.writer_mut(writer_handle).unwrap(),
+                WriterState::Open(_, operation) if *operation == lease_b.operation
+            )));
+            let completion_b = opendal_mbt_wasm_task_take(task_b);
+            assert_eq!(
+                opendal_mbt_wasm_completion_kind(completion_b),
+                COMPLETION_WRITER_WRITE
+            );
+            assert_eq!(opendal_mbt_wasm_completion_release(completion_b), STATUS_OK);
+            if cancel_old_task {
+                assert_eq!(opendal_mbt_wasm_task_release(task_a), STATUS_OK);
+            }
+            assert_eq!(opendal_mbt_wasm_task_release(task_b), STATUS_OK);
+            assert_eq!(opendal_mbt_wasm_writer_release(writer_handle), STATUS_OK);
+            assert_eq!(opendal_mbt_wasm_live_handle_count(), 0);
+        }
+        reset_state();
+    }
+
+    #[test]
+    fn failed_resource_completion_is_owned_and_terminal() {
+        reset_state();
+        let writer = insert_test_resource(Resource::Writer(WriterState::Busy(1)));
+        let lease = ResourceLease {
+            handle: writer,
+            kind: ResourceKind::Writer,
+            operation: 1,
+        };
+        let task = insert_test_resource(Resource::Task(Task::Pending(Some(lease))));
+        publish_resource_task(
+            task,
+            lease,
+            ResourceUpdate::Writer(WriterUpdate::Failed),
+            Completion::WriterWrite(Err(BridgeError::from(opendal::Error::new(
+                ErrorKind::Unexpected,
+                "write failed",
+            )))),
+        );
+        assert!(STATE.with(|state| matches!(
+            state.borrow_mut().arena.writer_mut(writer).unwrap(),
+            WriterState::Failed
+        )));
+        let completion = opendal_mbt_wasm_task_take(task);
+        assert_eq!(opendal_mbt_wasm_completion_status(completion), 8);
+        let error = opendal_mbt_wasm_completion_take_error(completion);
+        assert_ne!(error, 0);
+        assert_eq!(opendal_mbt_wasm_error_code(error), 8);
+        assert_eq!(opendal_mbt_wasm_error_release(error), STATUS_OK);
+        assert_eq!(opendal_mbt_wasm_task_release(task), STATUS_OK);
+        assert_eq!(opendal_mbt_wasm_writer_release(writer), STATUS_OK);
+        assert_eq!(opendal_mbt_wasm_live_handle_count(), 0);
+        reset_state();
+    }
+
+    #[test]
+    fn typed_open_completions_transfer_each_opendal_resource_once() {
+        reset_state();
+        let operator = Operator::new(Memory::default()).unwrap();
+        poll_once(operator.write("tree/value", b"value".to_vec()))
+            .unwrap()
+            .unwrap();
+
+        let reader = poll_once(operator.reader("tree/value")).unwrap().unwrap();
+        let stream = poll_once(reader.into_stream(BytesRange::default()))
+            .unwrap()
+            .unwrap();
+        let read_completion = insert_test_resource(Resource::Completion(
+            Completion::OpenReadStream(Ok(Box::new(ReadStreamCursor {
+                stream,
+                pending: None,
+                max_chunk: 16,
+            }))),
+        ));
+        let read_stream = opendal_mbt_wasm_completion_take_read_stream(read_completion);
+        assert_ne!(read_stream, 0);
+        assert_eq!(opendal_mbt_wasm_completion_kind(read_completion), 0);
+        assert_eq!(opendal_mbt_wasm_last_error_clear(), STATUS_OK);
+
+        let writer = poll_once(operator.writer("tree/other")).unwrap().unwrap();
+        let writer_completion = insert_test_resource(Resource::Completion(Completion::OpenWriter(
+            Ok(Box::new(writer)),
+        )));
+        let writer = opendal_mbt_wasm_completion_take_writer(writer_completion);
+        assert_ne!(writer, 0);
+
+        let lister = poll_once(operator.lister("tree/")).unwrap().unwrap();
+        let lister_completion = insert_test_resource(Resource::Completion(Completion::OpenLister(
+            Ok(Box::new(lister)),
+        )));
+        let lister = opendal_mbt_wasm_completion_take_lister(lister_completion);
+        assert_ne!(lister, 0);
+
+        assert_eq!(opendal_mbt_wasm_read_stream_release(read_stream), STATUS_OK);
+        assert_eq!(opendal_mbt_wasm_writer_release(writer), STATUS_OK);
+        assert_eq!(opendal_mbt_wasm_lister_release(lister), STATUS_OK);
+        assert_eq!(opendal_mbt_wasm_live_handle_count(), 0);
+        reset_state();
+    }
+
+    #[test]
+    fn cancellation_terminalizes_reader_and_lister_leases() {
+        reset_state();
+        let reader = insert_test_resource(Resource::ReadStream(ReadStreamState::Busy(1)));
+        let reader_lease = ResourceLease {
+            handle: reader,
+            kind: ResourceKind::ReadStream,
+            operation: 1,
+        };
+        let reader_task = insert_test_resource(Resource::Task(Task::Pending(Some(reader_lease))));
+        assert_eq!(opendal_mbt_wasm_task_cancel(reader_task), STATUS_OK);
+        assert!(STATE.with(|state| matches!(
+            state.borrow_mut().arena.read_stream_mut(reader).unwrap(),
+            ReadStreamState::Failed
+        )));
+
+        let lister = insert_test_resource(Resource::Lister(ListerState::Busy(2)));
+        let lister_lease = ResourceLease {
+            handle: lister,
+            kind: ResourceKind::Lister,
+            operation: 2,
+        };
+        let lister_task = insert_test_resource(Resource::Task(Task::Pending(Some(lister_lease))));
+        assert_eq!(opendal_mbt_wasm_task_cancel(lister_task), STATUS_OK);
+        assert!(STATE.with(|state| matches!(
+            state.borrow_mut().arena.lister_mut(lister).unwrap(),
+            ListerState::Failed
+        )));
+
+        assert_eq!(opendal_mbt_wasm_task_release(reader_task), STATUS_OK);
+        assert_eq!(opendal_mbt_wasm_read_stream_release(reader), STATUS_OK);
+        assert_eq!(opendal_mbt_wasm_task_release(lister_task), STATUS_OK);
+        assert_eq!(opendal_mbt_wasm_lister_release(lister), STATUS_OK);
         assert_eq!(opendal_mbt_wasm_live_handle_count(), 0);
         reset_state();
     }
