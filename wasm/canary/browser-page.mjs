@@ -58,10 +58,19 @@ try {
 
   const exports = runtime.exports;
   const bridge = runtime.bridge.exports;
+  assert(
+    bridge.opendal_mbt_wasm_abi_version() === 0x0001_0006,
+    "bridge ABI is not 1.6",
+  );
+  assert(
+    bridge.opendal_mbt_wasm_feature_flags() === 0x0000_07ff,
+    "bridge feature bitmap is not the complete 1.6 contract",
+  );
   const pendingPollCount = () =>
     bridge.opendal_mbt_wasm_canary_forced_pending_poll_count();
   const bulkTransferBytes = 16 * 1024 * 1024;
   const bulkTransferChunks = bulkTransferBytes / (256 * 1024);
+  const metadataSnapshotBytes = 84;
   const bulkLiveBefore = bridge.opendal_mbt_wasm_live_handle_count();
   const transferBefore = runtime.transfer.stats();
   const moonMemoryBefore = runtime.moonbit.exports.memory.buffer;
@@ -97,7 +106,7 @@ try {
   );
   assert(
     transferAfter.bridgeToMoonCalls - transferBefore.bridgeToMoonCalls ===
-      bulkTransferChunks + 3,
+      bulkTransferChunks + 4,
     "bridge-to-Moon calls did not scale with the 256 KiB chunk count",
   );
   assert(
@@ -107,7 +116,7 @@ try {
   );
   assert(
     transferAfter.bridgeToMoonBytes - transferBefore.bridgeToMoonBytes ===
-      bulkTransferBytes + bulkInfoTransferBytes,
+      bulkTransferBytes + bulkInfoTransferBytes + metadataSnapshotBytes,
     "bridge-to-Moon bulk byte count was not exact",
   );
   assert(

@@ -4,9 +4,11 @@ import { pathToFileURL } from "node:url";
 
 import { loadOpenDalMoonBit } from "../loader/index.mjs";
 
-const expectedAbiVersion = 0x0001_0005;
+const expectedAbiVersion = 0x0001_0006;
+const expectedFeatureFlags = 0x0000_07ff;
 const bulkTransferBytes = 16 * 1024 * 1024;
 const bulkTransferChunks = bulkTransferBytes / (256 * 1024);
+const metadataSnapshotBytes = 84;
 
 function assert(condition, message) {
   if (!condition) {
@@ -65,7 +67,7 @@ async function assertBulkTransfer(runtime) {
   );
   assert(
     after.bridgeToMoonCalls - before.bridgeToMoonCalls ===
-      bulkTransferChunks + 3,
+      bulkTransferChunks + 4,
     "bridge-to-Moon calls did not scale with the 256 KiB chunk count",
   );
   assert(
@@ -75,7 +77,7 @@ async function assertBulkTransfer(runtime) {
   );
   assert(
     after.bridgeToMoonBytes - before.bridgeToMoonBytes ===
-      bulkTransferBytes + infoTransferBytes,
+      bulkTransferBytes + infoTransferBytes + metadataSnapshotBytes,
     "bridge-to-Moon bulk byte count was not exact",
   );
   assert(
@@ -160,6 +162,13 @@ async function main() {
     throw new Error(
       `bridge ABI mismatch: expected 0x${expectedAbiVersion.toString(16)}, ` +
         `found 0x${version.toString(16)}`,
+    );
+  }
+  const features = runtime.bridge.exports.opendal_mbt_wasm_feature_flags();
+  if (features !== expectedFeatureFlags) {
+    throw new Error(
+      `bridge feature mismatch: expected 0x${expectedFeatureFlags.toString(16)}, ` +
+        `found 0x${features.toString(16)}`,
     );
   }
   const staleRejected =

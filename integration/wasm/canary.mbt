@@ -236,6 +236,25 @@ fn start_async_delete(operator : @opendal.Operator) -> Unit {
 }
 
 ///|
+fn has_async_write_metadata(
+  metadata : @opendal.Metadata,
+  payload : Bytes,
+) -> Bool {
+  metadata.is_file() &&
+  metadata.content_length == payload.length().to_uint64() &&
+  metadata.is_current is None &&
+  !metadata.is_deleted &&
+  metadata.cache_control == Some("max-age=60") &&
+  metadata.content_disposition == Some("inline") &&
+  metadata.content_encoding == Some("identity") &&
+  metadata.content_md5 is None &&
+  metadata.content_type == Some("application/octet-stream") &&
+  metadata.etag is None &&
+  metadata.last_modified is None &&
+  metadata.version is None
+}
+
+///|
 fn start_async_list(operator : @opendal.Operator, payload : Bytes) -> Unit {
   async_stage.val = ASYNC_LIST_PENDING
   let operation = operator
@@ -284,8 +303,7 @@ fn start_async_stat(operator : @opendal.Operator, payload : Bytes) -> Unit {
     .as_async()
     .stat_callback("canary/async/data.bin", callback=result => {
       match result {
-        Ok(metadata) if metadata.is_file() &&
-          metadata.content_length == payload.length().to_uint64() =>
+        Ok(metadata) if has_async_write_metadata(metadata, payload) =>
           start_async_list(operator, payload)
         _ => fail_async_lifecycle()
       }
@@ -301,14 +319,23 @@ fn start_async_stat(operator : @opendal.Operator, payload : Bytes) -> Unit {
 ///|
 fn start_async_read(operator : @opendal.Operator, payload : Bytes) -> Unit {
   async_stage.val = ASYNC_READ_PENDING
+  let expected = payload[1:payload.length() - 1]
   let operation = operator
     .as_async()
-    .read_callback("canary/async/data.bin", callback=result => {
-      match result {
-        Ok(actual) if actual == payload => start_async_stat(operator, payload)
-        _ => fail_async_lifecycle()
-      }
-    }) catch {
+    .read_callback(
+      "canary/async/data.bin",
+      range=@opendal.Range(
+        offset=1UL,
+        length=(payload.length() - 2).to_uint64(),
+      ),
+      callback=result => {
+        match result {
+          Ok(actual) if actual[:] == expected =>
+            start_async_stat(operator, payload)
+          _ => fail_async_lifecycle()
+        }
+      },
+    ) catch {
       _ => {
         fail_async_lifecycle()
         return
@@ -322,12 +349,22 @@ fn start_async_write(operator : @opendal.Operator, payload : Bytes) -> Unit {
   async_stage.val = ASYNC_WRITE_PENDING
   let operation = operator
     .as_async()
-    .write_callback("canary/async/data.bin", payload, callback=result => {
-      match result {
-        Ok(_) => start_async_read(operator, payload)
-        Err(_) => fail_async_lifecycle()
-      }
-    }) catch {
+    .write_callback(
+      "canary/async/data.bin",
+      payload,
+      append=false,
+      content_type="application/octet-stream",
+      content_disposition="inline",
+      content_encoding="identity",
+      cache_control="max-age=60",
+      callback=result => {
+        match result {
+          Ok(metadata) if has_async_write_metadata(metadata, payload) =>
+            start_async_read(operator, payload)
+          _ => fail_async_lifecycle()
+        }
+      },
+    ) catch {
       _ => {
         fail_async_lifecycle()
         return

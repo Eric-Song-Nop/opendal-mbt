@@ -739,9 +739,9 @@
         }
       ],
       "observed_sizes": {
-        "raw": 57857,
-        "gzip": 23329,
-        "brotli": 19598
+        "raw": 58419,
+        "gzip": 23672,
+        "brotli": 19901
       },
       "size_caps": {
         "raw": 65536,

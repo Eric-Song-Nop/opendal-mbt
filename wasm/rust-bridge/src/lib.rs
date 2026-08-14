@@ -3418,6 +3418,46 @@ mod tests {
     }
 
     #[test]
+    fn entry_metadata_snapshot_take_is_failure_atomic_and_single_use() {
+        reset_state();
+        let entries = encode_handle(0, MAX_GENERATION);
+        STATE.with(|state| {
+            let mut state = state.borrow_mut();
+            state.arena.slots = (0..MAX_SLOTS)
+                .map(|index| Slot {
+                    generation: if index == 0 { MAX_GENERATION } else { 0 },
+                    resource: (index == 0).then(|| {
+                        Resource::EntryList(vec![test_entry_snapshot("value.bin", "value.bin", 3)])
+                    }),
+                })
+                .collect();
+            state.arena.live = 1;
+        });
+
+        assert_eq!(opendal_mbt_wasm_entry_list_metadata_snapshot(entries, 0), 0);
+        assert!(STATE.with(|state| {
+            !state.borrow().arena.entry_list(entries).unwrap()[0]
+                .metadata_snapshot
+                .is_empty()
+        }));
+        assert_eq!(opendal_mbt_wasm_last_error_clear(), STATUS_OK);
+
+        STATE.with(|state| state.borrow_mut().arena.slots[1].generation = 1);
+        let snapshot = opendal_mbt_wasm_entry_list_metadata_snapshot(entries, 0);
+        assert_ne!(snapshot, 0);
+        assert_eq!(
+            &take_test_buffer(snapshot)[0..4],
+            METADATA_SNAPSHOT_MAGIC.as_slice()
+        );
+        assert_eq!(opendal_mbt_wasm_entry_list_metadata_snapshot(entries, 0), 0);
+        assert_eq!(opendal_mbt_wasm_last_error_code(), 17);
+        assert_eq!(opendal_mbt_wasm_last_error_clear(), STATUS_OK);
+        assert_eq!(opendal_mbt_wasm_entry_list_release(entries), STATUS_OK);
+        assert_eq!(opendal_mbt_wasm_live_handle_count(), 0);
+        reset_state();
+    }
+
+    #[test]
     fn ready_task_moves_its_completion_exactly_once() {
         reset_state();
         let task = insert_test_resource(Resource::Task(Task::Ready(Box::new(Completion::Read(
