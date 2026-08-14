@@ -4,6 +4,7 @@
 //! values behind generation-checked handles so neither Rust pointers nor
 //! language-specific object layouts become part of the module ABI.
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::future::Future;
 use std::pin::{Pin, pin};
@@ -12,7 +13,7 @@ use std::task::{Context, Poll, Waker};
 use futures_util::TryStreamExt;
 use opendal::{ErrorKind, Metadata, Operator, OperatorRegistry, services::Memory};
 
-const ABI_VERSION: u32 = 0x0001_0004;
+const ABI_VERSION: u32 = 0x0001_0005;
 const FEATURE_MEMORY_SERVICE: u32 = 1 << 0;
 const FEATURE_POLL_ONCE_CANARY: u32 = 1 << 1;
 const FEATURE_GENERATION_HANDLES: u32 = 1 << 2;
@@ -22,6 +23,7 @@ const FEATURE_GENERIC_OPERATOR: u32 = 1 << 5;
 const FEATURE_CORE_MUTATIONS: u32 = 1 << 6;
 const FEATURE_BOUNDED_LIST: u32 = 1 << 7;
 const FEATURE_BULK_TRANSFER: u32 = 1 << 8;
+const FEATURE_STRUCTURED_ERRORS: u32 = 1 << 9;
 const MAX_SLOTS: usize = u16::MAX as usize;
 const MAX_GENERATION: u16 = i16::MAX as u16;
 const MAX_BUFFER_LENGTH: usize = 64 * 1024 * 1024;
@@ -33,6 +35,31 @@ const MAX_CONFIG_BYTES: usize = 1024 * 1024;
 
 const STATUS_OK: u32 = 0;
 const SCALAR_ERROR: i32 = -1;
+
+const ERROR_UNEXPECTED: u32 = 1;
+const ERROR_UNSUPPORTED: u32 = 2;
+const ERROR_CONFIG_INVALID: u32 = 3;
+const ERROR_NOT_FOUND: u32 = 4;
+const ERROR_PERMISSION_DENIED: u32 = 5;
+const ERROR_IS_A_DIRECTORY: u32 = 6;
+const ERROR_NOT_A_DIRECTORY: u32 = 7;
+const ERROR_ALREADY_EXISTS: u32 = 8;
+const ERROR_RATE_LIMITED: u32 = 9;
+const ERROR_IS_SAME_FILE: u32 = 10;
+const ERROR_CONDITION_NOT_MATCH: u32 = 11;
+const ERROR_RANGE_NOT_SATISFIED: u32 = 12;
+const ERROR_INVALID_ARGUMENT: u32 = 0x1001;
+const ERROR_RESOURCE_CLOSED: u32 = 0x1002;
+const ERROR_BUFFER_TOO_LARGE: u32 = 0x1003;
+const ERROR_ABI_MISMATCH: u32 = 0x1004;
+
+const ERROR_STATUS_PERMANENT: u32 = 1;
+const ERROR_STATUS_TEMPORARY: u32 = 2;
+const ERROR_STATUS_PERSISTENT: u32 = 3;
+
+const ERROR_SNAPSHOT_MAGIC: [u8; 4] = *b"ODE1";
+const ERROR_SNAPSHOT_SCHEMA: u32 = 1;
+const ERROR_SNAPSHOT_HEADER_LENGTH: usize = 24;
 
 const TASK_PENDING: u32 = 1;
 const TASK_READY: u32 = 2;
@@ -85,10 +112,13 @@ enum BridgeError {
     InvalidByte { value: u32 },
     #[error("path buffer is not valid UTF-8")]
     InvalidUtf8,
-    #[error("OpenDAL path was not found: {message}")]
-    OpenDalNotFound { message: String },
     #[error("OpenDAL operation failed: {message}")]
-    OpenDal { message: String },
+    OpenDal {
+        kind: u32,
+        status: u32,
+        kind_name: String,
+        message: String,
+    },
     #[error("OpenDAL future returned Pending in the poll-once canary adapter")]
     AsyncPending,
     #[error("the bridge has reached its {MAX_SLOTS}-handle capacity")]
@@ -112,6 +142,7 @@ enum BridgeError {
 }
 
 impl BridgeError {
+    /// Returns the legacy scalar error code retained by the v1 task ABI.
     fn code(&self) -> u32 {
         match self {
             Self::InvalidHandle { .. } => 1,
@@ -120,7 +151,7 @@ impl BridgeError {
             Self::IndexOutOfBounds { .. } => 4,
             Self::InvalidByte { .. } => 5,
             Self::InvalidUtf8 => 6,
-            Self::OpenDalNotFound { .. } => 7,
+            Self::OpenDal { kind, .. } if *kind == ERROR_NOT_FOUND => 7,
             Self::OpenDal { .. } => 8,
             Self::AsyncPending => 9,
             Self::HandleLimit => 10,
@@ -133,20 +164,129 @@ impl BridgeError {
             Self::InvalidArgument { .. } => 17,
         }
     }
+
+    fn kind(&self) -> u32 {
+        match self {
+            Self::InvalidHandle { .. }
+            | Self::TaskNotReady { .. }
+            | Self::TaskConsumed { .. }
+            | Self::TornDown => ERROR_RESOURCE_CLOSED,
+            Self::WrongResourceType { .. } => ERROR_ABI_MISMATCH,
+            Self::IndexOutOfBounds { .. }
+            | Self::InvalidByte { .. }
+            | Self::InvalidUtf8
+            | Self::InvalidArgument { .. } => ERROR_INVALID_ARGUMENT,
+            Self::BufferTooLarge | Self::LengthOverflow | Self::ListTooLarge => {
+                ERROR_BUFFER_TOO_LARGE
+            }
+            Self::OpenDal { kind, .. } => *kind,
+            Self::AsyncPending => ERROR_UNEXPECTED,
+            Self::HandleLimit | Self::AllocationFailed => ERROR_UNEXPECTED,
+        }
+    }
+
+    fn error_status(&self) -> u32 {
+        match self {
+            Self::OpenDal { status, .. } => *status,
+            _ => ERROR_STATUS_PERMANENT,
+        }
+    }
+
+    fn kind_name(&self) -> &str {
+        match self {
+            Self::InvalidHandle { .. }
+            | Self::TaskNotReady { .. }
+            | Self::TaskConsumed { .. }
+            | Self::TornDown => "ResourceClosed",
+            Self::WrongResourceType { .. } => "AbiMismatch",
+            Self::IndexOutOfBounds { .. }
+            | Self::InvalidByte { .. }
+            | Self::InvalidUtf8
+            | Self::InvalidArgument { .. } => "InvalidArgument",
+            Self::BufferTooLarge | Self::LengthOverflow | Self::ListTooLarge => "BufferTooLarge",
+            Self::OpenDal { kind_name, .. } => kind_name,
+            Self::AsyncPending => "Unexpected",
+            Self::HandleLimit | Self::AllocationFailed => "Unexpected",
+        }
+    }
+
+    fn diagnostic_message(&self) -> Cow<'_, str> {
+        match self {
+            Self::OpenDal { message, .. } => Cow::Borrowed(message),
+            _ => Cow::Owned(self.to_string()),
+        }
+    }
+
+    fn from_construction_error(error: opendal::Error) -> Self {
+        let mut snapshot = Self::from(error);
+        if let Self::OpenDal { message, .. } = &mut snapshot {
+            *message = "operator construction failed".to_owned();
+        }
+        snapshot
+    }
 }
 
 impl From<opendal::Error> for BridgeError {
     fn from(error: opendal::Error) -> Self {
-        if error.kind() == ErrorKind::NotFound {
-            Self::OpenDalNotFound {
-                message: error.to_string(),
-            }
+        let kind = error.kind();
+        let kind_code = match kind {
+            ErrorKind::Unexpected => ERROR_UNEXPECTED,
+            ErrorKind::Unsupported => ERROR_UNSUPPORTED,
+            ErrorKind::ConfigInvalid => ERROR_CONFIG_INVALID,
+            ErrorKind::NotFound => ERROR_NOT_FOUND,
+            ErrorKind::PermissionDenied => ERROR_PERMISSION_DENIED,
+            ErrorKind::IsADirectory => ERROR_IS_A_DIRECTORY,
+            ErrorKind::NotADirectory => ERROR_NOT_A_DIRECTORY,
+            ErrorKind::AlreadyExists => ERROR_ALREADY_EXISTS,
+            ErrorKind::RateLimited => ERROR_RATE_LIMITED,
+            ErrorKind::IsSameFile => ERROR_IS_SAME_FILE,
+            ErrorKind::ConditionNotMatch => ERROR_CONDITION_NOT_MATCH,
+            ErrorKind::RangeNotSatisfied => ERROR_RANGE_NOT_SATISFIED,
+            _ => ERROR_UNEXPECTED,
+        };
+        let status = if error.is_temporary() {
+            ERROR_STATUS_TEMPORARY
+        } else if error.is_persistent() {
+            ERROR_STATUS_PERSISTENT
         } else {
-            Self::OpenDal {
-                message: error.to_string(),
-            }
+            ERROR_STATUS_PERMANENT
+        };
+        Self::OpenDal {
+            kind: kind_code,
+            status,
+            kind_name: kind.into_static().to_owned(),
+            // `message()` excludes operation context that can contain backend
+            // configuration values. The Moon facade owns call-site context.
+            message: error.message().to_owned(),
         }
     }
+}
+
+fn error_snapshot_bytes(error: &BridgeError) -> Result<Vec<u8>, BridgeError> {
+    let kind_name = error.kind_name().as_bytes();
+    let message = error.diagnostic_message();
+    let message = message.as_bytes();
+    let kind_name_length =
+        u32::try_from(kind_name.len()).map_err(|_| BridgeError::BufferTooLarge)?;
+    let message_length = u32::try_from(message.len()).map_err(|_| BridgeError::BufferTooLarge)?;
+    let total_length = ERROR_SNAPSHOT_HEADER_LENGTH
+        .checked_add(kind_name.len())
+        .and_then(|length| length.checked_add(message.len()))
+        .filter(|length| *length <= MAX_BUFFER_LENGTH)
+        .ok_or(BridgeError::BufferTooLarge)?;
+    let mut snapshot = Vec::new();
+    snapshot
+        .try_reserve_exact(total_length)
+        .map_err(|_| BridgeError::AllocationFailed)?;
+    snapshot.extend_from_slice(&ERROR_SNAPSHOT_MAGIC);
+    snapshot.extend_from_slice(&ERROR_SNAPSHOT_SCHEMA.to_le_bytes());
+    snapshot.extend_from_slice(&error.kind().to_le_bytes());
+    snapshot.extend_from_slice(&error.error_status().to_le_bytes());
+    snapshot.extend_from_slice(&kind_name_length.to_le_bytes());
+    snapshot.extend_from_slice(&message_length.to_le_bytes());
+    snapshot.extend_from_slice(kind_name);
+    snapshot.extend_from_slice(message);
+    Ok(snapshot)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -894,7 +1034,8 @@ fn push_operator_config(
 
 fn build_operator(builder: OperatorBuilder) -> Result<Operator, BridgeError> {
     opendal::init_default_registry();
-    Operator::via_iter(&builder.scheme, builder.config).map_err(BridgeError::from)
+    Operator::via_iter(&builder.scheme, builder.config)
+        .map_err(BridgeError::from_construction_error)
 }
 
 fn capability_word(operator: &Operator, word: u32) -> Result<u64, BridgeError> {
@@ -968,6 +1109,7 @@ pub extern "C" fn opendal_mbt_wasm_feature_flags() -> u32 {
         | FEATURE_CORE_MUTATIONS
         | FEATURE_BOUNDED_LIST
         | FEATURE_BULK_TRANSFER
+        | FEATURE_STRUCTURED_ERRORS
 }
 
 /// Returns how many forced-delay tasks reached an actual pending poll.
@@ -1150,7 +1292,7 @@ pub extern "C" fn opendal_mbt_wasm_registered_schemes() -> u32 {
 pub extern "C" fn opendal_mbt_wasm_operator_builder_new(scheme_handle: u32) -> u32 {
     let result = owned_utf8_buffer(scheme_handle).and_then(|scheme| {
         if scheme.is_empty() {
-            return Err(BridgeError::OpenDal {
+            return Err(BridgeError::InvalidArgument {
                 message: "service scheme cannot be empty".to_owned(),
             });
         }
@@ -1963,6 +2105,31 @@ pub extern "C" fn opendal_mbt_wasm_error_message(handle: u32) -> u32 {
     }
 }
 
+/// Atomically replaces an owned error with its versioned binary snapshot.
+///
+/// The little-endian `ODE1` schema contains six 32-bit header words followed
+/// by the UTF-8 kind name and message. Success consumes the error handle and
+/// returns a buffer handle. Any failure leaves the error handle valid.
+#[unsafe(no_mangle)]
+pub extern "C" fn opendal_mbt_wasm_error_snapshot_take(handle: u32) -> u32 {
+    let result = STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let snapshot = error_snapshot_bytes(state.arena.error(handle)?)?;
+        state
+            .arena
+            .ensure_insert_capacity_after_take(handle, ResourceKind::Error)?;
+        let resource = state.arena.take(handle, ResourceKind::Error)?;
+        let Resource::Error(_) = resource else {
+            unreachable!("arena checked error resource type")
+        };
+        match state.arena.insert(Resource::Buffer(snapshot)) {
+            Ok(snapshot_handle) => Ok(snapshot_handle),
+            Err(_) => unreachable!("replacement capacity was checked before consuming the error"),
+        }
+    });
+    handle_or_record_error(result)
+}
+
 /// Releases an owned error handle and returns a status code.
 #[unsafe(no_mangle)]
 pub extern "C" fn opendal_mbt_wasm_error_release(handle: u32) -> u32 {
@@ -1972,6 +2139,64 @@ pub extern "C" fn opendal_mbt_wasm_error_release(handle: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct DecodedErrorSnapshot<'a> {
+        kind: u32,
+        status: u32,
+        kind_name: &'a str,
+        message: &'a str,
+    }
+
+    fn snapshot_word(snapshot: &[u8], offset: usize) -> Result<u32, &'static str> {
+        let bytes = snapshot
+            .get(offset..offset + 4)
+            .ok_or("truncated snapshot header")?;
+        let bytes: [u8; 4] = bytes
+            .try_into()
+            .map_err(|_| "snapshot word has the wrong length")?;
+        Ok(u32::from_le_bytes(bytes))
+    }
+
+    fn decode_error_snapshot(snapshot: &[u8]) -> Result<DecodedErrorSnapshot<'_>, &'static str> {
+        if snapshot.get(0..4) != Some(ERROR_SNAPSHOT_MAGIC.as_slice()) {
+            return Err("invalid snapshot magic");
+        }
+        if snapshot_word(snapshot, 4)? != ERROR_SNAPSHOT_SCHEMA {
+            return Err("unsupported snapshot schema");
+        }
+        let kind_name_length =
+            usize::try_from(snapshot_word(snapshot, 16)?).map_err(|_| "kind name too long")?;
+        let message_length =
+            usize::try_from(snapshot_word(snapshot, 20)?).map_err(|_| "message too long")?;
+        let kind_name_end = ERROR_SNAPSHOT_HEADER_LENGTH
+            .checked_add(kind_name_length)
+            .ok_or("kind name length overflow")?;
+        let message_end = kind_name_end
+            .checked_add(message_length)
+            .ok_or("message length overflow")?;
+        if message_end != snapshot.len() {
+            return Err("snapshot payload length mismatch");
+        }
+        let kind_name = std::str::from_utf8(
+            snapshot
+                .get(ERROR_SNAPSHOT_HEADER_LENGTH..kind_name_end)
+                .ok_or("truncated kind name")?,
+        )
+        .map_err(|_| "kind name is not UTF-8")?;
+        let message = std::str::from_utf8(
+            snapshot
+                .get(kind_name_end..message_end)
+                .ok_or("truncated message")?,
+        )
+        .map_err(|_| "message is not UTF-8")?;
+        Ok(DecodedErrorSnapshot {
+            kind: snapshot_word(snapshot, 8)?,
+            status: snapshot_word(snapshot, 12)?,
+            kind_name,
+            message,
+        })
+    }
 
     fn reset_state() {
         STATE.with(|state| *state.borrow_mut() = State::default());
@@ -1989,6 +2214,217 @@ mod tests {
         let value = STATE.with(|state| state.borrow().arena.buffer(handle).unwrap().to_vec());
         assert_eq!(opendal_mbt_wasm_buffer_release(handle), STATUS_OK);
         value
+    }
+
+    #[test]
+    fn opendal_error_kinds_use_the_native_binding_codes() {
+        for (kind, expected_code, expected_name) in [
+            (ErrorKind::Unexpected, ERROR_UNEXPECTED, "Unexpected"),
+            (ErrorKind::Unsupported, ERROR_UNSUPPORTED, "Unsupported"),
+            (
+                ErrorKind::ConfigInvalid,
+                ERROR_CONFIG_INVALID,
+                "ConfigInvalid",
+            ),
+            (ErrorKind::NotFound, ERROR_NOT_FOUND, "NotFound"),
+            (
+                ErrorKind::PermissionDenied,
+                ERROR_PERMISSION_DENIED,
+                "PermissionDenied",
+            ),
+            (
+                ErrorKind::IsADirectory,
+                ERROR_IS_A_DIRECTORY,
+                "IsADirectory",
+            ),
+            (
+                ErrorKind::NotADirectory,
+                ERROR_NOT_A_DIRECTORY,
+                "NotADirectory",
+            ),
+            (
+                ErrorKind::AlreadyExists,
+                ERROR_ALREADY_EXISTS,
+                "AlreadyExists",
+            ),
+            (ErrorKind::RateLimited, ERROR_RATE_LIMITED, "RateLimited"),
+            (ErrorKind::IsSameFile, ERROR_IS_SAME_FILE, "IsSameFile"),
+            (
+                ErrorKind::ConditionNotMatch,
+                ERROR_CONDITION_NOT_MATCH,
+                "ConditionNotMatch",
+            ),
+            (
+                ErrorKind::RangeNotSatisfied,
+                ERROR_RANGE_NOT_SATISFIED,
+                "RangeNotSatisfied",
+            ),
+        ] {
+            let snapshot = error_snapshot_bytes(&BridgeError::from(opendal::Error::new(
+                kind,
+                "stable message",
+            )))
+            .unwrap();
+            let decoded = decode_error_snapshot(&snapshot).unwrap();
+            assert_eq!(
+                decoded,
+                DecodedErrorSnapshot {
+                    kind: expected_code,
+                    status: ERROR_STATUS_PERMANENT,
+                    kind_name: expected_name,
+                    message: "stable message",
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn opendal_error_status_preserves_temporary_and_persistent() {
+        for (error, expected_status) in [
+            (
+                opendal::Error::new(ErrorKind::Unexpected, "temporary").set_temporary(),
+                ERROR_STATUS_TEMPORARY,
+            ),
+            (
+                opendal::Error::new(ErrorKind::Unexpected, "persistent").set_persistent(),
+                ERROR_STATUS_PERSISTENT,
+            ),
+        ] {
+            let snapshot = error_snapshot_bytes(&BridgeError::from(error)).unwrap();
+            assert_eq!(
+                decode_error_snapshot(&snapshot).unwrap().status,
+                expected_status
+            );
+        }
+    }
+
+    #[test]
+    fn binding_errors_use_the_native_binding_codes() {
+        for (error, expected_code, expected_name) in [
+            (
+                BridgeError::InvalidArgument {
+                    message: "invalid".to_owned(),
+                },
+                ERROR_INVALID_ARGUMENT,
+                "InvalidArgument",
+            ),
+            (
+                BridgeError::InvalidHandle { handle: 1 },
+                ERROR_RESOURCE_CLOSED,
+                "ResourceClosed",
+            ),
+            (
+                BridgeError::BufferTooLarge,
+                ERROR_BUFFER_TOO_LARGE,
+                "BufferTooLarge",
+            ),
+            (
+                BridgeError::WrongResourceType {
+                    handle: 1,
+                    expected: "buffer",
+                    actual: "operator",
+                },
+                ERROR_ABI_MISMATCH,
+                "AbiMismatch",
+            ),
+        ] {
+            let snapshot = error_snapshot_bytes(&error).unwrap();
+            let decoded = decode_error_snapshot(&snapshot).unwrap();
+            assert_eq!(
+                (decoded.kind, decoded.kind_name),
+                (expected_code, expected_name)
+            );
+        }
+    }
+
+    #[test]
+    fn construction_error_snapshot_redacts_backend_diagnostics() {
+        let error = BridgeError::from_construction_error(opendal::Error::new(
+            ErrorKind::ConfigInvalid,
+            "secret_access_key=do-not-leak",
+        ));
+        let snapshot = error_snapshot_bytes(&error).unwrap();
+
+        assert_eq!(
+            decode_error_snapshot(&snapshot).unwrap().message,
+            "operator construction failed"
+        );
+    }
+
+    #[test]
+    fn error_snapshot_take_consumes_error_and_publishes_one_buffer() {
+        reset_state();
+        let error = insert_test_resource(Resource::Error(BridgeError::from(opendal::Error::new(
+            ErrorKind::NotFound,
+            "missing object",
+        ))));
+
+        let snapshot = opendal_mbt_wasm_error_snapshot_take(error);
+
+        assert_ne!(snapshot, 0);
+        assert!(STATE.with(|state| state.borrow().arena.error(error).is_err()));
+        assert_eq!(
+            decode_error_snapshot(&take_test_buffer(snapshot)).unwrap(),
+            DecodedErrorSnapshot {
+                kind: ERROR_NOT_FOUND,
+                status: ERROR_STATUS_PERMANENT,
+                kind_name: "NotFound",
+                message: "missing object",
+            }
+        );
+        assert_eq!(opendal_mbt_wasm_live_handle_count(), 0);
+        reset_state();
+    }
+
+    #[test]
+    fn error_snapshot_take_preserves_error_when_replacement_has_no_capacity() {
+        reset_state();
+        let error = encode_handle(0, MAX_GENERATION);
+        STATE.with(|state| {
+            let mut state = state.borrow_mut();
+            state.arena.slots = (0..MAX_SLOTS)
+                .map(|index| Slot {
+                    generation: if index == 0 { MAX_GENERATION } else { 0 },
+                    resource: (index == 0).then(|| {
+                        Resource::Error(BridgeError::InvalidArgument {
+                            message: "preserve me".to_owned(),
+                        })
+                    }),
+                })
+                .collect();
+            state.arena.live = 1;
+        });
+
+        assert_eq!(opendal_mbt_wasm_error_snapshot_take(error), 0);
+        assert!(STATE.with(|state| state.borrow().arena.error(error).is_ok()));
+        reset_state();
+    }
+
+    #[test]
+    fn error_snapshot_decoder_rejects_malformed_or_truncated_data() {
+        let valid = error_snapshot_bytes(&BridgeError::InvalidArgument {
+            message: "message".to_owned(),
+        })
+        .unwrap();
+        let mut malformed = valid.clone();
+        malformed[0] = b'X';
+
+        assert!(decode_error_snapshot(&malformed).is_err());
+        assert!(decode_error_snapshot(&valid[..valid.len() - 1]).is_err());
+    }
+
+    #[test]
+    fn error_snapshot_decoder_rejects_invalid_utf8() {
+        let mut snapshot = error_snapshot_bytes(&BridgeError::InvalidArgument {
+            message: "message".to_owned(),
+        })
+        .unwrap();
+        snapshot[ERROR_SNAPSHOT_HEADER_LENGTH] = 0xff;
+
+        assert_eq!(
+            decode_error_snapshot(&snapshot),
+            Err("kind name is not UTF-8")
+        );
     }
 
     #[test]
@@ -2092,7 +2528,7 @@ mod tests {
     }
 
     #[test]
-    fn generic_builder_reports_an_unregistered_scheme_without_leaking() {
+    fn generic_builder_redacts_unregistered_scheme_diagnostics_without_leaking() {
         reset_state();
         let scheme = insert_test_buffer(b"not-compiled-in");
         let builder = opendal_mbt_wasm_operator_builder_new(scheme);
@@ -2103,13 +2539,13 @@ mod tests {
         assert_eq!(opendal_mbt_wasm_last_error_code(), 8);
         let error = opendal_mbt_wasm_last_error_take();
         assert_ne!(error, 0);
-        let message = opendal_mbt_wasm_error_message(error);
-        assert!(
-            String::from_utf8(take_test_buffer(message))
+        let snapshot = opendal_mbt_wasm_error_snapshot_take(error);
+        assert_eq!(
+            decode_error_snapshot(&take_test_buffer(snapshot))
                 .unwrap()
-                .contains("scheme is not registered")
+                .message,
+            "operator construction failed"
         );
-        assert_eq!(opendal_mbt_wasm_error_release(error), STATUS_OK);
         assert_eq!(
             opendal_mbt_wasm_operator_builder_release(builder),
             STATUS_OK
@@ -2359,12 +2795,10 @@ mod tests {
     }
 
     #[test]
-    fn failed_result_remains_available_for_owned_error_take() {
+    fn owned_completion_error_snapshot_is_isolated_from_later_sticky_errors() {
         reset_state();
         let completion = insert_test_resource(Resource::Completion(Completion::Read(Err(
-            BridgeError::OpenDalNotFound {
-                message: "missing".to_owned(),
-            },
+            BridgeError::from(opendal::Error::new(ErrorKind::NotFound, "missing")),
         ))));
 
         assert_eq!(opendal_mbt_wasm_completion_take_buffer(completion), 0);
@@ -2374,7 +2808,21 @@ mod tests {
         let error = opendal_mbt_wasm_completion_take_error(completion);
         assert_ne!(error, 0);
         assert_eq!(opendal_mbt_wasm_error_code(error), 7);
-        assert_eq!(opendal_mbt_wasm_error_release(error), STATUS_OK);
+        assert_eq!(opendal_mbt_wasm_buffer_get(0, 0), SCALAR_ERROR);
+        assert_eq!(opendal_mbt_wasm_last_error_code(), 1);
+
+        let snapshot = opendal_mbt_wasm_error_snapshot_take(error);
+        assert_eq!(
+            decode_error_snapshot(&take_test_buffer(snapshot)).unwrap(),
+            DecodedErrorSnapshot {
+                kind: ERROR_NOT_FOUND,
+                status: ERROR_STATUS_PERMANENT,
+                kind_name: "NotFound",
+                message: "missing",
+            }
+        );
+        assert_eq!(opendal_mbt_wasm_last_error_code(), 1);
+        assert_eq!(opendal_mbt_wasm_last_error_clear(), STATUS_OK);
         assert_eq!(opendal_mbt_wasm_live_handle_count(), 0);
         reset_state();
     }
