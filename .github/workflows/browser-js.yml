@@ -3,6 +3,8 @@ name: Browser JS
 on:
   pull_request:
     paths:
+      - ".gitattributes"
+      - ".gitignore"
       - ".github/workflows/browser-js.yml"
       - "Cargo.lock"
       - "Cargo.toml"
@@ -10,13 +12,20 @@ on:
       - "build.js"
       - "moon.mod"
       - "rust-toolchain.toml"
+      - "scripts/check-package.sh"
+      - "scripts/check-packaged-browser.sh"
+      - "scripts/generate-browser-embed.mjs"
       - "scripts/test-native-resolver.js"
+      - "src/README.mbt.md"
       - "src/browser/**"
+      - "src/browser_demo/**"
       - "wasm/**"
   push:
     branches:
       - main
     paths:
+      - ".gitattributes"
+      - ".gitignore"
       - ".github/workflows/browser-js.yml"
       - "Cargo.lock"
       - "Cargo.toml"
@@ -24,8 +33,13 @@ on:
       - "build.js"
       - "moon.mod"
       - "rust-toolchain.toml"
+      - "scripts/check-package.sh"
+      - "scripts/check-packaged-browser.sh"
+      - "scripts/generate-browser-embed.mjs"
       - "scripts/test-native-resolver.js"
+      - "src/README.mbt.md"
       - "src/browser/**"
+      - "src/browser_demo/**"
       - "wasm/**"
 
 permissions:
@@ -67,3 +81,7 @@ jobs:
         run: make browser-rust-test
       - name: Run browser integration canary
         run: make browser-js-canary RUST_PROFILE=release
+      - name: Verify embedded browser distribution
+        run: |
+          make browser-embed-check
+          make packaged-browser

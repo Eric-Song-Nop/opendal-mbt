@@ -40,5 +40,6 @@ options(
     "tests",
     "scripts",
     "skills-lock.json",
+    "/trace.json",
   ],
 )

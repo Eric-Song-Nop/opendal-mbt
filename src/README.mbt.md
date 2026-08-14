@@ -34,6 +34,8 @@ The current source facade implements:
 - immutable timeout, retry, and concurrency-limit layers, all opt-in;
 - all-or-error `delete_many` and a managed same-Operator, one-object `Copier`;
 - an initial async facade for read, bounded read streams, and chunked writers;
+- a browser JS facade with an embedded OpenDAL Wasm runtime, bounded async
+  readers and listers, and explicit streaming writers;
 - typed `OpenDalError` values and capability inspection.
 
 The generated public interface is
@@ -80,6 +82,56 @@ make test-profile NATIVE_SERVICE_PROFILE=standard
 That maintainer path builds and overlays a standard archive from source for
 validation; it neither rewrites the committed `v0.2.0` standard pins nor
 changes the immutable `v0.1.0` local table.
+
+## Browser quickstart
+
+From either this repository root or the root of the unpacked Moon package, one
+Moon command compiles the published demo and runs its OpenDAL round trip in a
+real headless Chrome or Chromium:
+
+```sh
+moon run --target js --release src/browser_demo
+```
+
+The command needs MoonBit, Node.js 18 or newer, and an installed Chrome or
+Chromium (`CHROME_BIN` can select it). It needs no Rust toolchain, npm package,
+JavaScript bundler, CDN, or separately served Wasm asset.
+
+Browser consumers import the dedicated JS package:
+
+```moonbit nocheck
+supported_targets = "js"
+
+import {
+  "Eric-Song-Nop/opendal/browser" @opendal,
+  "moonbitlang/async",
+}
+```
+
+Inside an async context, `Runtime::new()` initializes the version-matched
+runtime embedded in the Moon package:
+
+```moonbit nocheck
+///|
+async fn browser_round_trip() {
+  let runtime = @opendal.Runtime::new()
+  let operator = runtime.operator("memory")
+  let storage = operator.as_async()
+  storage.write("hello.txt", b"hello from Chrome") |> ignore
+  assert_eq(storage.read("hello.txt"), b"hello from Chrome")
+  operator.close()
+  runtime.close()
+}
+```
+
+`Runtime::load(BrowserAssets)` remains available when an application wants to
+serve version-matched runtime, glue, and Wasm URLs itself. Maintainers refresh
+the checked-in embedded source with `make browser-embed-generate` and validate
+it with `make browser-embed-check`; the check decompresses and byte-compares
+the Wasm so equivalent deflate streams from different Node/zlib versions do
+not cause false failures. A browser host page's Content Security Policy must
+allow WebAssembly compilation, normally by including
+`script-src 'wasm-unsafe-eval'`; the published demo sets this policy itself.
 
 ## First operation
 
@@ -151,9 +203,10 @@ async test "README: async memory round trip" {
   OpenDAL or a backend may provide and retain one larger raw buffer internally.
 - Suffix ranges require `capability.can_read_suffix()`; the binding does not
   emulate suffix reads with a preliminary `stat`.
-- The first async slice covers read, bounded read streams, and chunked writers;
-  async stat/list/delete/copy/presign and public task handles remain later
-  work.
+- The native async slice covers read, bounded read streams, and chunked
+  writers; native async stat/list/delete/copy/presign and public task handles
+  remain later work. The browser JS package has its own capability-checked
+  Promise facade and stateful streams.
 - Retry, timeout, and concurrency limits are never implicit. Logging, tracing,
   metrics exporters, and custom callback layers are not exposed.
 - Standard artifacts are pinned for the `v0.2.0` release candidate but are not
