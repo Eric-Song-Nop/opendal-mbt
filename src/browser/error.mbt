@@ -80,6 +80,7 @@ fn error_kind_from_bridge(code : Int, name : String) -> ErrorKind {
     0x1003 => BufferTooLarge
     0x1004 => AbiMismatch
     0x1005 => Cancelled
+    0x1006 => ResourceBusy
     other => UnknownKind(other, name)
   }
 }

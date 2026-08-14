@@ -8,6 +8,18 @@ priv type JsOperator
 
 ///|
 #external
+priv type JsReadStream
+
+///|
+#external
+priv type JsWriter
+
+///|
+#external
+priv type JsLister
+
+///|
+#external
 priv type JsMetadata
 
 ///|
@@ -71,6 +83,26 @@ extern "js" fn JsOutcome::bytes_value(self : JsOutcome) -> Bytes =
 
 ///|
 extern "js" fn JsOutcome::entries_value(self : JsOutcome) -> Array[JsEntry] =
+  #| (outcome) => outcome.value
+
+///|
+extern "js" fn JsOutcome::has_value(self : JsOutcome) -> Bool =
+  #| (outcome) => outcome.value !== undefined
+
+///|
+extern "js" fn JsOutcome::read_stream_value(self : JsOutcome) -> JsReadStream =
+  #| (outcome) => outcome.value
+
+///|
+extern "js" fn JsOutcome::writer_value(self : JsOutcome) -> JsWriter =
+  #| (outcome) => outcome.value
+
+///|
+extern "js" fn JsOutcome::lister_value(self : JsOutcome) -> JsLister =
+  #| (outcome) => outcome.value
+
+///|
+extern "js" fn JsOutcome::entry_value(self : JsOutcome) -> JsEntry =
   #| (outcome) => outcome.value
 
 ///|
@@ -380,3 +412,155 @@ extern "js" fn JsOperator::list(
   #|   if (hasStartAfter) options.startAfter = startAfter
   #|   return operator.list(path, options)
   #| }
+
+///|
+extern "js" fn JsOperator::copy(
+  self : JsOperator,
+  source : String,
+  destination : String,
+  signal : @js_async.AbortSignal,
+) -> @js_async.Promise[JsOutcome] =
+  #| (operator, source, destination, signal) =>
+  #|   operator.copy(source, destination, { signal })
+
+///|
+extern "js" fn JsOperator::rename(
+  self : JsOperator,
+  source : String,
+  destination : String,
+  signal : @js_async.AbortSignal,
+) -> @js_async.Promise[JsOutcome] =
+  #| (operator, source, destination, signal) =>
+  #|   operator.rename(source, destination, { signal })
+
+///|
+extern "js" fn JsOperator::open_read_stream(
+  self : JsOperator,
+  path : String,
+  range_kind : Int,
+  range_offset : UInt64,
+  range_length : UInt64,
+  chunk_size : Int,
+  has_version : Bool,
+  version : String,
+  has_if_match : Bool,
+  if_match : String,
+  has_if_none_match : Bool,
+  if_none_match : String,
+  signal : @js_async.AbortSignal,
+) -> @js_async.Promise[JsOutcome] =
+  #| (operator, path, rangeKind, rangeOffset, rangeLength, chunkSize,
+  #|  hasVersion, version, hasIfMatch, ifMatch,
+  #|  hasIfNoneMatch, ifNoneMatch, signal) => {
+  #|   const kinds = ["Full", "From", "Range", "Suffix"]
+  #|   const range = { kind: kinds[rangeKind] }
+  #|   if (rangeKind === 1 || rangeKind === 2) range.offset = rangeOffset
+  #|   if (rangeKind === 2 || rangeKind === 3) range.length = rangeLength
+  #|   const options = { range, chunkSize, signal }
+  #|   if (hasVersion) options.version = version
+  #|   if (hasIfMatch) options.ifMatch = ifMatch
+  #|   if (hasIfNoneMatch) options.ifNoneMatch = ifNoneMatch
+  #|   return operator.openReadStream(path, options)
+  #| }
+
+///|
+extern "js" fn JsReadStream::next(
+  self : JsReadStream,
+  signal : @js_async.AbortSignal,
+) -> @js_async.Promise[JsOutcome] =
+  #| (stream, signal) => stream.next({ signal })
+
+///|
+extern "js" fn JsReadStream::close(self : JsReadStream) -> JsOutcome =
+  #| (stream) => stream.close()
+
+///|
+extern "js" fn JsOperator::open_writer(
+  self : JsOperator,
+  path : String,
+  append : Bool,
+  has_content_type : Bool,
+  content_type : String,
+  has_content_disposition : Bool,
+  content_disposition : String,
+  has_content_encoding : Bool,
+  content_encoding : String,
+  has_cache_control : Bool,
+  cache_control : String,
+  has_if_match : Bool,
+  if_match : String,
+  has_if_none_match : Bool,
+  if_none_match : String,
+  signal : @js_async.AbortSignal,
+) -> @js_async.Promise[JsOutcome] =
+  #| (operator, path, append,
+  #|  hasContentType, contentType,
+  #|  hasContentDisposition, contentDisposition,
+  #|  hasContentEncoding, contentEncoding,
+  #|  hasCacheControl, cacheControl,
+  #|  hasIfMatch, ifMatch, hasIfNoneMatch, ifNoneMatch, signal) => {
+  #|   const options = { append, signal }
+  #|   if (hasContentType) options.contentType = contentType
+  #|   if (hasContentDisposition) options.contentDisposition = contentDisposition
+  #|   if (hasContentEncoding) options.contentEncoding = contentEncoding
+  #|   if (hasCacheControl) options.cacheControl = cacheControl
+  #|   if (hasIfMatch) options.ifMatch = ifMatch
+  #|   if (hasIfNoneMatch) options.ifNoneMatch = ifNoneMatch
+  #|   return operator.openWriter(path, options)
+  #| }
+
+///|
+extern "js" fn JsWriter::write(
+  self : JsWriter,
+  chunk : Bytes,
+  signal : @js_async.AbortSignal,
+) -> @js_async.Promise[JsOutcome] =
+  #| (writer, chunk, signal) => writer.write(chunk, { signal })
+
+///|
+extern "js" fn JsWriter::finish(
+  self : JsWriter,
+  signal : @js_async.AbortSignal,
+) -> @js_async.Promise[JsOutcome] =
+  #| (writer, signal) => writer.finish({ signal })
+
+///|
+extern "js" fn JsWriter::abort(
+  self : JsWriter,
+  signal : @js_async.AbortSignal,
+) -> @js_async.Promise[JsOutcome] =
+  #| (writer, signal) => writer.abort({ signal })
+
+///|
+extern "js" fn JsWriter::close(self : JsWriter) -> JsOutcome =
+  #| (writer) => writer.close()
+
+///|
+extern "js" fn JsOperator::open_lister(
+  self : JsOperator,
+  path : String,
+  recursive : Bool,
+  has_limit : Bool,
+  limit : UInt64,
+  has_start_after : Bool,
+  start_after : String,
+  signal : @js_async.AbortSignal,
+) -> @js_async.Promise[JsOutcome] =
+  #| (operator, path, recursive, hasLimit, limit,
+  #|  hasStartAfter, startAfter, signal) => {
+  #|   const options = { recursive, signal }
+  #|   if (hasLimit) options.limit = limit
+  #|   if (hasStartAfter) options.startAfter = startAfter
+  #|   return operator.openLister(path, options)
+  #| }
+
+///|
+extern "js" fn JsLister::next(
+  self : JsLister,
+  signal : @js_async.AbortSignal,
+) -> @js_async.Promise[JsOutcome] =
+  #| (lister, signal) => lister.next({ signal })
+
+///|
+extern "js" fn JsLister::close(self : JsLister) -> JsOutcome =
+  #| (lister) => lister.close()

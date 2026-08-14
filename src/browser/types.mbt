@@ -43,6 +43,7 @@ pub enum ErrorKind {
   RangeNotSatisfied
   InvalidArgument
   ResourceClosed
+  ResourceBusy
   Cancelled
   BufferTooLarge
   AbiMismatch

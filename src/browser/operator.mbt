@@ -269,6 +269,43 @@ pub async fn AsyncOperator::delete(
 }
 
 ///|
+/// Copy one object with the backend's native copy operation and return the
+/// destination metadata. This operation is never emulated with read/write.
+pub async fn AsyncOperator::copy(
+  self : AsyncOperator,
+  source : StringView,
+  destination : StringView,
+) -> Metadata {
+  let source = source.to_owned()
+  let destination = destination.to_owned()
+  let context = error_context(Copy, path=source, destination_path=destination)
+  self.ensure_open(context)
+  let metadata = await_outcome(
+    signal => self.native.js.copy(source, destination, signal),
+    outcome => outcome.metadata_value(),
+    context,
+  )
+  metadata_from_js(metadata)
+}
+
+///|
+/// Move one object with the backend's native rename operation.
+pub async fn AsyncOperator::rename(
+  self : AsyncOperator,
+  source : StringView,
+  destination : StringView,
+) -> Unit {
+  let source = source.to_owned()
+  let destination = destination.to_owned()
+  let context = error_context(Rename, path=source, destination_path=destination)
+  self.ensure_open(context)
+  await_unit_outcome(
+    signal => self.native.js.rename(source, destination, signal),
+    context,
+  )
+}
+
+///|
 /// Materialize one bounded prefix listing into owned MoonBit entries.
 ///
 /// The browser bridge enforces hard entry and UTF-8 byte limits. `limit` is a
