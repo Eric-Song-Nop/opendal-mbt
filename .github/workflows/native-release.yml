@@ -217,7 +217,10 @@ jobs:
               --title "opendal-mbt $GITHUB_REF_NAME"
           fi
       - name: Publish Moon package
-        run: moon publish --frozen
+        # `moon publish` validates the archive from a fresh extraction. Allow
+        # that isolated check to install the exact dependency pinned in
+        # moon.mod; `--frozen` rejects the initially empty dependency cache.
+        run: moon publish
       - name: Verify the published package from a clean registry consumer
         shell: bash
         run: |

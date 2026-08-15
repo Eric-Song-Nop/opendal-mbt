@@ -1,7 +1,6 @@
 # Public API Semantics
 
-Status: Phase 5A-E and Browser JS source contracts frozen for the pinned
-`v0.2.0` candidate
+Status: Phase 5A-E and Browser JS contracts released in `v0.2.0`
 
 This document defines the intended MoonBit-facing behavior of the blocking core
 and portable asynchronous OpenDAL facade. It deliberately avoids fixing a

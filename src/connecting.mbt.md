@@ -12,7 +12,7 @@ services before a MoonBit program starts:
 | Profile | Services | Availability |
 | --- | --- | --- |
 | `local` | `memory`, `fs` | Published and selected by `0.1.0` |
-| `standard` | `memory`, `fs`, `s3` | Pinned by the unpublished `0.2.0` release candidate; tag and registry publication pending |
+| `standard` | `memory`, `fs`, `s3` | Published and selected by `0.2.0` |
 
 There is no public runtime profile selector. A package release selects exactly
 one compatible artifact table. Passing `"s3"` to the published `0.1.0` local
@@ -95,7 +95,7 @@ operator. Keep untrusted values in operation paths rather than allowing them
 to select an arbitrary host directory. OpenDAL paths use forward slashes and
 are relative to the configured root.
 
-## Typed S3 in the standard `v0.2.0` release candidate
+## Typed S3 in the standard `v0.2.0` release
 
 `Operator::s3` requires a bucket and region. Root, endpoint, authentication,
 and virtual-host style are labelled options. All strings and credential bytes
@@ -242,9 +242,9 @@ test "connecting: close an operator explicitly" {
 
 ## Host and service limits
 
-The published local release supports Apple silicon macOS and x86-64 glibc
-Linux. The pinned but unpublished `v0.2.0` standard candidate adds
-target-native Linux arm64. Intel macOS is not advertised because the current
+The legacy local release supports Apple silicon macOS and x86-64 glibc Linux.
+The standard `v0.2.0` release adds target-native Linux arm64. Intel macOS is
+not advertised because the current
 MoonBit installer has no matching CLI; Windows and musl need separate build,
 link, and clean-consumer work. GCS, Azure Blob, WebDAV, and other OpenDAL
 services are not part of the standard profile.

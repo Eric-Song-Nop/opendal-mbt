@@ -288,8 +288,13 @@ test('standard artifact table pins the complete v0.2 host matrix', () => {
   for (const [hostKey, artifact] of Object.entries(artifacts)) {
     assert.equal(artifact.host_key, hostKey);
     assert.equal(artifact.binding_version, '0.2.0');
-    assert.equal(artifact.artifact_revision, 'r1');
+    assert.equal(artifact.artifact_revision, 'r2');
     assert.equal(artifact.service_profile, 'standard');
+    assert.equal(
+      artifact.artifact,
+      `opendal-mbt-0.2.0-r2-standard-${artifact.rust_target}`,
+    );
+    assert.equal(artifact.archive_name, `${artifact.artifact}.tar.gz`);
     assert.deepEqual(artifact.services, ['memory', 'fs', 's3']);
     assert.match(artifact.archive_sha256, /^[0-9a-f]{64}$/);
     assert.match(artifact.static_library_sha256, /^[0-9a-f]{64}$/);

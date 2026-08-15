@@ -65,6 +65,7 @@ class DistributionProfilesTest(unittest.TestCase):
     def test_standard_profile_is_one_memory_fs_s3_artifact(self) -> None:
         profile = read_json("native/distribution-profiles/standard.json")
         self.assertEqual(profile["schema_version"], 1)
+        self.assertEqual(profile["artifact_revision"], "r2")
         self.assertEqual(profile["service_profile"], "standard")
         self.assertEqual(profile["services"], ["memory", "fs", "s3"])
         self.assertEqual(profile["rust_features"], STANDARD_FEATURES)
@@ -86,7 +87,9 @@ class DistributionProfilesTest(unittest.TestCase):
         for host_key, artifact in table["artifacts"].items():
             self.assertEqual(artifact["host_key"], host_key)
             self.assertEqual(artifact["binding_version"], "0.2.0")
-            self.assertEqual(artifact["artifact_revision"], "r1")
+            self.assertEqual(
+                artifact["artifact_revision"], profile["artifact_revision"]
+            )
             self.assertEqual(artifact["service_profile"], "standard")
             self.assertEqual(artifact["services"], ["memory", "fs", "s3"])
             self.assertEqual(artifact["rust_features"], STANDARD_FEATURES)
@@ -96,6 +99,14 @@ class DistributionProfilesTest(unittest.TestCase):
             self.assertRegex(artifact["static_library_sha256"], r"^[0-9a-f]{64}$")
             self.assertGreater(artifact["archive_size"], 0)
             self.assertGreater(artifact["static_library_size"], 0)
+            expected_artifact = (
+                f"opendal-mbt-{artifact['binding_version']}-"
+                f"{profile['artifact_revision']}-standard-{artifact['rust_target']}"
+            )
+            self.assertEqual(artifact["artifact"], expected_artifact)
+            self.assertEqual(
+                artifact["archive_name"], f"{expected_artifact}.tar.gz"
+            )
             self.assertEqual(
                 artifact["url"],
                 "https://github.com/Eric-Song-Nop/opendal-mbt/"
@@ -141,7 +152,7 @@ class DistributionProfilesTest(unittest.TestCase):
         self.assertIn('name = "opendal-service-s3"', lockfile)
         self.assertIn('name = "opendal-http-transport-reqwest"', lockfile)
 
-    def test_v0_2_candidate_selects_one_internal_standard_profile(self) -> None:
+    def test_v0_2_release_selects_one_internal_standard_profile(self) -> None:
         selection = read_json("native/artifact-selection.json")
         self.assertEqual(
             selection,

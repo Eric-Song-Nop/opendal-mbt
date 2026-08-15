@@ -1,6 +1,6 @@
 # Browser and JavaScript API Reference
 
-Status: JavaScript target surface for the `0.2.0` source candidate
+Status: JavaScript target surface released in `0.2.0`
 
 This page maps the public MoonBit API selected by `--target js`. It complements
 the task-oriented guides: it identifies the exact portable slice, the
