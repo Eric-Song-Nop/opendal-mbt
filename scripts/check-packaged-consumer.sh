@@ -71,7 +71,7 @@ printf '%s\n' \
 for forbidden in Cargo.toml Cargo.lock rust-toolchain.toml native/rust \
   examples/c examples/browser/.mooncakes examples/browser/_build \
   examples/browser/__pycache__ examples/browser/pkg.generated.mbti \
-  examples/browser/nonblocking_probe/pkg.generated.mbti tests scripts; do
+  tests scripts; do
   if [ -e "$stage_dir/$forbidden" ]; then
     echo "maintainer-only source leaked into the Moon package: $forbidden" >&2
     exit 1

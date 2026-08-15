@@ -42,16 +42,23 @@ browser architecture is a JavaScript-target Moon application hosting the
 embedded OpenDAL core Wasm runtime.
 
 The runnable [`examples/browser`](../examples/browser/README.md) program keeps
-its storage logic in one `run.mbt` file and executes that file unchanged as a
-native executable or inside real Chrome:
+its portable application and delayed-I/O proof in shared MoonBit files, then
+executes them as a native executable or inside real Chrome:
 
 ```sh
 moon -C examples/browser run --target native --release .
 moon -C examples/browser run --target js --release .
 ```
 
-The example also contains a delayed local S3 fixture that proves native I/O
-yields to MoonBit's scheduler while the OpenDAL future is pending.
+The browser command also uses a separate local origin for a strict CORS and
+SigV4-shaped S3 fixture. The native maintainer command
+`make native-async-nonblocking` invokes the same delayed-I/O MoonBit function
+against its own fixture. The function arms a heartbeat before the S3 read and
+requires it to resume before the operation ends with a valid `NotFound`; each
+fixture holds an accepted GET for 750 ms. This is a black-box proof that a
+pending OpenDAL read yields to MoonBit's scheduler, rather than merely proving
+that the scheduler can yield on its own. It is not a cryptographic verifier for
+the SigV4 signature.
 
 The portable API has the same async calling convention but different
 target-native execution engines:

@@ -106,14 +106,16 @@ target; this checklist does not claim support for MoonBit `wasm` or `wasm-gc`.
    ```
 
    All three commands must complete a real Chrome round trip. The portable
-   example runs the same application source as native. `packaged-browser` must
-   do so from a freshly packed module with Cargo, Rust, wasm-bindgen, npm, and
-   common bundlers hidden, with no separately shipped `.wasm` or `.mjs`
-   runtime asset.
+   example runs the same application source as native, then requires its shared
+   heartbeat to advance during a cross-origin delayed S3 read and reports both
+   success markers. `packaged-browser` must run from a freshly packed module
+   with Cargo, Rust, wasm-bindgen, npm, and common bundlers hidden, with no
+   separately shipped `.wasm` or `.mjs` runtime asset.
 
 6. Require the **Browser JS** workflow to be green on the same candidate
    commit. It repeats the Moon JS checks/tests, Rust checks/tests, Chrome
-   canary, embedded snapshot check, and packaged-browser proof.
+   canary, embedded snapshot check, shared non-blocking S3 proof, and
+   packaged-browser proof.
 
 See [Browser Runtime and Wasm ABI](design/browser-runtime.md) for the ownership,
 task, cancellation, snapshot, and reproducibility contracts behind these

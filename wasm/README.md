@@ -33,7 +33,7 @@ one version-matched unit.
 | [`../scripts/generate-browser-embed.mjs`](../scripts/generate-browser-embed.mjs) | Deterministic generator and semantic freshness check for the embedded distribution |
 | [`../src/browser/embedded_runtime.generated.mbt`](../src/browser/embedded_runtime.generated.mbt) | Checked-in generated Wasm, wasm-bindgen glue, and Promise runtime; never edit by hand |
 | [`../src/browser_demo/`](../src/browser_demo/) | Packaged, one-command MoonBit consumer launched in real Chrome |
-| [`../examples/browser/`](../examples/browser/) | Runnable portable async example with one native command and one real-browser command |
+| [`../examples/browser/`](../examples/browser/) | Runnable native/real-browser async example with a shared delayed-I/O non-blocking proof |
 
 `contract.json` is not a substitute for the executable constants. Any contract
 change must update the Rust bridge, Promise runtime, machine-readable mirror,

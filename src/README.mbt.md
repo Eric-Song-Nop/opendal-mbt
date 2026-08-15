@@ -145,8 +145,10 @@ must allow WebAssembly compilation, normally by including
 See [Using OpenDAL in a browser](browser-guide.mbt.md) for OPFS and browser S3
 configuration, CORS and hosting requirements, JS-only operations, runtime
 ownership, cancellation, and hard bridge limits. The
-[`examples/browser`](../examples/browser/README.md) program runs one shared
-portable async source file on native and in real Chrome.
+[`examples/browser`](../examples/browser/README.md) program runs shared
+portable async code on native and in real Chrome. Its Browser command and
+native verification target also run the same delayed S3 heartbeat proof that
+pending OpenDAL I/O does not block MoonBit's scheduler.
 
 ## First operation
 

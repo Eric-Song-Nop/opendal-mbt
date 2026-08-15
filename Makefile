@@ -169,7 +169,7 @@ portable-async-example-native: native
 		moon -C examples/browser run --target native $(MOON_PROFILE_FLAG) \
 			--warn-list '$(MOON_WARN_LIST)' --deny-warn .
 
-native-async-nonblocking: portable-async-example-native
+native-async-nonblocking: native
 	MOONBIT_ASYNC_CHECK_FD_LEAK=1 \
 		OPENDAL_MBT_NATIVE_LIB="$(MOON_NATIVE_LIB)" \
 		OPENDAL_MBT_SOURCE_PROFILE="$(NATIVE_SERVICE_PROFILE)" \
