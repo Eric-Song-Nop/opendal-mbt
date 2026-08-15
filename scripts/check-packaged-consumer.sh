@@ -69,12 +69,22 @@ printf '%s\n' \
   ']' >"$stage_dir/moon.work"
 
 for forbidden in Cargo.toml Cargo.lock rust-toolchain.toml native/rust \
-  examples tests scripts; do
+  examples/c examples/browser/.mooncakes examples/browser/_build \
+  examples/browser/__pycache__ examples/browser/pkg.generated.mbti \
+  tests scripts; do
   if [ -e "$stage_dir/$forbidden" ]; then
     echo "maintainer-only source leaked into the Moon package: $forbidden" >&2
     exit 1
   fi
 done
+if [ -d "$stage_dir/examples" ]; then
+  unexpected_example=$(find "$stage_dir/examples" -mindepth 1 -maxdepth 1 \
+    ! -name browser -print -quit)
+  if [ -n "$unexpected_example" ]; then
+    echo "unexpected example leaked into the Moon package: ${unexpected_example#"$stage_dir/"}" >&2
+    exit 1
+  fi
+fi
 
 moon_path=$(command -v moon)
 moon_install=$(CDPATH= cd -- "$(dirname -- "$moon_path")/.." && pwd)

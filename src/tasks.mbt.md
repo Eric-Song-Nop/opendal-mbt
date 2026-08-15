@@ -343,6 +343,10 @@ test "tasks: managed same-Operator Copier" {
     operator.read("destination.bin"),
     b"copy through a managed resource",
   )
+
+  let discarded = operator.open_copier("source.bin", "discarded.bin")
+  discarded.abort()
+  discarded.abort()
   operator.delete_many(["source.bin", "destination.bin"])
 }
 ```
@@ -362,21 +366,36 @@ an HTTP client and sends the method, URI, and every header exactly.
 ```mbt check
 ///|
 #cfg(target="native")
-test "tasks: create an owned presigned read request" {
+test "tasks: create owned presigned request snapshots" {
   let operator = @opendal.Operator::s3(
     "example-bucket",
     region="us-east-1",
     endpoint="http://127.0.0.1:9000",
     auth=@opendal.S3Auth::unsigned(),
   )
-  let request = operator.presign_read(
+  let read_request = operator.presign_read(
     "manual/object.bin",
     expires_in_seconds=60UL,
     range=Range(offset=0UL, length=16UL),
   )
+  let write_request = operator.presign_write(
+    "manual/object.bin",
+    expires_in_seconds=60UL,
+    content_type="application/octet-stream",
+  )
+  let stat_request = operator.presign_stat(
+    "manual/object.bin",
+    expires_in_seconds=60UL,
+  )
 
-  assert_eq(request.http_method, "GET")
-  assert_true(request.uri.length() > 0)
+  assert_eq(read_request.http_method, "GET")
+  assert_eq(write_request.http_method, "PUT")
+  assert_eq(stat_request.http_method, "HEAD")
+  assert_true(read_request.uri.length() > 0)
+  for header in write_request.headers {
+    assert_true(header.name.length() > 0)
+    ignore(header.value.length())
+  }
 }
 ```
 
@@ -469,6 +488,44 @@ stateful operation makes the resource terminal when cursor or commit progress
 may be unknown; remote effects are not rolled back. Resource `close` is
 synchronous, idempotent, and non-raising.
 
+## Use browser-only async operations
+
+The JS target additionally exposes Promise-backed `create_dir`, `stat`,
+`exists`, `list`, `open_lister`, `delete`, `copy`, and `rename`. This is an
+extension above the portable async contract, so shared source must place it
+behind `#cfg(target="js")`:
+
+```mbt check
+///|
+#cfg(target="js")
+async test "tasks: browser metadata, lister, and delete" {
+  let operator = @opendal.AsyncOperator::new("memory")
+  defer operator.close()
+  operator.write("js/items/one.bin", b"one") |> ignore
+
+  assert_true(operator.exists("js/items/one.bin"))
+  assert_eq(operator.stat("js/items/one.bin").content_length, 3UL)
+
+  let lister = operator.open_lister("js/", recursive=true)
+  let mut count = 0
+  while lister.next() is Some(_) {
+    count += 1
+  }
+  lister.close()
+  assert_true(count > 0)
+
+  operator.delete("js/", recursive=true)
+  assert_false(operator.exists("js/items/one.bin"))
+}
+```
+
+Check the originating `Operator::info().capability` before copy or rename;
+those operations are never emulated. `list` rejects a materialized result over
+65,536 entries or 16 MiB of encoded listing output (paths, names, and metadata
+snapshots). Use `open_lister` to hold only one decoded entry at a time. See
+[Using OpenDAL in a browser](browser-guide.mbt.md) for OPFS/S3 configuration,
+CORS/CSP, explicit runtimes, cancellation, and hosting.
+
 ## Handle typed errors
 
 `OpenDalError` exposes a stable kind, retry-status classification, operation,
@@ -497,6 +554,29 @@ test "tasks: inspect a typed error" {
 Temporary or persistent classification alone does not make an operation safe
 to retry. The binding never installs a retry layer implicitly; callers choose
 `with_retry` and accept its replay contract explicitly.
+
+Async catch clauses receive `Error` on both targets. Recover the binding's
+structured value before inspecting it:
+
+```mbt check
+///|
+async test "tasks: inspect a portable async error" {
+  let operator = @opendal.AsyncOperator::new("memory")
+  defer operator.close()
+  try operator.read("missing-async.bin") catch {
+    error =>
+      match @opendal.OpenDalError::from_error(error) {
+        Some(storage_error) => {
+          assert_true(storage_error.kind() is NotFound)
+          assert_true(storage_error.info().operation is Read)
+        }
+        None => fail("expected an OpenDAL error")
+      }
+  } noraise {
+    _ => fail("expected read to raise")
+  }
+}
+```
 
 ## Tasks from the Node.js guide that are not available
 
