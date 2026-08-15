@@ -1,0 +1,23 @@
+supported_targets = "+native+js"
+
+import {
+  "moonbitlang/async",
+  "moonbitlang/async/js_async",
+  "moonbitlang/core/debug",
+}
+
+options(
+  targets: {
+    "browser_contract_test.mbt": [ "js" ],
+    "browser_ffi_wbtest.mbt": [ "js" ],
+    "embedded.mbt": [ "js" ],
+    "embedded_runtime.generated.mbt": [ "js" ],
+    "error.mbt": [ "js" ],
+    "ffi.mbt": [ "js" ],
+    "operator.mbt": [ "js" ],
+    "runtime.mbt": [ "js" ],
+    "streaming.mbt": [ "js" ],
+    "types.mbt": [ "js" ],
+    "unimplemented.native.mbt": [ "native" ],
+  },
+)

@@ -115,6 +115,9 @@ typedef enum utf16_result {
    (api)->library_struct_size >= OPENDAL_MBT_API_V1_FIELD_END(field) &&      \
    (api)->field != NULL)
 
+static const uint64_t MOONBIT_OPENDAL_PORTABLE_MAX_WHOLE_OBJECT_BYTES =
+    UINT64_C(64) * 1024 * 1024;
+
 static opendal_mbt_status_t load_api(opendal_mbt_api_v1_t *api,
                                      bool require_whole_object) {
   opendal_mbt_status_t status;
@@ -913,6 +916,18 @@ static moonbit_opendal_operator_t *operator_new_external(void) {
           operator_finalize, (uint32_t)sizeof(moonbit_opendal_operator_t));
   memset(operator_, 0, sizeof(*operator_));
   return operator_;
+}
+
+MOONBIT_FFI_EXPORT void
+moonbit_opendal_operator_close(moonbit_opendal_operator_t *operator_) {
+  if (operator_ == NULL || operator_->operator_ == NULL) {
+    return;
+  }
+  opendal_mbt_api_v1_t api;
+  if (load_api(&api, false) == OPENDAL_MBT_STATUS_OK) {
+    api.operator_free(operator_->operator_);
+    operator_->operator_ = NULL;
+  }
 }
 
 static void metadata_finalize(void *payload) {
@@ -2773,8 +2788,13 @@ moonbit_opendal_async_operator_read_start(
   }
   {
     opendal_mbt_bytes_view_v1_t path_view = owned_utf8_view(&path_utf8);
+    uint64_t max_output_bytes = api.max_output_bytes;
+    if (max_output_bytes >
+        MOONBIT_OPENDAL_PORTABLE_MAX_WHOLE_OBJECT_BYTES) {
+      max_output_bytes = MOONBIT_OPENDAL_PORTABLE_MAX_WHOLE_OBJECT_BYTES;
+    }
     result->status = api.async_operator_read_start(
-        operator_->operator_, &path_view, &options, api.max_output_bytes,
+        operator_->operator_, &path_view, &options, max_output_bytes,
         completion_fd, &result->async_task, &result->error);
     result->async_kind = MOONBIT_OPENDAL_ASYNC_BUFFER;
   }

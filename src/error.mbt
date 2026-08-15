@@ -7,6 +7,17 @@ pub fn OpenDalError::info(self : OpenDalError) -> ErrorInfo {
 }
 
 ///|
+/// Recover a structured OpenDAL error from MoonBit's target-neutral `Error`
+/// type. Async catch clauses receive `Error`, so this conversion preserves the
+/// same inspection path on native and JavaScript targets.
+pub fn OpenDalError::from_error(error : Error) -> OpenDalError? {
+  match error {
+    OpenDalError(info) => Some(OpenDalError(info))
+    _ => None
+  }
+}
+
+///|
 /// Return the stable error category.
 pub fn OpenDalError::kind(self : OpenDalError) -> ErrorKind {
   self.info().kind

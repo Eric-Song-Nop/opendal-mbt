@@ -1,0 +1,101 @@
+name: Browser JS
+
+on:
+  pull_request:
+    paths:
+      - ".gitattributes"
+      - ".gitignore"
+      - ".github/workflows/browser-js.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "Makefile"
+      - "build.js"
+      - "docs/**"
+      - "examples/browser/**"
+      - "moon.mod"
+      - "moon.work"
+      - "rust-toolchain.toml"
+      - "scripts/check-package.sh"
+      - "scripts/check-docs.mjs"
+      - "scripts/check-packaged-browser.sh"
+      - "scripts/generate-browser-embed.mjs"
+      - "scripts/test-native-resolver.js"
+      - "src/**"
+      - "wasm/**"
+  push:
+    branches:
+      - main
+    paths:
+      - ".gitattributes"
+      - ".gitignore"
+      - ".github/workflows/browser-js.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "Makefile"
+      - "build.js"
+      - "docs/**"
+      - "examples/browser/**"
+      - "moon.mod"
+      - "moon.work"
+      - "rust-toolchain.toml"
+      - "scripts/check-package.sh"
+      - "scripts/check-docs.mjs"
+      - "scripts/check-packaged-browser.sh"
+      - "scripts/generate-browser-embed.mjs"
+      - "scripts/test-native-resolver.js"
+      - "src/**"
+      - "wasm/**"
+
+permissions:
+  contents: read
+
+env:
+  MOONBIT_VERSION: 0.10.6+80dc50f24
+
+jobs:
+  browser:
+    name: Promise bridge and Chrome canary
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install MoonBit
+        run: |
+          curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash -s "$MOONBIT_VERSION"
+          echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
+      - name: Install Rust WebAssembly target
+        run: rustup target add wasm32-unknown-unknown
+      - name: Install matching wasm-bindgen CLI
+        run: cargo install --locked wasm-bindgen-cli --version 0.2.127
+      - name: Tool versions
+        run: |
+          rustc --version
+          cargo --version
+          wasm-bindgen --version
+          node --version
+          google-chrome --version
+          moon version --all
+      - name: Check MoonBit browser API
+        run: |
+          make moon-deps
+          make moon-browser-check
+          make moon-browser-test
+      - name: Prove portable and non-blocking async I/O in Chrome
+        run: make portable-async-example-browser
+      - name: Check browser bridge
+        run: make browser-rust-check
+      - name: Test bridge state machines and snapshots
+        run: make browser-rust-test
+      - name: Run browser integration canary
+        run: make browser-js-canary RUST_PROFILE=release
+      - name: Verify embedded browser distribution
+        run: |
+          make browser-embed-check
+          make packaged-browser
+      - name: Upload embedded distribution diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: browser-embed-diagnostics
+          path: target/browser-embed/release/opendal_mbt_browser_bridge*
+          if-no-files-found: ignore
+          retention-days: 1

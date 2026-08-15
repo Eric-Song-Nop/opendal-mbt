@@ -75,6 +75,10 @@ extern "C" fn native_operator_new(
 ) -> NativeResult = "moonbit_opendal_operator_new"
 
 ///|
+#borrow(operator)
+extern "C" fn native_operator_close(operator : Operator) -> Unit = "moonbit_opendal_operator_close"
+
+///|
 #borrow(bucket, region, root, endpoint, access_key_id, secret_access_key, session_token, role_arn, external_id, role_session_name)
 extern "C" fn native_operator_s3(
   bucket : String,
