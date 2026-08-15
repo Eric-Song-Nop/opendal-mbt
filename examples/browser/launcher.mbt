@@ -44,6 +44,13 @@ extern "js" fn report_from_browser(result : String) -> @js_async.Promise[Unit] =
   #| }
 
 ///|
+extern "js" fn browser_probe_endpoint() -> String =
+  #| () => {
+  #|   const endpoint = globalThis.__OPENDAL_MBT_PROBE_ENDPOINT__
+  #|   return typeof endpoint === "string" ? endpoint : ""
+  #| }
+
+///|
 extern "js" fn launch_browser() -> @js_async.Promise[String] =
   #| async () => {
   #|   const [{ spawn }, crypto, fs, fsPromises, http, os, path] = await Promise.all([
@@ -60,11 +67,126 @@ extern "js" fn launch_browser() -> @js_async.Promise[String] =
   #|   if (!executableSource) throw new Error("Moon did not provide the executable path")
   #|   const appSource = await fsPromises.readFile(executableSource, "utf8")
   #|   const token = crypto.randomBytes(24).toString("hex")
-  #|   const sockets = new Set()
+  #|   const fixturePath = "/probe-bucket/delayed-missing.txt"
+  #|   const fixtureDelayMs = 750
+  #|   const fixtureTimers = new Set()
+  #|   const serverSockets = new Map()
+  #|   let appOrigin = ""
+  #|   let fixtureOrigin = ""
+  #|   let preflightSeen = false
   #|   let finishResult
   #|   const resultPromise = new Promise((resolve) => { finishResult = resolve })
   #|
-  #|   const server = http.createServer((request, response) => {
+  #|   const allowedFixtureHeaders = [
+  #|     "authorization",
+  #|     "content-type",
+  #|     "range",
+  #|     "x-amz-checksum-mode",
+  #|     "x-amz-content-sha256",
+  #|     "x-amz-date",
+  #|     "x-amz-user-agent",
+  #|   ]
+  #|   const requiredFixtureHeaders = [
+  #|     "authorization",
+  #|     "x-amz-content-sha256",
+  #|     "x-amz-date",
+  #|   ]
+  #|   const corsHeaders = {
+  #|     "access-control-allow-methods": "GET",
+  #|     "access-control-allow-headers": allowedFixtureHeaders.join(", "),
+  #|     "access-control-expose-headers": "content-length, content-type, x-amz-request-id",
+  #|     "access-control-max-age": "60",
+  #|     "cross-origin-resource-policy": "cross-origin",
+  #|     "vary": "Origin, Access-Control-Request-Headers, Access-Control-Request-Method",
+  #|   }
+  #|   const fixtureHeaders = () => ({
+  #|     ...corsHeaders,
+  #|     "access-control-allow-origin": appOrigin,
+  #|   })
+  #|   const rejectFixture = (response, status, message) => {
+  #|     const body = Buffer.from(message, "utf8")
+  #|     response.writeHead(status, {
+  #|       ...fixtureHeaders(),
+  #|       "content-type": "text/plain; charset=utf-8",
+  #|       "content-length": body.length,
+  #|     })
+  #|     response.end(body)
+  #|   }
+  #|   const fixtureServer = http.createServer((request, response) => {
+  #|     const requestUrl = new URL(request.url || "/", "http://127.0.0.1")
+  #|     if (request.headers.origin !== appOrigin) {
+  #|       rejectFixture(response, 403, "unexpected Origin header")
+  #|       return
+  #|     }
+  #|     if (requestUrl.pathname !== fixturePath || requestUrl.search !== "") {
+  #|       rejectFixture(response, 400, "unexpected S3 request path")
+  #|       return
+  #|     }
+  #|     if (request.method === "OPTIONS") {
+  #|       const requestedMethod = request.headers["access-control-request-method"]
+  #|       const requestedHeaderValue = request.headers["access-control-request-headers"]
+  #|       const requestedHeaders = typeof requestedHeaderValue === "string"
+  #|         ? requestedHeaderValue.split(",").map((value) => value.trim().toLowerCase()).filter(Boolean)
+  #|         : []
+  #|       if (requestedMethod !== "GET" ||
+  #|           requiredFixtureHeaders.some((name) => !requestedHeaders.includes(name)) ||
+  #|           requestedHeaders.some((name) => !allowedFixtureHeaders.includes(name))) {
+  #|         rejectFixture(response, 403, "invalid S3 CORS preflight")
+  #|         return
+  #|       }
+  #|       preflightSeen = true
+  #|       response.writeHead(204, { ...fixtureHeaders(), "content-length": "0" })
+  #|       response.end()
+  #|       return
+  #|     }
+  #|     if (request.method !== "GET") {
+  #|       rejectFixture(response, 405, "expected an S3 GET request")
+  #|       return
+  #|     }
+  #|     const authorization = request.headers.authorization || ""
+  #|     const contentSha256 = request.headers["x-amz-content-sha256"] || ""
+  #|     const requestDate = request.headers["x-amz-date"] || ""
+  #|     const signedHeadersMatch = /SignedHeaders=([^,]+)/.exec(authorization)
+  #|     const signedHeaders = signedHeadersMatch
+  #|       ? signedHeadersMatch[1].split(";")
+  #|       : []
+  #|     const validAuthorization = authorization.startsWith(
+  #|       "AWS4-HMAC-SHA256 Credential=probe-access-key/",
+  #|     ) && /Signature=[0-9a-f]{64}$/.test(authorization) &&
+  #|       requiredFixtureHeaders.slice(1).every((name) => signedHeaders.includes(name)) &&
+  #|       signedHeaders.includes("host")
+  #|     const validContentHash = contentSha256 === "UNSIGNED-PAYLOAD" ||
+  #|       /^[0-9a-f]{64}$/.test(contentSha256)
+  #|     if (!preflightSeen || !validAuthorization || !validContentHash ||
+  #|         !/^\d{8}T\d{6}Z$/.test(requestDate)) {
+  #|       rejectFixture(response, 403, "missing or invalid signed S3 headers")
+  #|       return
+  #|     }
+  #|     const body = Buffer.from(
+  #|       '<?xml version="1.0" encoding="UTF-8"?>' +
+  #|       '<Error><Code>NoSuchKey</Code><Message>missing probe object</Message>' +
+  #|       '<Key>delayed-missing.txt</Key><RequestId>probe-request</RequestId>' +
+  #|       '<HostId>probe-host</HostId></Error>',
+  #|       "utf8",
+  #|     )
+  #|     const timer = setTimeout(() => {
+  #|       fixtureTimers.delete(timer)
+  #|       if (response.destroyed || response.writableEnded) return
+  #|       response.writeHead(404, {
+  #|         ...fixtureHeaders(),
+  #|         "content-type": "application/xml",
+  #|         "content-length": body.length,
+  #|         "x-amz-request-id": "probe-request",
+  #|       })
+  #|       response.end(body)
+  #|     }, fixtureDelayMs)
+  #|     fixtureTimers.add(timer)
+  #|     response.once("close", () => {
+  #|       if (fixtureTimers.delete(timer)) clearTimeout(timer)
+  #|     })
+  #|   })
+  #|
+  #|   const appServer = http.createServer((request, response) => {
   #|     const requestUrl = new URL(request.url || "/", "http://127.0.0.1")
   #|     if (request.method === "GET" && requestUrl.pathname === "/") {
   #|       const reportUrl = `/result/${token}`
@@ -72,14 +194,14 @@ extern "js" fn launch_browser() -> @js_async.Promise[String] =
   #|         "<!doctype html>",
   #|         '<meta charset="utf-8">',
   #|         "<title>OpenDAL MoonBit browser example</title>",
-  #|         `<script>globalThis.__OPENDAL_MBT_REPORT_URL__=${JSON.stringify(reportUrl)}</script>`,
+  #|         `<script>globalThis.__OPENDAL_MBT_REPORT_URL__=${JSON.stringify(reportUrl)};globalThis.__OPENDAL_MBT_PROBE_ENDPOINT__=${JSON.stringify(fixtureOrigin)}</script>`,
   #|         '<script src="/app.js"></script>',
   #|       ].join("")
   #|       response.writeHead(200, {
   #|         "content-type": "text/html; charset=utf-8",
   #|         "content-length": Buffer.byteLength(html),
   #|         "cache-control": "no-store",
-  #|         "content-security-policy": "default-src 'none'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; connect-src 'self'",
+  #|         "content-security-policy": `default-src 'none'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; connect-src 'self' ${fixtureOrigin}`,
   #|       })
   #|       response.end(html)
   #|       return
@@ -112,12 +234,18 @@ extern "js" fn launch_browser() -> @js_async.Promise[String] =
   #|     }
   #|     response.writeHead(404).end()
   #|   })
-  #|   server.on("connection", (socket) => {
-  #|     sockets.add(socket)
-  #|     socket.on("close", () => sockets.delete(socket))
-  #|   })
   #|
-  #|   const listen = () => new Promise((resolve, reject) => {
+  #|   const trackConnections = (server) => {
+  #|     const sockets = new Set()
+  #|     serverSockets.set(server, sockets)
+  #|     server.on("connection", (socket) => {
+  #|       sockets.add(socket)
+  #|       socket.on("close", () => sockets.delete(socket))
+  #|     })
+  #|   }
+  #|   trackConnections(appServer)
+  #|   trackConnections(fixtureServer)
+  #|   const listen = (server) => new Promise((resolve, reject) => {
   #|     const onError = (error) => {
   #|       server.off("listening", onListening)
   #|       reject(error)
@@ -130,10 +258,10 @@ extern "js" fn launch_browser() -> @js_async.Promise[String] =
   #|     server.once("listening", onListening)
   #|     server.listen(0, "127.0.0.1")
   #|   })
-  #|   const closeServer = async () => {
+  #|   const closeServer = async (server) => {
   #|     if (!server.listening) return
   #|     server.closeAllConnections?.()
-  #|     for (const socket of sockets) socket.destroy()
+  #|     for (const socket of serverSockets.get(server) || []) socket.destroy()
   #|     await new Promise((resolve) => server.close(resolve))
   #|   }
   #|   const canExecute = async (candidate) => {
@@ -241,10 +369,19 @@ extern "js" fn launch_browser() -> @js_async.Promise[String] =
   #|   }
   #|
   #|   try {
-  #|     await listen()
-  #|     const address = server.address()
-  #|     if (!address || typeof address === "string") throw new Error("HTTP server has no port")
-  #|     const url = `http://127.0.0.1:${address.port}/`
+  #|     await listen(fixtureServer)
+  #|     const fixtureAddress = fixtureServer.address()
+  #|     if (!fixtureAddress || typeof fixtureAddress === "string") {
+  #|       throw new Error("S3 fixture server has no port")
+  #|     }
+  #|     fixtureOrigin = `http://127.0.0.1:${fixtureAddress.port}`
+  #|     await listen(appServer)
+  #|     const appAddress = appServer.address()
+  #|     if (!appAddress || typeof appAddress === "string") {
+  #|       throw new Error("browser application server has no port")
+  #|     }
+  #|     appOrigin = `http://127.0.0.1:${appAddress.port}`
+  #|     const url = `${appOrigin}/`
   #|     const args = [
   #|       "--headless=new",
   #|       "--disable-background-networking",
@@ -294,13 +431,17 @@ extern "js" fn launch_browser() -> @js_async.Promise[String] =
   #|     if (outcome.kind === "timeout") {
   #|       throw new Error(`Chrome did not report within 45 seconds\n${stderr}`)
   #|     }
-  #|     if (!outcome.value.startsWith("OPENDAL_PORTABLE_ASYNC_OK:")) {
+  #|     if (!outcome.value.startsWith("OPENDAL_PORTABLE_ASYNC_OK:") ||
+  #|         !outcome.value.includes("\nOPENDAL_ASYNC_IO_NONBLOCKING_OK:")) {
   #|       throw new Error(outcome.value || "Chrome reported an empty result")
   #|     }
   #|     return outcome.value
   #|   } finally {
   #|     await stopChild()
-  #|     await closeServer()
+  #|     for (const timer of fixtureTimers) clearTimeout(timer)
+  #|     fixtureTimers.clear()
+  #|     await closeServer(appServer)
+  #|     await closeServer(fixtureServer)
   #|     await fsPromises.rm(profile, {
   #|       recursive: true,
   #|       force: true,

@@ -79,7 +79,7 @@ jobs:
           make moon-deps
           make moon-browser-check
           make moon-browser-test
-      - name: Run the portable async example in Chrome
+      - name: Prove portable and non-blocking async I/O in Chrome
         run: make portable-async-example-browser
       - name: Check browser bridge
         run: make browser-rust-check

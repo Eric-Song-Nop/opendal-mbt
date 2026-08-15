@@ -2,10 +2,12 @@
 /// URLs for the version-matched JavaScript runtime, wasm-bindgen module, and
 /// OpenDAL bridge WebAssembly binary.
 ///
-/// `Runtime::load` imports these browser assets once. The ordinary
-/// `Runtime::new` and `AsyncOperator::new` paths use the embedded distribution
-/// automatically; this explicit form remains useful to bundlers and custom
-/// CDNs.
+/// `Runtime::load` imports these browser assets. A page may load a given
+/// `bridge_module_url` only once because browser module imports cache the
+/// initialized wasm-bindgen exports and bridge teardown is permanent. The
+/// ordinary `Runtime::new` and `AsyncOperator::new` paths use the embedded
+/// distribution automatically; this explicit form remains useful to bundlers
+/// and custom CDNs.
 pub struct BrowserAssets {
   runtime_module_url : String
   bridge_module_url : String
@@ -23,10 +25,12 @@ pub fn BrowserAssets::new(
 }
 
 ///|
-/// An initialized, single-memory OpenDAL browser runtime.
+/// An initialized, single-memory OpenDAL browser runtime facade.
 ///
-/// The runtime owns its WebAssembly instance. Close it after all operators are
-/// no longer needed; closing more than once is harmless.
+/// An embedded runtime owns its WebAssembly instance. An explicitly loaded
+/// runtime is the sole owner allowed for that bridge module URL in the page.
+/// Close it after all operators are no longer needed; closing more than once is
+/// harmless.
 pub struct Runtime {
   priv js : JsRuntime
   priv mut closed : Bool
@@ -204,7 +208,9 @@ async fn await_runtime_bootstrap(
 /// Module loading, ABI mismatch, or malformed bootstrap state raises
 /// `AbiMismatch`. Storage failures after initialization retain their structured
 /// OpenDAL category and retry status. Moon async scheduler cancellation
-/// propagates unchanged.
+/// propagates unchanged. A page may call this function only once for a given
+/// `bridge_module_url`; share that runtime between all operators using those
+/// assets, and do not load the same URL again after closing it.
 pub async fn Runtime::load(assets : BrowserAssets) -> Runtime {
   let js = await_runtime_bootstrap(
     load_js_runtime(

@@ -1,9 +1,0 @@
-supported_targets = "native"
-
-import {
-  "Eric-Song-Nop/opendal",
-  "moonbitlang/async",
-  "moonbitlang/core/env",
-}
-
-pkgtype(kind: "executable")
