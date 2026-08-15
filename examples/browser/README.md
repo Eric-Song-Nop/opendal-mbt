@@ -29,11 +29,11 @@ OPENDAL_ASYNC_IO_NONBLOCKING_OK: heartbeat ran before delayed S3 I/O completed
 
 - Both commands: MoonBit
 - JavaScript/browser command: Node.js 18 or newer and Chrome or Chromium
-- Native command: a released matching native artifact, or the repository's
-  maintainer library while `0.2.0` remains unpublished
+- Native command: the released matching native artifact, or the repository's
+  maintainer library when validating a source checkout
 
-For the unreleased source tree, maintainers can build and select that library
-before running the native command:
+Maintainers can build and select the source library before running the native
+command:
 
 ```sh
 make native
@@ -42,8 +42,8 @@ OPENDAL_MBT_NATIVE_LIB="$PWD/target/debug/libopendal_mbt_native.a" \
   moon -C examples/browser run --target native --release .
 ```
 
-After the corresponding release artifact exists, the single native `moon`
-command shown above resolves it automatically.
+The single native `moon` command shown above resolves the released artifact
+automatically.
 
 The JavaScript command launches a real browser; it does not run the OpenDAL
 operations under Node. The launcher discovers common Chrome and Chromium
@@ -113,6 +113,5 @@ wakeups.
 
 In a source checkout, the nested `moon.work` resolves
 `Eric-Song-Nop/opendal` to the enclosing module. Moon excludes workspace files
-from published archives, but ships the rest of this Browser example; after the
-corresponding release exists, its pinned import resolves normally from the
-registry.
+from published archives, but ships the rest of this Browser example; its
+pinned import resolves normally from the registry in the release package.

@@ -2,9 +2,8 @@
 
 ## Current source status
 
-The current tree is a pinned but unpublished `v0.2.0` candidate. In addition to
-the complete native Phase 5 stack, it contains a complete Browser JS delivery
-stack:
+The current tree is the `v0.2.0` release source. In addition to the complete
+native Phase 5 stack, it contains a complete Browser JS delivery stack:
 
 | Browser area | Current state |
 | --- | --- |
@@ -72,22 +71,19 @@ test oracle, but is not the public or long-term ABI of this project.
 | --- | --- | --- |
 | Published compatibility baseline | Released | Moon package `0.1.0`, ABI `1.0`, `local` profile |
 | Blocking local operations | Released | `memory` and `fs` in `0.1.0` |
-| Bounded reads and explicit Writer abort | Pinned in `v0.2.0` candidate; publication pending | Phase 5A, ABI `1.1` |
-| Typed S3 and the `standard` profile | Pinned in `v0.2.0` candidate; publication pending | Phase 5B, ABI `1.2` |
-| Presign and explicit operational layers | Pinned in `v0.2.0` candidate; publication pending | Phase 5C, ABI `1.3`-`1.5` |
-| Batch delete and managed Copier | Pinned in `v0.2.0` candidate; publication pending | Phase 5D, ABI `1.6` |
-| Portable MoonBit async facade | Pinned in `v0.2.0` candidate; publication pending | Phase 5E, native ABI `1.7` plus Browser JS implementation |
-| Standard native host expansion | Pinned in `v0.2.0` candidate; publication pending | macOS arm64, Linux x86-64, Linux arm64 |
-| Browser Promise runtime and extensions | Complete in the `v0.2.0` source candidate | Browser Wasm ABI `0x0001_0007`; `memory`/`opfs`/`s3` |
-| Embedded browser distribution | Complete in the `v0.2.0` source candidate | One-command Moon package; real Chrome and clean-package gates |
+| Bounded reads and explicit Writer abort | Released in `v0.2.0` | Phase 5A, ABI `1.1` |
+| Typed S3 and the `standard` profile | Released in `v0.2.0` | Phase 5B, ABI `1.2` |
+| Presign and explicit operational layers | Released in `v0.2.0` | Phase 5C, ABI `1.3`-`1.5` |
+| Batch delete and managed Copier | Released in `v0.2.0` | Phase 5D, ABI `1.6` |
+| Portable MoonBit async facade | Released in `v0.2.0` | Phase 5E, native ABI `1.7` plus Browser JS implementation |
+| Standard native host expansion | Released in `v0.2.0` | macOS arm64, Linux x86-64, Linux arm64 |
+| Browser Promise runtime and extensions | Released in `v0.2.0` | Browser Wasm ABI `0x0001_0007`; `memory`/`opfs`/`s3` |
+| Embedded browser distribution | Released in `v0.2.0` | One-command Moon package; real Chrome and clean-package gates |
 
-`v0.1.0` remains the published compatibility baseline. This tree is the fully
-pinned `v0.2.0` standard release candidate across three target-native hosts.
-Phase 5 is not released until the tag workflow reproduces the committed
-digests, uploads those assets, publishes the same source to mooncakes.io, and
-passes fresh registry consumers. Until then, `moon add
-Eric-Song-Nop/opendal@0.1.0` still provides only the released local surface and
-native archive.
+`v0.1.0` remains the immutable compatibility baseline. The `v0.2.0` release
+ships the fully pinned standard profile across three target-native hosts. Its
+tag workflow reproduces the committed digests, uploads those assets, publishes
+the same source to mooncakes.io, and passes a fresh registry consumer.
 
 The source implementation preserves the old local behavior while adding
 public methods, optional ABI groups, the `standard` native service profile,
@@ -268,8 +264,7 @@ separate linker and artifact-distribution decision.
 
 ### Phase 5: Standard profile and complete first-generation facade
 
-Status: pinned `v0.2.0` release candidate through Phase 5E; tag publication and
-fresh registry acceptance remain.
+Status: Phase 5A-E released in `v0.2.0`.
 
 The user guides were checked against OpenDAL's binding overview, connecting,
 getting-started, and common-task documentation. Phase 5 was delivered as
@@ -299,7 +294,7 @@ This order remains useful for history, review, and bisecting:
 
 #### Phase 5A: Complete the local blocking lifecycle
 
-Status: included in the pinned but unpublished `v0.2.0` standard candidate.
+Status: released in the `v0.2.0` standard profile.
 
 Delivered in the current tree:
 
@@ -478,8 +473,7 @@ Land Phase 5A as reviewable vertical slices:
 
 #### Phase 5B: Ship the first cloud service profile
 
-Status: pinned in the unpublished `v0.2.0` standard candidate; tag publication
-and fresh registry acceptance remain.
+Status: released in the `v0.2.0` standard profile.
 
 S3 is the first and only Phase 5 cloud service. The public path is
 `Operator::s3`, backed by opaque `S3Auth` and `S3CredentialSource` values for
@@ -492,8 +486,8 @@ successor profile, not a runtime-selectable plugin beside `local`.
 The implemented choice keeps `local` small and unchanged in meaning. A package
 release names exactly one pinned table in `native/artifact-selection.json`;
 there is no runtime profile selector and therefore no duplicate native archive
-inside one Moon process. The `v0.2.0` release candidate selects `standard`, a
-superset of `local`. Maintainer source builds choose a profile explicitly
+inside one Moon process. The `v0.2.0` release selects `standard`, a superset of
+`local`. Maintainer source builds choose a profile explicitly
 without changing the committed package selection.
 
 The distribution contract records:
@@ -563,8 +557,7 @@ The S3 contract provides:
 
 #### Phase 5C: Presigned operations and explicit layers
 
-Status: included in the pinned but unpublished `v0.2.0` candidate as separate
-presign and layer ABI groups; tag publication remains.
+Status: released in `v0.2.0` as separate presign and layer ABI groups.
 
 Delivered in the current tree:
 
@@ -647,8 +640,7 @@ first retry/timeout slice.
 
 #### Phase 5D: Batch deletion and copier tasks
 
-Status: included in the pinned but unpublished `v0.2.0` candidate with
-deliberately smaller, honest contracts; tag publication remains.
+Status: released in `v0.2.0` with deliberately smaller, honest contracts.
 
 ##### Phase 5D.1: Batch deletion
 
@@ -696,9 +688,8 @@ reports finish or abort success.
 
 #### Phase 5E: Public MoonBit async API
 
-Status: the first portable public async slice is included in the pinned but
-unpublished `v0.2.0` candidate; full native blocking-API parity is
-intentionally deferred.
+Status: the first portable public async slice is released in `v0.2.0`; full
+native blocking-API parity is intentionally deferred.
 
 The root package is selected at compile time for native or JavaScript, with
 native as the default and explicit `--target js` for browsers. Other MoonBit
@@ -758,8 +749,7 @@ operations in a later slice.
 
 ### Browser JavaScript delivery stack
 
-Status: complete in the current source candidate; publication follows the same
-`v0.2.0` Moon package release as the portable facade.
+Status: released in the `v0.2.0` Moon package with the portable facade.
 
 The Browser stack adds a target-specific implementation and extensions without
 changing the portable native contract:
@@ -805,8 +795,8 @@ target-specific public map.
 
 ### Parallel track A: Platform and artifact expansion
 
-Status: Linux arm64 is pinned and clean-consumer tested in the unpublished
-`v0.2.0` standard candidate; tag publication remains.
+Status: Linux arm64 is released and clean-consumer tested in the `v0.2.0`
+standard profile.
 
 Additional targets are independent release lanes, not checkboxes added to a
 generic support claim. The Phase 5 `standard` profile adds a target-native
@@ -870,7 +860,7 @@ if a milestone cannot satisfy its exit criteria independently.
 | Release line | Intended content |
 | --- | --- |
 | Published `0.1.x` | Immutable `local` profile: memory/fs, original blocking facade, macOS arm64 and Linux x86-64 |
-| Pinned, unpublished `0.2.0` release candidate | Phase 5A-E, `standard` native memory/fs/S3 profile, Linux arm64, and the embedded Browser JS `memory`/`opfs`/`s3` stack |
+| Released `0.2.0` | Phase 5A-E, `standard` native memory/fs/S3 profile, Linux arm64, and the embedded Browser JS `memory`/`opfs`/`s3` stack |
 | Later releases | Additional async operations, services, targets, recursive/cross-service transfer only after separate contracts |
 
 Each release tag must build its native artifacts and Moon package from the same
@@ -948,7 +938,7 @@ A feature is not complete when the Rust method exists. Every slice includes:
 | Initial async shape | Resolved | MoonBit `async fn` facade using owned native tasks and a pipe wakeup; no public callbacks/task handles |
 | Browser runtime shape | Resolved | JavaScript Promise/`AbortSignal` facade over scalar Browser Wasm ABI 1.7; embedded runtimes own one instance and memory, while explicit asset loads are single-use per bridge module URL |
 | Browser distribution | Resolved | Version-matched bridge, wasm-bindgen glue, and Promise runtime embedded in the Moon package and proven in clean Chrome consumers |
-| Standard release trust roots | Pinned candidate; tag verification pending | `artifacts-standard.json` is populated and selected atomically; publish the exact bytes and verify fresh registry consumers from `v0.2.0` |
+| Standard release trust roots | Released in `v0.2.0` | `artifacts-standard.json` is populated and selected atomically; the tag workflow publishes the exact bytes and verifies a fresh registry consumer |
 | Additional services and async parity | Deferred | Add only as independent, capability-honest vertical slices |
 | Intel macOS, musl, and Windows | Deferred | Require installable MoonBit toolchains plus target-native build/link/consumer evidence |
 | Replacement for experimental prebuild tooling | Open toolchain follow-up | Adopt stable native-artifact support when it can preserve pinned, ordinary-package installation |

@@ -1,6 +1,6 @@
 # Browser Runtime and Wasm ABI
 
-Status: browser ABI 1.7 implemented for the `0.2.0` source candidate
+Status: browser ABI 1.7 released in `0.2.0`
 
 This document defines the private runtime contract behind the MoonBit
 JavaScript target. The Rust bridge happens to compile to WebAssembly inside

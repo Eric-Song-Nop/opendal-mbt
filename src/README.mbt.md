@@ -8,20 +8,18 @@ embedded browser runtime stay private.
 
 ## Release and source status
 
-The published `0.1.0` package and this pinned but unpublished `0.2.0` release
-candidate are intentionally different until the release tag is cut:
+Version `0.2.0` is the current release line. Version `0.1.0` remains an
+immutable compatibility baseline for applications that only need the original
+native `memory`/`fs` surface:
 
 | Track | Services and API | Native hosts |
 | --- | --- | --- |
-| Published `Eric-Song-Nop/opendal@0.1.0` | `local` profile: `memory`, `fs`, synchronous Phase 1-4 API | Apple silicon macOS 11+, x86-64 glibc Linux 2.35+ |
-| Pinned `0.2.0` release candidate (not published) | `standard` profile: `memory`, `fs`, typed `s3`, complete Phase 5A-E API | Apple silicon macOS 11+, x86-64 and arm64 glibc Linux 2.35+ |
+| Current `Eric-Song-Nop/opendal@0.2.0` | `standard` profile: `memory`, `fs`, typed `s3`, complete Phase 5A-E API, and Browser JS | Apple silicon macOS 11+, x86-64 and arm64 glibc Linux 2.35+ |
+| Legacy `Eric-Song-Nop/opendal@0.1.0` | `local` profile: `memory`, `fs`, synchronous Phase 1-4 API | Apple silicon macOS 11+, x86-64 glibc Linux 2.35+ |
 
 This source tree selects the fully pinned `native/artifacts-standard.json`
-table for `0.2.0-r1`. The immutable `v0.1.0-r1` local records remain unchanged
-in `native/artifacts.json`. The standard URLs name future `v0.2.0` release
-assets and are not a publication claim: `moon add
-Eric-Song-Nop/opendal@0.1.0` still provides only the released local API until
-the tag workflow publishes `0.2.0`.
+table for `0.2.0-r2`. The immutable `v0.1.0-r1` local records remain unchanged
+in `native/artifacts.json`.
 
 The current source facade implements:
 
@@ -45,14 +43,14 @@ The checked-in native public interface is
 
 ## Install a release
 
-After the `v0.2.0` tag workflow publishes the standard release, add it like any
-other Moon package:
+Add the standard release like any other Moon package:
 
 ```sh
 moon add Eric-Song-Nop/opendal@0.2.0
 ```
 
-Until that tag is published, the available registry baseline remains:
+Use the legacy release only when an application intentionally targets its
+smaller native-only compatibility surface:
 
 ```sh
 moon add Eric-Song-Nop/opendal@0.1.0
@@ -82,7 +80,7 @@ target, which hosts the embedded OpenDAL core Wasm runtime. Portable native
 async operations run as Rust Tokio tasks and wake Moon through a nonblocking
 completion pipe; browser operations use Promises and `AbortSignal`.
 
-Contributors testing the Phase 5 source stack use the checked-out repository:
+Contributors validating changes from a source checkout use:
 
 ```sh
 make moon-deps
@@ -209,8 +207,8 @@ operation, and path on either target.
 
 - [Documentation index](../docs/README.md) — user guides, target-specific API
   reference, architecture contracts, release procedure, and examples.
-- [Getting started](getting-started.mbt.md) — install a published release or
-  exercise the pinned `v0.2.0` candidate, then choose synchronous or async I/O.
+- [Getting started](getting-started.mbt.md) — install `v0.2.0` or validate a
+  source checkout, then choose synchronous or async I/O.
 - [Connecting](connecting.mbt.md) — understand profiles and construct memory,
   filesystem, and typed S3 operators.
 - [Using OpenDAL in a browser](browser-guide.mbt.md) — select the JS target,
@@ -241,9 +239,9 @@ operation, and path on either target.
   operations and stateful listers.
 - Retry, timeout, and concurrency limits are never implicit. Logging, tracing,
   metrics exporters, and custom callback layers are not exposed.
-- Standard artifacts are pinned for the `v0.2.0` release candidate but are not
-  yet published. Intel macOS, Windows, and musl Linux are not advertised; a
-  Rust-only build is not treated as MoonBit host support.
+- Standard artifacts are published for `v0.2.0`. Intel macOS, Windows, and
+  musl Linux are not advertised; a Rust-only build is not treated as MoonBit
+  host support.
 
 Passing an arbitrary scheme does not install a backend. ABI feature presence,
 selected-profile services, and a backend's operation capabilities are separate

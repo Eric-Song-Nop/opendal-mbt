@@ -16,6 +16,12 @@ generated Browser snapshot built from a different source state.
 The release job checks that the secret is present before it creates or changes
 a GitHub release.
 
+The tag job deliberately runs `moon publish` without `--frozen`. Publishing
+validates the archive from a fresh extracted directory whose dependency cache
+starts empty; it must be allowed to install the exact dependency version pinned
+in `moon.mod`. The repository itself is still resolved before publication, and
+the clean registry-consumer step verifies the published version afterward.
+
 ## Version release
 
 1. Update the version in `moon.mod`, `native/rust/Cargo.toml`,
@@ -39,8 +45,8 @@ a GitHub release.
 6. Run `make check`, debug/release `make test-profile`, `make asan`, and each
    generated native artifact's clean packaged-consumer test.
 7. Merge the complete stack, then create and push the exact `v<moon.mod
-   version>` tag. For the current standard candidate, version `0.2.0` requires
-   tag `v0.2.0`; `v0.1.0` remains the historical local release.
+   version>` tag. The `0.2.0` standard release uses tag `v0.2.0`; `v0.1.0`
+   remains the historical local release.
 
 `make test-profile` includes the shared native/browser application source and
 the native delayed-S3 heartbeat probe. The probe must report that the MoonBit

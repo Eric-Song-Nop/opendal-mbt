@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "artifact_revision": "r1",
+  "artifact_revision": "r2",
   "service_profile": "standard",
   "services": [
     "memory",

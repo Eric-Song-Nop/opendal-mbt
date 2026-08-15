@@ -1,19 +1,19 @@
 # Getting started
 
 Start with an in-memory operator, then switch the constructor while keeping the
-same storage methods. The published `0.1.0` package is the local `memory`/`fs`
-release. This checkout is the pinned but unpublished `0.2.0` release candidate,
-containing typed S3 and a portable native/browser async facade.
+same storage methods. The current `0.2.0` release contains the standard
+`memory`/`fs`/`s3` native profile and a portable native/browser async facade.
+Version `0.1.0` remains the smaller native-only compatibility baseline.
 
 ## 1. Add a published package
 
-After the `v0.2.0` tag workflow publishes the standard release:
+Install the standard release:
 
 ```sh
 moon add Eric-Song-Nop/opendal@0.2.0
 ```
 
-Until then, the registry baseline is the local release:
+Select the legacy local release only when its smaller API is intentional:
 
 ```sh
 moon add Eric-Song-Nop/opendal@0.1.0
@@ -37,8 +37,7 @@ and skips native artifact resolution. The published `0.1.0` matrix is Apple
 silicon macOS and x86-64 glibc Linux; it does not contain S3, JavaScript, or the
 Phase 5 symbols.
 
-To exercise the pinned `0.2.0` release candidate before publication, clone this
-repository and run:
+To validate the current source checkout before contributing a change, run:
 
 ```sh
 make moon-deps

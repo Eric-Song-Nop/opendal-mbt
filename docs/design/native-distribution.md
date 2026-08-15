@@ -39,9 +39,9 @@ variants:
 `standard` includes the local services, so the root Moon facade needs exactly
 one native archive on each host. There is no public profile selector and no
 environment variable that changes the archive. The published `v0.1.0` package
-selected `artifacts.json`. The `v0.2.0` release-candidate source atomically
-selects `artifacts-standard.json`, with one pinned target-native archive for
-each of the three advertised hosts.
+selected `artifacts.json`. The `v0.2.0` release atomically selects
+`artifacts-standard.json`, with one pinned target-native archive for each of
+the three advertised hosts.
 
 The local `v0.1.0-r1` records and their digests are never rewritten. Local and
 standard pins live in separate tables, and their cache paths include the
@@ -63,8 +63,7 @@ install the S3 HTTP transport.
 ## Supported host matrix
 
 The immutable `local` v0.1 release remains available on its original two
-hosts. The pinned but unpublished `v0.2.0` candidate expands `standard` to
-three target-native builders:
+hosts. The `v0.2.0` release expands `standard` to three target-native builders:
 
 | Host | Release target | Compatibility floor | Profile |
 | --- | --- | --- | --- |
