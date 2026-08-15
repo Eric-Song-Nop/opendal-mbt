@@ -1,4 +1,12 @@
 ///|
+extern "js" fn delayed_fake_runtime() -> @js_async.Promise[JsRuntime] =
+  #| () => new Promise((resolve) => setTimeout(() => resolve({}), 250))
+
+///|
+extern "js" fn rejected_fake_runtime() -> @js_async.Promise[JsRuntime] =
+  #| () => Promise.reject(new Error("fixture bootstrap rejection"))
+
+///|
 extern "js" fn fake_js_runtime() -> JsRuntime =
   #| () => {
   #|   const metadata = (length = 2n) => ({
@@ -86,6 +94,92 @@ extern "js" fn fake_js_runtime() -> JsRuntime =
   #|         value: [{ path: "fixture/value.bin", name: "value.bin", metadata: metadata(2n) }],
   #|       })
   #|     },
+  #|     copy(source, destination, options) {
+  #|       if (source === "missing.bin")
+  #|         return Promise.resolve(error("NotFound", 4, "copy source does not exist"))
+  #|       if (destination !== "fixture/copied.bin" || !(options.signal instanceof AbortSignal))
+  #|         return Promise.resolve(error("InvalidArgument", 0x1001))
+  #|       return Promise.resolve({ ok: true, value: metadata(2n) })
+  #|     },
+  #|     rename(source, destination, options) {
+  #|       if (source !== "fixture/copied.bin" || destination !== "fixture/moved.bin" ||
+  #|           !(options.signal instanceof AbortSignal))
+  #|         return Promise.resolve(error("InvalidArgument", 0x1001))
+  #|       return Promise.resolve({ ok: true })
+  #|     },
+  #|     openReadStream(path, options) {
+  #|       if (options.chunkSize !== 2 || options.range.kind !== "Full" ||
+  #|           !(options.signal instanceof AbortSignal))
+  #|         return Promise.resolve(error("InvalidArgument", 0x1001))
+  #|       let index = 0
+  #|       let closed = false
+  #|       const cancelNext = path === "fixture/cancel.bin"
+  #|       const chunks = [Uint8Array.of(0, 255), Uint8Array.of(7)]
+  #|       return Promise.resolve({ ok: true, value: {
+  #|         next({ signal }) {
+  #|           if (closed || !(signal instanceof AbortSignal))
+  #|             return Promise.resolve(error("ResourceClosed", 0x1002))
+  #|           if (cancelNext) return Promise.resolve(
+  #|             error("Cancelled", 0x1005, "stream was cancelled"),
+  #|           )
+  #|           if (index === chunks.length) return Promise.resolve({ ok: true })
+  #|           return Promise.resolve({ ok: true, value: chunks[index++] })
+  #|         },
+  #|         close() { closed = true; return { ok: true } },
+  #|       } })
+  #|     },
+  #|     openWriter(path, options) {
+  #|       const validFixture =
+  #|         (path === "fixture/chunks.bin" && options.contentType === "application/data") ||
+  #|         (path === "fixture/oversized.bin" && options.contentType === undefined)
+  #|       if (!validFixture || !(options.signal instanceof AbortSignal))
+  #|         return Promise.resolve(error("InvalidArgument", 0x1001))
+  #|       let length = 0n
+  #|       let closed = false
+  #|       return Promise.resolve({ ok: true, value: {
+  #|         write(chunk, { signal }) {
+  #|           if (closed || !(chunk instanceof Uint8Array) ||
+  #|               !(signal instanceof AbortSignal))
+  #|             return Promise.resolve(error("ResourceClosed", 0x1002))
+  #|           if (chunk[0] === 9)
+  #|             return Promise.resolve(error("Cancelled", 0x1005, "writer was cancelled"))
+  #|           length += BigInt(chunk.length)
+  #|           return Promise.resolve({ ok: true })
+  #|         },
+  #|         finish({ signal }) {
+  #|           if (closed || !(signal instanceof AbortSignal))
+  #|             return Promise.resolve(error("ResourceClosed", 0x1002))
+  #|           closed = true
+  #|           return Promise.resolve({ ok: true, value: metadata(length) })
+  #|         },
+  #|         abort({ signal }) {
+  #|           if (!(signal instanceof AbortSignal))
+  #|             return Promise.resolve(error("InvalidArgument", 0x1001))
+  #|           closed = true
+  #|           return Promise.resolve({ ok: true })
+  #|         },
+  #|         close() { closed = true; return { ok: true } },
+  #|       } })
+  #|     },
+  #|     openLister(path, options) {
+  #|       if (path !== "fixture/" || options.limit !== 1n ||
+  #|           !(options.signal instanceof AbortSignal))
+  #|         return Promise.resolve(error("InvalidArgument", 0x1001))
+  #|       let yielded = false
+  #|       let closed = false
+  #|       return Promise.resolve({ ok: true, value: {
+  #|         next({ signal }) {
+  #|           if (closed || !(signal instanceof AbortSignal))
+  #|             return Promise.resolve(error("ResourceClosed", 0x1002))
+  #|           if (yielded) return Promise.resolve({ ok: true })
+  #|           yielded = true
+  #|           return Promise.resolve({ ok: true, value: {
+  #|             path: "fixture/value.bin", name: "value.bin", metadata: metadata(2n),
+  #|           } })
+  #|         },
+  #|         close() { closed = true; return { ok: true } },
+  #|       } })
+  #|     },
   #|   }
   #|   let runtimeClosed = false
   #|   return {
@@ -106,6 +200,19 @@ extern "js" fn fake_js_runtime() -> JsRuntime =
 ///|
 fn fake_runtime() -> Runtime {
   { js: fake_js_runtime(), closed: false }
+}
+
+///|
+test "browser bridge resource-busy kind is preserved" {
+  let error = error_from_bridge(
+    0x1006,
+    1,
+    "ResourceBusy",
+    "operation already in flight",
+    error_context(Read, path="fixture/value.bin"),
+  )
+  assert_true(error.kind() is ResourceBusy)
+  assert_true(error.status() is Permanent)
 }
 
 ///|
@@ -198,5 +305,149 @@ async test "browser facade preserves structured errors and rejection boundary" {
     _ => fail("expected a structured PermissionDenied error")
   } noraise {
     _ => fail("exists must retain errors other than NotFound")
+  }
+}
+
+///|
+async test "browser runtime bootstrap preserves scheduler cancellation" {
+  @async.with_task_group() <| group => {
+    let task = group.spawn(() => {
+      ignore(
+        await_runtime_bootstrap(
+          delayed_fake_runtime(),
+          "bootstrap cancellation was remapped",
+        ),
+      )
+    })
+    @async.sleep(1)
+    task.cancel()
+    try task.wait() catch {
+      OpenDalError(_) => fail("scheduler cancellation became OpenDalError")
+      error => assert_eq(@debug.to_string(error), "Cancelled")
+    } noraise {
+      _ => fail("cancelled bootstrap unexpectedly completed")
+    }
+  }
+  try
+    await_runtime_bootstrap(
+      rejected_fake_runtime(),
+      "fixture bootstrap rejected",
+    )
+  catch {
+    OpenDalError(info) => {
+      assert_true(info.kind is AbiMismatch)
+      assert_eq(info.operation, LoadRuntime)
+    }
+    _ => fail("ordinary bootstrap rejection did not become OpenDalError")
+  } noraise {
+    _ => fail("rejected bootstrap unexpectedly completed")
+  }
+}
+
+///|
+async test "browser facade exposes bounded stateful resources and native moves" {
+  let asynchronous = fake_runtime()
+    .operator("memory", config=Map([("root", "fixture")]))
+    .as_async()
+  try
+    asynchronous.open_read_stream(
+      "fixture/value.bin",
+      chunk_size=256 * 1024 + 1,
+    )
+  catch {
+    OpenDalError(info) => assert_true(info.kind is InvalidArgument)
+    _ => fail("expected bounded read-stream validation")
+  } noraise {
+    _ => fail("oversized read-stream chunks must fail locally")
+  }
+  let copied = asynchronous.copy("fixture/value.bin", "fixture/copied.bin")
+  assert_eq(copied.content_length, 2UL)
+  asynchronous.rename("fixture/copied.bin", "fixture/moved.bin")
+  let stream = asynchronous.open_read_stream("fixture/value.bin", chunk_size=2)
+  assert_eq(stream.next(), Some(b"\x00\xff"))
+  assert_eq(stream.next(), Some(b"\x07"))
+  assert_eq(stream.next(), None)
+  assert_eq(stream.next(), None)
+  stream.close()
+  let writer = asynchronous.open_writer(
+    "fixture/chunks.bin",
+    content_type="application/data",
+  )
+  writer.write(b"ab")
+  writer.write(b"\x00\xffz")
+  let written = writer.finish()
+  assert_eq(written.content_length, 5UL)
+  try writer.abort() catch {
+    OpenDalError(info) => assert_true(info.kind is ResourceClosed)
+    _ => fail("expected a terminal finished writer")
+  } noraise {
+    _ => fail("abort after finish must not report success")
+  }
+  writer.close()
+  let bounded_writer = asynchronous.open_writer("fixture/oversized.bin")
+  try bounded_writer.write(Bytes::make(256 * 1024 + 1, 0)) catch {
+    OpenDalError(info) => assert_true(info.kind is BufferTooLarge)
+    _ => fail("expected bounded writer validation")
+  } noraise {
+    _ => fail("oversized writer chunks must fail locally")
+  }
+  bounded_writer.write(Bytes::make(256 * 1024, 0))
+  assert_eq(bounded_writer.finish().content_length, 256UL * 1024UL)
+  let aborted_writer = asynchronous.open_writer(
+    "fixture/chunks.bin",
+    content_type="application/data",
+  )
+  aborted_writer.abort()
+  aborted_writer.abort()
+  let lister = asynchronous.open_lister("fixture/", limit=1UL)
+  guard lister.next() is Some(entry) else {
+    fail("expected one streamed listing entry")
+  }
+  assert_eq(entry.path, "fixture/value.bin")
+  assert_eq(lister.next(), None)
+  assert_eq(lister.next(), None)
+  lister.close()
+  try asynchronous.copy("missing.bin", "fixture/copied.bin") catch {
+    OpenDalError(info) => {
+      assert_true(info.kind is NotFound)
+      assert_true(info.operation is Copy)
+      assert_eq(info.path, Some("missing.bin"))
+      assert_eq(info.destination_path, Some("fixture/copied.bin"))
+    }
+    _ => fail("expected structured copy failure")
+  } noraise {
+    _ => fail("missing copy source must fail")
+  }
+  let cancelled_stream = asynchronous.open_read_stream(
+    "fixture/cancel.bin",
+    chunk_size=2,
+  )
+  try cancelled_stream.next() catch {
+    OpenDalError(_) as error => assert_true(error.is_cancelled())
+    _ => fail("expected stream cancellation")
+  } noraise {
+    _ => fail("cancelled stream next must fail")
+  }
+  try cancelled_stream.next() catch {
+    OpenDalError(info) => assert_true(info.kind is ResourceClosed)
+    _ => fail("expected terminal stream")
+  } noraise {
+    _ => fail("cancelled stream must become terminal")
+  }
+  let cancelled_writer = asynchronous.open_writer(
+    "fixture/chunks.bin",
+    content_type="application/data",
+  )
+  try cancelled_writer.write(b"\x09") catch {
+    OpenDalError(_) as error => assert_true(error.is_cancelled())
+    _ => fail("expected writer cancellation")
+  } noraise {
+    _ => fail("cancelled writer write must fail")
+  }
+  try cancelled_writer.write(b"late") catch {
+    OpenDalError(info) => assert_true(info.kind is ResourceClosed)
+    _ => fail("expected terminal writer")
+  } noraise {
+    _ => fail("cancelled writer must become terminal")
   }
 }

@@ -2,9 +2,12 @@
 /// URLs for the version-matched JavaScript runtime, wasm-bindgen module, and
 /// OpenDAL bridge WebAssembly binary.
 ///
-/// `Runtime::load` imports these browser assets once. The embedded distribution
-/// layer added by the next stack PR supplies these values automatically; this
-/// explicit form remains useful to bundlers and custom CDNs.
+/// `Runtime::load` imports these browser assets. A page may load a given
+/// `bridge_module_url` only once because browser module imports cache the
+/// initialized wasm-bindgen exports and bridge teardown is permanent. The
+/// ordinary `Runtime::new` and `AsyncOperator::new` paths use the embedded
+/// distribution automatically; this explicit form remains useful to bundlers
+/// and custom CDNs.
 pub struct BrowserAssets {
   runtime_module_url : String
   bridge_module_url : String
@@ -22,10 +25,12 @@ pub fn BrowserAssets::new(
 }
 
 ///|
-/// An initialized, single-memory OpenDAL browser runtime.
+/// An initialized, single-memory OpenDAL browser runtime facade.
 ///
-/// The runtime owns its WebAssembly instance. Close it after all operators are
-/// no longer needed; closing more than once is harmless.
+/// An embedded runtime owns its WebAssembly instance. An explicitly loaded
+/// runtime is the sole owner allowed for that bridge module URL in the page.
+/// Close it after all operators are no longer needed; closing more than once is
+/// harmless.
 pub struct Runtime {
   priv js : JsRuntime
   priv mut closed : Bool
@@ -42,6 +47,7 @@ pub struct Operator {
   priv runtime : Runtime
   priv info_snapshot : OperatorInfo
   priv mut closed : Bool
+  priv mut owns_runtime : Bool
 }
 
 ///|
@@ -181,27 +187,39 @@ fn operator_info_from_js(info : JsOperatorInfo) -> OperatorInfo {
 }
 
 ///|
+async fn await_runtime_bootstrap(
+  promise : @js_async.Promise[JsRuntime],
+  failure_message : String,
+) -> JsRuntime {
+  promise.wait() catch {
+    error if @async.is_being_cancelled() => raise error
+    _ =>
+      raise local_error(
+        AbiMismatch,
+        failure_message,
+        error_context(LoadRuntime),
+      )
+  }
+}
+
+///|
 /// Load and validate a version-matched OpenDAL browser runtime.
 ///
 /// Module loading, ABI mismatch, or malformed bootstrap state raises
 /// `AbiMismatch`. Storage failures after initialization retain their structured
-/// OpenDAL category and retry status.
-pub async fn Runtime::load(
-  assets : BrowserAssets,
-) -> Runtime raise OpenDalError {
-  let context = error_context(LoadRuntime)
-  let js = load_js_runtime(
-    assets.runtime_module_url,
-    assets.bridge_module_url,
-    assets.bridge_wasm_url,
-  ).wait() catch {
-    _ =>
-      raise local_error(
-        AbiMismatch,
-        "could not load or validate the OpenDAL browser runtime",
-        context,
-      )
-  }
+/// OpenDAL category and retry status. Moon async scheduler cancellation
+/// propagates unchanged. A page may call this function only once for a given
+/// `bridge_module_url`; share that runtime between all operators using those
+/// assets, and do not load the same URL again after closing it.
+pub async fn Runtime::load(assets : BrowserAssets) -> Runtime {
+  let js = await_runtime_bootstrap(
+    load_js_runtime(
+      assets.runtime_module_url,
+      assets.bridge_module_url,
+      assets.bridge_wasm_url,
+    ),
+    "could not load or validate the OpenDAL browser runtime",
+  )
   { js, closed: false }
 }
 
@@ -242,7 +260,37 @@ pub fn Runtime::operator(
   let info_snapshot = operator_info_from_js(
     outcome_value(js.info(), outcome => outcome.operator_info_value(), context),
   )
-  { js, runtime: self, info_snapshot, closed: false }
+  { js, runtime: self, info_snapshot, closed: false, owns_runtime: false }
+}
+
+///|
+/// Construct a browser operator with an automatically managed embedded
+/// runtime. Closing the returned operator also closes its private runtime.
+async fn new_embedded_operator(
+  scheme : StringView,
+  config? : Map[String, String] = Map([]),
+) -> Operator {
+  let runtime = Runtime::new()
+  let operator = runtime.operator(scheme, config~) catch {
+    error => {
+      runtime.close() catch {
+        _ => ()
+      }
+      raise error
+    }
+  }
+  operator.owns_runtime = true
+  operator
+}
+
+///|
+/// Construct the target's OpenDAL operator behind one portable asynchronous
+/// entry point.
+pub async fn AsyncOperator::new(
+  scheme : StringView,
+  config? : Map[String, String] = Map([]),
+) -> AsyncOperator {
+  new_embedded_operator(scheme, config~).as_async()
 }
 
 ///|
@@ -271,15 +319,23 @@ pub fn Operator::as_async(self : Operator) -> AsyncOperator {
 
 ///|
 /// Release this operator early. Closing more than once is harmless.
-pub fn Operator::close(self : Operator) -> Unit raise OpenDalError {
+pub fn Operator::close(self : Operator) -> Unit {
   if !self.closed {
     self.closed = true
-    outcome_unit(self.js.close(), error_context(Check))
+    if self.owns_runtime {
+      self.runtime.close() catch {
+        _ => ()
+      }
+    } else {
+      ignore(self.js.close())
+    }
   }
 }
 
 ///|
 /// Release the shared operator through its asynchronous view.
-pub fn AsyncOperator::close(self : AsyncOperator) -> Unit raise OpenDalError {
+/// Finish or close every child resource and await in-flight calls first;
+/// behavior of outstanding work after parent close is not portable.
+pub fn AsyncOperator::close(self : AsyncOperator) -> Unit {
   self.native.close()
 }

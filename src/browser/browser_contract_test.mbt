@@ -30,20 +30,46 @@ async fn browser_async_api_contract(
   ignore(asynchronous.read("contract/value.bin"))
   ignore(asynchronous.stat("contract/value.bin"))
   ignore(asynchronous.exists("contract/value.bin"))
+  ignore(asynchronous.copy("contract/value.bin", "contract/copy.bin"))
+  asynchronous.rename("contract/copy.bin", "contract/moved.bin")
   asynchronous.delete("contract/value.bin")
   ignore(asynchronous.list("contract/"))
+  ignore(asynchronous.open_read_stream("contract/value.bin", chunk_size=4))
+  ignore(asynchronous.open_writer("contract/chunks.bin"))
+  ignore(asynchronous.open_lister("contract/"))
   asynchronous.close()
   runtime.close()
+}
+
+///|
+async fn browser_stateful_api_contract(
+  stream : AsyncReadStream,
+  writer : AsyncWriter,
+  abort_writer : AsyncWriter,
+  lister : AsyncLister,
+) -> Unit {
+  ignore(stream.next())
+  stream.close()
+  writer.write(b"chunk")
+  ignore(writer.finish())
+  writer.close()
+  abort_writer.abort()
+  abort_writer.abort()
+  abort_writer.close()
+  ignore(lister.next())
+  lister.close()
 }
 
 ///|
 test "browser public surface type-checks from a black-box test" {
   ignore(browser_metadata_contract)
   ignore(browser_async_api_contract)
+  ignore(browser_stateful_api_contract)
   let assets = BrowserAssets::new(
     "https://example.invalid/runtime.mjs", "https://example.invalid/bridge.mjs",
     "https://example.invalid/bridge.wasm",
   )
   assert_eq(assets.runtime_module_url, "https://example.invalid/runtime.mjs")
+  ignore(Runtime::new)
   ignore(Runtime::load)
 }

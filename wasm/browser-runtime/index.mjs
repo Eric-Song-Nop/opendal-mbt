@@ -1,5 +1,5 @@
-const ABI_VERSION = 0x0001_0006;
-const REQUIRED_FEATURE_FLAGS = 0x0000_07fc;
+const ABI_VERSION = 0x0001_0007;
+const REQUIRED_FEATURE_FLAGS = 0x0000_fffc;
 
 const MAX_BUFFER_BYTES = 64 * 1024 * 1024;
 const MAX_TRANSFER_CHUNK = 256 * 1024;
@@ -17,6 +17,16 @@ const COMPLETION_STAT = 3;
 const COMPLETION_CREATE_DIR = 4;
 const COMPLETION_DELETE = 5;
 const COMPLETION_LIST = 6;
+const COMPLETION_COPY = 7;
+const COMPLETION_RENAME = 8;
+const COMPLETION_OPEN_READ_STREAM = 9;
+const COMPLETION_READ_STREAM_NEXT = 10;
+const COMPLETION_OPEN_WRITER = 11;
+const COMPLETION_WRITER_WRITE = 12;
+const COMPLETION_WRITER_FINISH = 13;
+const COMPLETION_WRITER_ABORT = 14;
+const COMPLETION_OPEN_LISTER = 15;
+const COMPLETION_LISTER_NEXT = 16;
 
 const ERROR_PERMANENT = 1;
 const ERROR_CANCELLED = 0x1005;
@@ -49,15 +59,32 @@ const REQUIRED_EXPORTS = [
   "opendal_mbt_wasm_operator_create_dir_start",
   "opendal_mbt_wasm_operator_delete_start",
   "opendal_mbt_wasm_operator_list_start",
+  "opendal_mbt_wasm_operator_copy_start",
+  "opendal_mbt_wasm_operator_rename_start",
+  "opendal_mbt_wasm_operator_read_stream_start_v1",
+  "opendal_mbt_wasm_read_stream_next_start",
+  "opendal_mbt_wasm_read_stream_release",
+  "opendal_mbt_wasm_operator_writer_start_v1",
+  "opendal_mbt_wasm_writer_write_start",
+  "opendal_mbt_wasm_writer_finish_start",
+  "opendal_mbt_wasm_writer_abort_start",
+  "opendal_mbt_wasm_writer_release",
+  "opendal_mbt_wasm_operator_lister_start",
+  "opendal_mbt_wasm_lister_next_start",
+  "opendal_mbt_wasm_lister_release",
   "opendal_mbt_wasm_task_state",
   "opendal_mbt_wasm_task_take",
   "opendal_mbt_wasm_task_cancel",
   "opendal_mbt_wasm_task_release",
   "opendal_mbt_wasm_completion_kind",
   "opendal_mbt_wasm_completion_status",
+  "opendal_mbt_wasm_completion_is_end",
   "opendal_mbt_wasm_completion_take_buffer",
   "opendal_mbt_wasm_completion_take_metadata_snapshot",
   "opendal_mbt_wasm_completion_take_entry_list",
+  "opendal_mbt_wasm_completion_take_read_stream",
+  "opendal_mbt_wasm_completion_take_writer",
+  "opendal_mbt_wasm_completion_take_lister",
   "opendal_mbt_wasm_completion_take_error",
   "opendal_mbt_wasm_completion_release",
   "opendal_mbt_wasm_entry_list_len",
@@ -128,8 +155,35 @@ function closedError(context) {
   return localError("ResourceClosed", 0x1002, "resource is closed", context);
 }
 
+function busyError(context) {
+  return localError(
+    "ResourceBusy",
+    0x1006,
+    "resource already has an in-flight operation",
+    context,
+  );
+}
+
 function cancelledError(context) {
   return localError("Cancelled", ERROR_CANCELLED, "operation was cancelled", context);
+}
+
+function signalValue(value, context) {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!(value instanceof AbortSignal)) {
+    invalid("signal must be an AbortSignal", context);
+  }
+  return value;
+}
+
+function transferChunkSize(value, fallback, label, context) {
+  const size = value === undefined ? BigInt(fallback) : uint64Value(value, label, context);
+  if (size === 0n || size > BigInt(MAX_TRANSFER_CHUNK)) {
+    invalid(`${label} must be between 1 and ${MAX_TRANSFER_CHUNK} bytes`, context);
+  }
+  return Number(size);
 }
 
 function isWellFormed(value) {
@@ -613,7 +667,7 @@ class BridgeFacade {
     }
   }
 
-  settleTask(taskHandle, expectedKind, context, signal) {
+  settleTask(taskHandle, expectedKind, context, signal, control) {
     return new Promise((resolve, reject) => {
       let ownedTask = taskHandle;
       let timer;
@@ -624,6 +678,9 @@ class BridgeFacade {
           clearTimeout(timer);
         }
         signal?.removeEventListener("abort", onAbort);
+        if (control?.cancel === onAbort) {
+          control.cancel = undefined;
+        }
       };
       const finish = (outcome) => {
         if (!settled) {
@@ -710,6 +767,9 @@ class BridgeFacade {
         );
         return;
       }
+      if (control !== undefined) {
+        control.cancel = onAbort;
+      }
       if (signal?.aborted) {
         onAbort();
         return;
@@ -751,7 +811,31 @@ class BridgeFacade {
         return failed(this.takeError(errorHandle, context));
       }
 
-      if (expectedKind === COMPLETION_READ) {
+      if (
+        expectedKind === COMPLETION_READ_STREAM_NEXT ||
+        expectedKind === COMPLETION_LISTER_NEXT
+      ) {
+        this.clearLastError();
+        const isEnd = this.bridge.opendal_mbt_wasm_completion_is_end(ownedCompletion);
+        const endError = this.bridge.opendal_mbt_wasm_last_error_take();
+        if (endError !== 0) {
+          throw new OutcomeFailure(this.takeError(endError, context));
+        }
+        if (isEnd !== 0 && isEnd !== 1) {
+          contractFailure(`bridge returned non-canonical EOF scalar ${isEnd}`);
+        }
+        if (isEnd === 1) {
+          this.expectStatus(
+            this.bridge.opendal_mbt_wasm_completion_release(ownedCompletion),
+            context,
+            "could not release an EOF completion",
+          );
+          ownedCompletion = 0;
+          return ok(undefined);
+        }
+      }
+
+      if (expectedKind === COMPLETION_READ || expectedKind === COMPLETION_READ_STREAM_NEXT) {
         this.clearLastError();
         const buffer = this.expectHandle(
           this.bridge.opendal_mbt_wasm_completion_take_buffer(ownedCompletion),
@@ -761,7 +845,12 @@ class BridgeFacade {
         ownedCompletion = 0;
         return ok(this.takeBuffer(buffer));
       }
-      if (expectedKind === COMPLETION_WRITE || expectedKind === COMPLETION_STAT) {
+      if (
+        expectedKind === COMPLETION_WRITE ||
+        expectedKind === COMPLETION_STAT ||
+        expectedKind === COMPLETION_COPY ||
+        expectedKind === COMPLETION_WRITER_FINISH
+      ) {
         this.clearLastError();
         const metadata = this.expectHandle(
           this.bridge.opendal_mbt_wasm_completion_take_metadata_snapshot(ownedCompletion),
@@ -780,6 +869,40 @@ class BridgeFacade {
         );
         ownedCompletion = 0;
         return ok(this.listEntries(list, context));
+      }
+      if (expectedKind === COMPLETION_LISTER_NEXT) {
+        this.clearLastError();
+        const list = this.expectHandle(
+          this.bridge.opendal_mbt_wasm_completion_take_entry_list(ownedCompletion),
+          context,
+          "could not take an OpenDAL lister entry",
+        );
+        ownedCompletion = 0;
+        const entries = this.listEntries(list, context);
+        if (entries.length !== 1) {
+          contractFailure(
+            `bridge returned ${entries.length} entries for one non-EOF lister completion`,
+          );
+        }
+        return ok(entries[0]);
+      }
+      const resourceTake =
+        expectedKind === COMPLETION_OPEN_READ_STREAM
+          ? "opendal_mbt_wasm_completion_take_read_stream"
+          : expectedKind === COMPLETION_OPEN_WRITER
+            ? "opendal_mbt_wasm_completion_take_writer"
+            : expectedKind === COMPLETION_OPEN_LISTER
+              ? "opendal_mbt_wasm_completion_take_lister"
+              : undefined;
+      if (resourceTake !== undefined) {
+        this.clearLastError();
+        const resource = this.expectHandle(
+          this.bridge[resourceTake](ownedCompletion),
+          context,
+          "could not take an OpenDAL streaming resource",
+        );
+        ownedCompletion = 0;
+        return ok(resource);
       }
       this.expectStatus(
         this.bridge.opendal_mbt_wasm_completion_release(ownedCompletion),
@@ -802,6 +925,8 @@ class BrowserOperator {
     this.facade = runtime.facade;
     this.handle = handle;
     this.infoSnapshot = info;
+    this.children = new Set();
+    this.activeTasks = new Set();
   }
 
   context(operation, path, destinationPath) {
@@ -823,6 +948,18 @@ class BrowserOperator {
     const handle = this.handle;
     this.handle = 0;
     this.runtime.operators.delete(this);
+    let firstError;
+    for (const child of [...this.children]) {
+      const outcome = child.close();
+      if (!outcome.ok && firstError === undefined) {
+        firstError = outcome.error;
+      }
+    }
+    this.children.clear();
+    for (const control of this.activeTasks) {
+      control.cancel?.();
+    }
+    this.activeTasks.clear();
     try {
       this.facade.clearLastError();
       this.facade.expectStatus(
@@ -830,10 +967,10 @@ class BrowserOperator {
         context,
         "could not release an OpenDAL operator",
       );
-      return ok(undefined);
+      return firstError === undefined ? ok(undefined) : failed(firstError);
     } catch (error) {
       if (error instanceof OutcomeFailure) {
-        return failed(error.error);
+        return firstError === undefined ? failed(error.error) : failed(firstError);
       }
       throw error;
     }
@@ -848,8 +985,45 @@ class BrowserOperator {
       }
       const normalizedPath = textValue(pathValue, "path", context);
       context.path = normalizedPath;
+      const signal = signalValue(options?.signal, context);
       const task = start(context, normalizedPath);
-      return await this.facade.settleTask(task, expectedKind, context, options?.signal);
+      const control = {};
+      this.activeTasks.add(control);
+      try {
+        return await this.facade.settleTask(task, expectedKind, context, signal, control);
+      } finally {
+        this.activeTasks.delete(control);
+      }
+    } catch (error) {
+      if (error instanceof OutcomeFailure) {
+        return failed(error.error);
+      }
+      throw error;
+    }
+  }
+
+  async runTwoPathTask(operation, sourceValue, destinationValue, expectedKind, options, start) {
+    const source = typeof sourceValue === "string" ? sourceValue : undefined;
+    const destination =
+      typeof destinationValue === "string" ? destinationValue : undefined;
+    const context = this.context(operation, source, destination);
+    try {
+      if (this.handle === 0 || this.runtime.closed) {
+        return failed(closedError(context));
+      }
+      const normalizedSource = textValue(sourceValue, "source", context);
+      const normalizedDestination = textValue(destinationValue, "destination", context);
+      context.path = normalizedSource;
+      context.destinationPath = normalizedDestination;
+      const signal = signalValue(options?.signal, context);
+      const task = start(context, normalizedSource, normalizedDestination);
+      const control = {};
+      this.activeTasks.add(control);
+      try {
+        return await this.facade.settleTask(task, expectedKind, context, signal, control);
+      } finally {
+        this.activeTasks.delete(control);
+      }
     } catch (error) {
       if (error instanceof OutcomeFailure) {
         return failed(error.error);
@@ -1058,6 +1232,555 @@ class BrowserOperator {
         }
       }
     });
+  }
+
+  copy(source, destination, options = {}) {
+    return this.runTwoPathTask(
+      "Copy",
+      source,
+      destination,
+      COMPLETION_COPY,
+      options,
+      (context, normalizedSource, normalizedDestination) => {
+        const handles = [];
+        try {
+          const sourceHandle = this.facade.putText(normalizedSource, context);
+          handles.push(sourceHandle);
+          const destinationHandle = this.facade.putText(normalizedDestination, context);
+          handles.push(destinationHandle);
+          this.facade.clearLastError();
+          return this.facade.expectHandle(
+            this.facade.bridge.opendal_mbt_wasm_operator_copy_start(
+              this.handle,
+              sourceHandle,
+              destinationHandle,
+            ),
+            context,
+            "could not start copy",
+          );
+        } finally {
+          for (const handle of handles) {
+            this.facade.bridge.opendal_mbt_wasm_buffer_release(handle);
+          }
+        }
+      },
+    );
+  }
+
+  rename(source, destination, options = {}) {
+    return this.runTwoPathTask(
+      "Rename",
+      source,
+      destination,
+      COMPLETION_RENAME,
+      options,
+      (context, normalizedSource, normalizedDestination) => {
+        const handles = [];
+        try {
+          const sourceHandle = this.facade.putText(normalizedSource, context);
+          handles.push(sourceHandle);
+          const destinationHandle = this.facade.putText(normalizedDestination, context);
+          handles.push(destinationHandle);
+          this.facade.clearLastError();
+          return this.facade.expectHandle(
+            this.facade.bridge.opendal_mbt_wasm_operator_rename_start(
+              this.handle,
+              sourceHandle,
+              destinationHandle,
+            ),
+            context,
+            "could not start rename",
+          );
+        } finally {
+          for (const handle of handles) {
+            this.facade.bridge.opendal_mbt_wasm_buffer_release(handle);
+          }
+        }
+      },
+    );
+  }
+
+  async openReadStream(path, options = {}) {
+    const normalizedOptions = options ?? {};
+    let chunkSize;
+    const outcome = await this.runTask(
+      "Read",
+      path,
+      COMPLETION_OPEN_READ_STREAM,
+      normalizedOptions,
+      (context, value) => {
+        const handles = [];
+        try {
+          chunkSize = transferChunkSize(
+            normalizedOptions.chunkSize,
+            MAX_TRANSFER_CHUNK,
+            "chunkSize",
+            context,
+          );
+          const pathHandle = this.facade.putText(value, context);
+          handles.push(pathHandle);
+          const range = normalizeRange(normalizedOptions.range, context);
+          const optional = [
+            optionalText(normalizedOptions.version, "version", context),
+            optionalText(normalizedOptions.ifMatch, "ifMatch", context),
+            optionalText(normalizedOptions.ifNoneMatch, "ifNoneMatch", context),
+          ].map((text) => {
+            const handle = this.facade.putOptionalText(text, context);
+            if (handle !== 0) {
+              handles.push(handle);
+            }
+            return handle;
+          });
+          this.facade.clearLastError();
+          return this.facade.expectHandle(
+            this.facade.bridge.opendal_mbt_wasm_operator_read_stream_start_v1(
+              this.handle,
+              pathHandle,
+              chunkSize,
+              range.kind,
+              range.offset,
+              range.length,
+              ...optional,
+            ),
+            context,
+            "could not open an OpenDAL read stream",
+          );
+        } finally {
+          for (const handle of handles) {
+            this.facade.bridge.opendal_mbt_wasm_buffer_release(handle);
+          }
+        }
+      },
+    );
+    if (!outcome.ok) {
+      return outcome;
+    }
+    if (this.handle === 0 || this.runtime.closed) {
+      this.facade.bridge.opendal_mbt_wasm_read_stream_release(outcome.value);
+      return failed(closedError(this.context("Read", path)));
+    }
+    return ok(new BrowserReadStream(this, outcome.value, path, chunkSize));
+  }
+
+  async openWriter(path, options = {}) {
+    const normalizedOptions = options ?? {};
+    const outcome = await this.runTask(
+      "Write",
+      path,
+      COMPLETION_OPEN_WRITER,
+      normalizedOptions,
+      (context, value) => {
+        const handles = [];
+        try {
+          const pathHandle = this.facade.putText(value, context);
+          handles.push(pathHandle);
+          const append = boolValue(normalizedOptions.append, false, "append", context);
+          const optional = [
+            optionalText(normalizedOptions.contentType, "contentType", context),
+            optionalText(
+              normalizedOptions.contentDisposition,
+              "contentDisposition",
+              context,
+            ),
+            optionalText(normalizedOptions.contentEncoding, "contentEncoding", context),
+            optionalText(normalizedOptions.cacheControl, "cacheControl", context),
+            optionalText(normalizedOptions.ifMatch, "ifMatch", context),
+            optionalText(normalizedOptions.ifNoneMatch, "ifNoneMatch", context),
+          ].map((text) => {
+            const handle = this.facade.putOptionalText(text, context);
+            if (handle !== 0) {
+              handles.push(handle);
+            }
+            return handle;
+          });
+          this.facade.clearLastError();
+          return this.facade.expectHandle(
+            this.facade.bridge.opendal_mbt_wasm_operator_writer_start_v1(
+              this.handle,
+              pathHandle,
+              append ? 1 : 0,
+              ...optional,
+            ),
+            context,
+            "could not open an OpenDAL writer",
+          );
+        } finally {
+          for (const handle of handles) {
+            this.facade.bridge.opendal_mbt_wasm_buffer_release(handle);
+          }
+        }
+      },
+    );
+    if (!outcome.ok) {
+      return outcome;
+    }
+    if (this.handle === 0 || this.runtime.closed) {
+      this.facade.bridge.opendal_mbt_wasm_writer_release(outcome.value);
+      return failed(closedError(this.context("Write", path)));
+    }
+    return ok(new BrowserWriter(this, outcome.value, path));
+  }
+
+  async openLister(path, options = {}) {
+    const normalizedOptions = options ?? {};
+    const outcome = await this.runTask(
+      "List",
+      path,
+      COMPLETION_OPEN_LISTER,
+      normalizedOptions,
+      (context, value) => {
+        const handles = [];
+        try {
+          const pathHandle = this.facade.putText(value, context);
+          handles.push(pathHandle);
+          const recursive = boolValue(
+            normalizedOptions.recursive,
+            false,
+            "recursive",
+            context,
+          );
+          const hasLimit =
+            normalizedOptions.limit !== undefined && normalizedOptions.limit !== null;
+          const limit = hasLimit
+            ? uint64Value(normalizedOptions.limit, "limit", context)
+            : 0n;
+          const startAfter = optionalText(
+            normalizedOptions.startAfter,
+            "startAfter",
+            context,
+          );
+          const startAfterHandle = this.facade.putOptionalText(startAfter, context);
+          if (startAfterHandle !== 0) {
+            handles.push(startAfterHandle);
+          }
+          this.facade.clearLastError();
+          return this.facade.expectHandle(
+            this.facade.bridge.opendal_mbt_wasm_operator_lister_start(
+              this.handle,
+              pathHandle,
+              recursive ? 1 : 0,
+              hasLimit ? 1 : 0,
+              limit,
+              startAfterHandle,
+            ),
+            context,
+            "could not open an OpenDAL lister",
+          );
+        } finally {
+          for (const handle of handles) {
+            this.facade.bridge.opendal_mbt_wasm_buffer_release(handle);
+          }
+        }
+      },
+    );
+    if (!outcome.ok) {
+      return outcome;
+    }
+    if (this.handle === 0 || this.runtime.closed) {
+      this.facade.bridge.opendal_mbt_wasm_lister_release(outcome.value);
+      return failed(closedError(this.context("List", path)));
+    }
+    return ok(new BrowserLister(this, outcome.value, path));
+  }
+}
+
+class BrowserChildResource {
+  constructor(operator, handle, path, releaseExport) {
+    this.operator = operator;
+    this.facade = operator.facade;
+    this.handle = handle;
+    this.path = path;
+    this.releaseExport = releaseExport;
+    this.state = "Open";
+    this.active = undefined;
+    operator.children.add(this);
+  }
+
+  context(operation) {
+    return { operation, path: this.path, destinationPath: undefined };
+  }
+
+  release(context) {
+    if (this.handle === 0) {
+      this.operator.children.delete(this);
+      return ok(undefined);
+    }
+    const handle = this.handle;
+    this.handle = 0;
+    this.operator.children.delete(this);
+    try {
+      this.facade.clearLastError();
+      this.facade.expectStatus(
+        this.facade.bridge[this.releaseExport](handle),
+        context,
+        "could not release an OpenDAL streaming resource",
+      );
+      return ok(undefined);
+    } catch (error) {
+      if (error instanceof OutcomeFailure) {
+        return failed(error.error);
+      }
+      throw error;
+    }
+  }
+
+  finishState(state, context) {
+    this.state = state;
+    return this.release(context);
+  }
+
+  closeResource(operation) {
+    if (this.state === "Closed") {
+      return ok(undefined);
+    }
+    const context = this.context(operation);
+    this.state = "Closed";
+    this.active?.cancel?.();
+    return this.release(context);
+  }
+
+  async runTask(operation, expectedKind, options, start, successState) {
+    const context = this.context(operation);
+    if (
+      this.state !== "Open" ||
+      this.handle === 0 ||
+      this.operator.handle === 0 ||
+      this.operator.runtime.closed
+    ) {
+      return failed(closedError(context));
+    }
+    if (this.active !== undefined) {
+      return failed(busyError(context));
+    }
+
+    let signal;
+    try {
+      signal = signalValue(options?.signal, context);
+    } catch (error) {
+      if (error instanceof OutcomeFailure) {
+        return failed(error.error);
+      }
+      throw error;
+    }
+    if (signal?.aborted) {
+      this.finishState("Failed", context);
+      return failed(cancelledError(context));
+    }
+
+    const control = {};
+    this.active = control;
+    let taskStarted = false;
+    try {
+      const task = start(context);
+      taskStarted = true;
+      const outcome = await this.facade.settleTask(
+        task,
+        expectedKind,
+        context,
+        signal,
+        control,
+      );
+      if (!outcome.ok) {
+        if (this.state === "Open") {
+          this.finishState("Failed", context);
+        }
+        return outcome;
+      }
+      if (
+        this.state !== "Open" ||
+        this.handle === 0 ||
+        this.operator.handle === 0 ||
+        this.operator.runtime.closed
+      ) {
+        return failed(closedError(context));
+      }
+      if (successState !== undefined) {
+        const released = this.finishState(successState, context);
+        return released.ok ? outcome : released;
+      }
+      return outcome;
+    } catch (error) {
+      if (error instanceof OutcomeFailure) {
+        if (taskStarted || error.error.kind === "ResourceClosed") {
+          this.finishState("Failed", context);
+        }
+        return failed(error.error);
+      }
+      if (taskStarted && this.state === "Open") {
+        this.finishState("Failed", context);
+      }
+      throw error;
+    } finally {
+      if (this.active === control) {
+        this.active = undefined;
+      }
+    }
+  }
+}
+
+export class BrowserReadStream extends BrowserChildResource {
+  constructor(operator, handle, path, chunkSize) {
+    super(
+      operator,
+      handle,
+      path,
+      "opendal_mbt_wasm_read_stream_release",
+    );
+    this.chunkSize = chunkSize;
+  }
+
+  async next(options = {}) {
+    if (this.state === "End") {
+      return ok(undefined);
+    }
+    const outcome = await this.runTask(
+      "ReadStreamNext",
+      COMPLETION_READ_STREAM_NEXT,
+      options ?? {},
+      (context) => {
+        this.facade.clearLastError();
+        return this.facade.expectHandle(
+          this.facade.bridge.opendal_mbt_wasm_read_stream_next_start(this.handle),
+          context,
+          "could not read the next OpenDAL stream chunk",
+        );
+      },
+    );
+    if (!outcome.ok) {
+      return outcome;
+    }
+    if (outcome.value === undefined) {
+      const released = this.finishState("End", this.context("ReadStreamNext"));
+      return released.ok ? outcome : released;
+    }
+    if (!(outcome.value instanceof Uint8Array) || outcome.value.length > this.chunkSize) {
+      this.finishState("Failed", this.context("ReadStreamNext"));
+      contractFailure("bridge returned an out-of-bounds read-stream chunk");
+    }
+    return outcome;
+  }
+
+  close() {
+    return this.closeResource("ReadStreamClose");
+  }
+}
+
+export class BrowserWriter extends BrowserChildResource {
+  constructor(operator, handle, path) {
+    super(operator, handle, path, "opendal_mbt_wasm_writer_release");
+  }
+
+  write(data, options = {}) {
+    return this.runTask(
+      "WriterWrite",
+      COMPLETION_WRITER_WRITE,
+      options ?? {},
+      (context) => {
+        const bytes = byteView(data, context);
+        if (bytes.byteLength > MAX_TRANSFER_CHUNK) {
+          throw new OutcomeFailure(
+            localError(
+              "BufferTooLarge",
+              0x1003,
+              `writer chunk exceeds the ${MAX_TRANSFER_CHUNK}-byte scalar limit`,
+              context,
+            ),
+          );
+        }
+        const dataHandle = this.facade.putBytes(bytes, context);
+        try {
+          this.facade.clearLastError();
+          return this.facade.expectHandle(
+            this.facade.bridge.opendal_mbt_wasm_writer_write_start(
+              this.handle,
+              dataHandle,
+            ),
+            context,
+            "could not write an OpenDAL writer chunk",
+          );
+        } finally {
+          this.facade.bridge.opendal_mbt_wasm_buffer_release(dataHandle);
+        }
+      },
+    );
+  }
+
+  finish(options = {}) {
+    return this.runTask(
+      "WriterFinish",
+      COMPLETION_WRITER_FINISH,
+      options ?? {},
+      (context) => {
+        this.facade.clearLastError();
+        return this.facade.expectHandle(
+          this.facade.bridge.opendal_mbt_wasm_writer_finish_start(this.handle),
+          context,
+          "could not finish an OpenDAL writer",
+        );
+      },
+      "Finished",
+    );
+  }
+
+  abort(options = {}) {
+    if (this.state === "Aborted") {
+      return Promise.resolve(ok(undefined));
+    }
+    return this.runTask(
+      "WriterAbort",
+      COMPLETION_WRITER_ABORT,
+      options ?? {},
+      (context) => {
+        this.facade.clearLastError();
+        return this.facade.expectHandle(
+          this.facade.bridge.opendal_mbt_wasm_writer_abort_start(this.handle),
+          context,
+          "could not abort an OpenDAL writer",
+        );
+      },
+      "Aborted",
+    );
+  }
+
+  close() {
+    return this.closeResource("WriterClose");
+  }
+}
+
+export class BrowserLister extends BrowserChildResource {
+  constructor(operator, handle, path) {
+    super(operator, handle, path, "opendal_mbt_wasm_lister_release");
+  }
+
+  async next(options = {}) {
+    if (this.state === "End") {
+      return ok(undefined);
+    }
+    const outcome = await this.runTask(
+      "ListerNext",
+      COMPLETION_LISTER_NEXT,
+      options ?? {},
+      (context) => {
+        this.facade.clearLastError();
+        return this.facade.expectHandle(
+          this.facade.bridge.opendal_mbt_wasm_lister_next_start(this.handle),
+          context,
+          "could not read the next OpenDAL lister entry",
+        );
+      },
+    );
+    if (!outcome.ok) {
+      return outcome;
+    }
+    if (outcome.value === undefined) {
+      const released = this.finishState("End", this.context("ListerNext"));
+      return released.ok ? outcome : released;
+    }
+    return outcome;
+  }
+
+  close() {
+    return this.closeResource("ListerClose");
   }
 }
 

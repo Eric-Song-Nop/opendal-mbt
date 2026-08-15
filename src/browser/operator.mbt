@@ -98,7 +98,8 @@ pub async fn AsyncOperator::create_dir(
 ///|
 /// Write an entire byte view and return the resulting owned metadata.
 ///
-/// The selected view is copied into the bridge before asynchronous work starts.
+/// The selected view is copied into the bridge before asynchronous work starts
+/// and must not exceed the portable 64 MiB whole-object limit.
 pub async fn AsyncOperator::write(
   self : AsyncOperator,
   path : StringView,
@@ -113,6 +114,13 @@ pub async fn AsyncOperator::write(
 ) -> Metadata {
   let path = path.to_owned()
   let context = error_context(Write, path~)
+  if data.length() > 64 * 1024 * 1024 {
+    raise local_error(
+      BufferTooLarge,
+      "portable whole-object write must not exceed 64 MiB",
+      context,
+    )
+  }
   self.ensure_open(context)
   let (has_content_type, content_type) = normalize_optional_text(content_type)
   let (has_content_disposition, content_disposition) = normalize_optional_text(
@@ -160,6 +168,8 @@ pub async fn AsyncOperator::write(
 ///
 /// Cancellation activates the JavaScript `AbortSignal`. Storage work already
 /// dispatched by a backend may still complete, but its late result is discarded.
+/// The portable whole-object result limit is 64 MiB; use a read stream for
+/// larger values.
 pub async fn AsyncOperator::read(
   self : AsyncOperator,
   path : StringView,
@@ -264,6 +274,43 @@ pub async fn AsyncOperator::delete(
     signal => {
       self.native.js.delete(path, has_version, version, recursive, signal)
     },
+    context,
+  )
+}
+
+///|
+/// Copy one object with the backend's native copy operation and return the
+/// destination metadata. This operation is never emulated with read/write.
+pub async fn AsyncOperator::copy(
+  self : AsyncOperator,
+  source : StringView,
+  destination : StringView,
+) -> Metadata {
+  let source = source.to_owned()
+  let destination = destination.to_owned()
+  let context = error_context(Copy, path=source, destination_path=destination)
+  self.ensure_open(context)
+  let metadata = await_outcome(
+    signal => self.native.js.copy(source, destination, signal),
+    outcome => outcome.metadata_value(),
+    context,
+  )
+  metadata_from_js(metadata)
+}
+
+///|
+/// Move one object with the backend's native rename operation.
+pub async fn AsyncOperator::rename(
+  self : AsyncOperator,
+  source : StringView,
+  destination : StringView,
+) -> Unit {
+  let source = source.to_owned()
+  let destination = destination.to_owned()
+  let context = error_context(Rename, path=source, destination_path=destination)
+  self.ensure_open(context)
+  await_unit_outcome(
+    signal => self.native.js.rename(source, destination, signal),
     context,
   )
 }

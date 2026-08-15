@@ -3,7 +3,7 @@
 Start with an in-memory operator, then switch the constructor while keeping the
 same storage methods. The published `0.1.0` package is the local `memory`/`fs`
 release. This checkout is the pinned but unpublished `0.2.0` release candidate,
-containing typed S3 and the first async facade.
+containing typed S3 and a portable native/browser async facade.
 
 ## 1. Add a published package
 
@@ -19,21 +19,23 @@ Until then, the registry baseline is the local release:
 moon add Eric-Song-Nop/opendal@0.1.0
 ```
 
-The package is native-only, so the consuming package selects the native target
-and imports OpenDAL:
+The same root package supports native and JavaScript. Native is the default;
+browser commands select JavaScript explicitly with `--target js`:
 
 ```moonbit nocheck
-supported_targets = "native"
+supported_targets = "+native+js"
 
 import {
   "Eric-Song-Nop/opendal",
 }
 ```
 
-The first build needs network access to download a pinned native artifact.
+A first native build needs network access to download a pinned native artifact.
 After verification, the artifact remains in Moon's shared cache and can be
-reused offline. The published `0.1.0` matrix is Apple silicon macOS and x86-64
-glibc Linux; it does not contain S3 or the Phase 5 symbols.
+reused offline. An explicit JavaScript build uses the embedded browser runtime
+and skips native artifact resolution. The published `0.1.0` matrix is Apple
+silicon macOS and x86-64 glibc Linux; it does not contain S3, JavaScript, or the
+Phase 5 symbols.
 
 To exercise the pinned `0.2.0` release candidate before publication, clone this
 repository and run:
@@ -53,6 +55,7 @@ service needs no credentials and is ideal for tests and first experiments.
 
 ```mbt check
 ///|
+#cfg(target="native")
 test "getting started: write, stat, read, and delete" {
   let operator = @opendal.Operator::new("memory")
 
@@ -104,6 +107,7 @@ Storage operations stay the same; only operator construction changes:
 
 ```mbt check
 ///|
+#cfg(target="native")
 test "getting started: filesystem round trip" {
   guard @env.current_dir() is Some(cwd) else {
     fail("current working directory is unavailable")
@@ -121,15 +125,29 @@ Paths passed to operations are relative to the configured filesystem `root`.
 See [Connecting](connecting.mbt.md) before accepting a root from untrusted
 input.
 
-## 5. Choose blocking or async I/O
+## 5. Choose portable async or native blocking I/O
 
-The existing `Operator` methods remain synchronous. In the `v0.2.0`
-release-candidate facade, `as_async()` creates a lightweight view over the same
-configured operator. Async methods are called normally from an `async fn` or
-`async test`—MoonBit does not use an `await` keyword.
+`AsyncOperator::new` is the common native/browser entry point. Async methods
+are called normally from an `async fn` or `async test`—MoonBit does not use an
+`await` keyword:
 
 ```mbt check
 ///|
+async test "getting started: portable async round trip" {
+  let operator = @opendal.AsyncOperator::new("memory")
+  defer operator.close()
+  operator.write("async/portable.bin", b"portable") |> ignore
+  assert_eq(operator.read("async/portable.bin"), b"portable")
+}
+```
+
+Native callers can still construct or layer a synchronous `Operator` first and
+then call `as_async()` to create a lightweight view over that same configured
+operator:
+
+```mbt check
+///|
+#cfg(target="native")
 async test "getting started: bounded async stream" {
   let operator = @opendal.Operator::new("memory")
   operator.write("async/data.bin", b"0123456789") |> ignore
@@ -152,10 +170,13 @@ async test "getting started: bounded async stream" {
 }
 ```
 
-The first async slice covers whole/ranged reads, bounded read streams, and
-chunked writers with explicit finish/abort. It does not mirror every blocking
-method yet. Cancellation of an in-flight stateful stream or writer operation
-makes that resource terminal when progress or commit status may be unknown.
+The portable async slice covers whole writes and whole/ranged reads, read
+streams and writer chunks bounded to 256 KiB, and explicit finish/abort. It
+does not mirror every native blocking method yet. Cancellation of an in-flight
+stateful stream or writer operation makes that resource terminal when progress
+or commit status may be unknown.
 
 Continue with [Connecting](connecting.mbt.md) for profile and typed S3 setup,
-then use the recipes in [Common tasks](tasks.mbt.md).
+read [Using OpenDAL in a browser](browser-guide.mbt.md) for OPFS, browser S3,
+CORS/CSP, JS-only operations, and deployment, then use the recipes in
+[Common tasks](tasks.mbt.md).

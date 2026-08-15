@@ -1,0 +1,13 @@
+supported_targets = "js"
+
+import {
+  "Eric-Song-Nop/opendal",
+  "moonbitlang/async",
+  "moonbitlang/async/js_async",
+}
+
+pkgtype(kind: "executable")
+
+options(
+  link: { "js": { "format": "iife" } },
+)

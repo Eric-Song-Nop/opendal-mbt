@@ -33,13 +33,28 @@ BROWSER_RUST_TARGET := wasm32-unknown-unknown
 BROWSER_BRIDGE_STEM := opendal_mbt_browser_bridge
 BROWSER_BRIDGE_RAW := $(CURDIR)/target/$(BROWSER_RUST_TARGET)/$(RUST_PROFILE)/$(BROWSER_BRIDGE_STEM).wasm
 BROWSER_BRIDGE_DIR := $(CURDIR)/target/browser-js/$(RUST_PROFILE)
+BROWSER_EMBED_RAW := $(CURDIR)/target/$(BROWSER_RUST_TARGET)/release/$(BROWSER_BRIDGE_STEM).wasm
+BROWSER_EMBED_DIR := $(CURDIR)/target/browser-embed/release
+BROWSER_EMBED_GLUE := $(BROWSER_EMBED_DIR)/$(BROWSER_BRIDGE_STEM).js
+BROWSER_EMBED_WASM := $(BROWSER_EMBED_DIR)/$(BROWSER_BRIDGE_STEM)_bg.wasm
+BROWSER_EMBED_OUTPUT := $(CURDIR)/src/browser/embedded_runtime.generated.mbt
+BROWSER_RUNTIME := $(CURDIR)/wasm/browser-runtime/index.mjs
+BROWSER_EMBED_SOURCES := Cargo.lock Cargo.toml Makefile rust-toolchain.toml \
+	scripts/generate-browser-embed.mjs wasm/browser-bridge/Cargo.toml
+BROWSER_EMBED_SOURCE_DIRS := wasm/browser-bridge/src
+BROWSER_EMBED_SOURCE_ARGS := \
+	$(foreach source,$(BROWSER_EMBED_SOURCES),--source "$(source)") \
+	$(foreach directory,$(BROWSER_EMBED_SOURCE_DIRS),--source-dir "$(directory)")
 
 
 .PHONY: native rust-test moon-deps moon-check moon-test coverage abi-smoke c-example \
 	api-contract interface-contract package-contract packaged-consumer check \
 	test-profile native-artifact-test version-contract asan browser-bridge \
 	browser-rust-check browser-rust-test browser-js-canary \
-	moon-browser-check moon-browser-test
+	moon-browser-check moon-browser-test \
+	browser-embed-bridge browser-embed-generate browser-embed-check \
+	browser-demo packaged-browser portable-async-example-browser \
+	portable-async-example-native native-async-nonblocking docs-check
 
 native:
 	cargo build --package opendal-mbt-native --locked $(CARGO_SERVICE_FLAGS) \
@@ -78,6 +93,53 @@ browser-rust-test:
 browser-js-canary: browser-bridge
 	node wasm/browser-canary/run.mjs "$(BROWSER_BRIDGE_DIR)"
 
+browser-embed-bridge:
+	@command -v wasm-bindgen >/dev/null 2>&1 || { \
+		echo "wasm-bindgen $(WASM_BINDGEN_VERSION) is required" >&2; exit 1; \
+	}
+	@test "$$(wasm-bindgen --version)" = "wasm-bindgen $(WASM_BINDGEN_VERSION)" || { \
+		echo "expected wasm-bindgen $(WASM_BINDGEN_VERSION), got $$(wasm-bindgen --version)" >&2; \
+		exit 1; \
+	}
+	mkdir -p "$(BROWSER_EMBED_DIR)"
+	# Canonicalize panic paths and function ordering across maintainer hosts.
+	@rust_sysroot="$$(rustc --print sysroot)"; \
+		cargo_home="$${CARGO_HOME:-$$HOME/.cargo}"; \
+		RUSTFLAGS="--remap-path-prefix=$(CURDIR)=/workspace \
+			--remap-path-prefix=$$cargo_home=/cargo \
+			--remap-path-prefix=$$rust_sysroot=/rust-toolchain" \
+		CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
+		CARGO_PROFILE_RELEASE_PANIC=abort cargo build --locked --release \
+			--package opendal-mbt-browser-bridge \
+			--target "$(BROWSER_RUST_TARGET)"
+	wasm-bindgen --target no-modules --no-typescript \
+		--remove-name-section --remove-producers-section \
+		--out-dir "$(BROWSER_EMBED_DIR)" \
+		--out-name "$(BROWSER_BRIDGE_STEM)" "$(BROWSER_EMBED_RAW)"
+
+browser-embed-generate: browser-embed-bridge
+	node scripts/generate-browser-embed.mjs \
+		--glue "$(BROWSER_EMBED_GLUE)" \
+		--wasm "$(BROWSER_EMBED_WASM)" \
+		--runtime "$(BROWSER_RUNTIME)" \
+		--output "$(BROWSER_EMBED_OUTPUT)" \
+		$(BROWSER_EMBED_SOURCE_ARGS) \
+		--wasm-bindgen-version "$(WASM_BINDGEN_VERSION)"
+
+# The check validates the committed payload, source fingerprint, current ABI,
+# glue, and runtime. Rust/LLVM and zlib may emit equivalent bytes differently
+# across maintainer hosts; CI executes both bridge builds in real Chrome.
+browser-embed-check: browser-embed-bridge
+	node --check scripts/generate-browser-embed.mjs
+	node scripts/generate-browser-embed.mjs \
+		--glue "$(BROWSER_EMBED_GLUE)" \
+		--wasm "$(BROWSER_EMBED_WASM)" \
+		--runtime "$(BROWSER_RUNTIME)" \
+		--output "$(BROWSER_EMBED_OUTPUT)" \
+		$(BROWSER_EMBED_SOURCE_ARGS) \
+		--wasm-bindgen-version "$(WASM_BINDGEN_VERSION)" \
+		--check
+
 moon-deps:
 	moon update
 	# Dependency resolution is target-independent. Using wasm here avoids
@@ -88,10 +150,33 @@ moon-check:
 	moon check --target native --frozen --warn-list '$(MOON_WARN_LIST)' --deny-warn
 
 moon-browser-check:
-	moon check $(MOON_BROWSER_FLAGS) src/browser
+	moon check $(MOON_BROWSER_FLAGS) src src/browser src/browser_demo
 
 moon-browser-test:
-	moon test $(MOON_BROWSER_FLAGS) src/browser
+	moon test $(MOON_BROWSER_FLAGS) src src/browser
+
+browser-demo: moon-deps
+	moon run --target js --release src/browser_demo
+
+portable-async-example-browser:
+	moon -C examples/browser run --target js --release \
+		--warn-list '$(MOON_WARN_LIST)' --deny-warn .
+
+portable-async-example-native: native
+	MOONBIT_ASYNC_CHECK_FD_LEAK=1 \
+		OPENDAL_MBT_NATIVE_LIB="$(MOON_NATIVE_LIB)" \
+		OPENDAL_MBT_SOURCE_PROFILE="$(NATIVE_SERVICE_PROFILE)" \
+		moon -C examples/browser run --target native $(MOON_PROFILE_FLAG) \
+			--warn-list '$(MOON_WARN_LIST)' --deny-warn .
+
+native-async-nonblocking: native
+	MOONBIT_ASYNC_CHECK_FD_LEAK=1 \
+		OPENDAL_MBT_NATIVE_LIB="$(MOON_NATIVE_LIB)" \
+		OPENDAL_MBT_SOURCE_PROFILE="$(NATIVE_SERVICE_PROFILE)" \
+		python3 examples/browser/verify_native_nonblocking.py
+
+packaged-browser: moon-deps
+	sh scripts/check-packaged-browser.sh
 
 moon-test: native
 	OPENDAL_MBT_NATIVE_LIB="$(MOON_NATIVE_LIB)" \
@@ -131,6 +216,9 @@ interface-contract:
 package-contract:
 	sh scripts/check-package.sh
 
+docs-check:
+	node scripts/check-docs.mjs
+
 packaged-consumer: moon-deps
 	test -n "$(NATIVE_ARTIFACT)"
 	@if [ -n "$(NATIVE_ARTIFACT_TABLE)" ]; then \
@@ -152,7 +240,7 @@ native-artifact-test:
 	node --check scripts/prepare-test-native-cache.js
 	node --test scripts/test-native-resolver.js
 
-check: api-contract interface-contract package-contract native-artifact-test \
+check: api-contract interface-contract package-contract docs-check native-artifact-test \
 	version-contract
 	cargo fmt --all -- --check
 	cargo clippy --package opendal-mbt-native --all-targets --all-features \
@@ -160,7 +248,7 @@ check: api-contract interface-contract package-contract native-artifact-test \
 	$(MAKE) moon-check
 	$(MAKE) abi-smoke
 
-test-profile: rust-test moon-test
+test-profile: rust-test moon-test native-async-nonblocking
 
 asan:
 	$(MAKE) native RUST_PROFILE=debug

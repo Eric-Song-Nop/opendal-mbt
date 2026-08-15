@@ -36,6 +36,13 @@ pub fn Operator::new(
 }
 
 ///|
+/// Release this native operator early. Closing more than once is harmless.
+/// Operations attempted after close fail through the native binding boundary.
+pub fn Operator::close(self : Operator) -> Unit {
+  native_operator_close(self)
+}
+
+///|
 /// Verify that the operator can perform OpenDAL's check operation.
 pub fn Operator::check(self : Operator) -> Unit raise OpenDalError {
   let result = native_operator_check(self)

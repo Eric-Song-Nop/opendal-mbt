@@ -1,8 +1,8 @@
 {
   "schema": 1,
   "bindingVersion": "0.2.0",
-  "abiVersion": 65542,
-  "requiredFeatureFlags": 2044,
+  "abiVersion": 65543,
+  "requiredFeatureFlags": 65532,
   "wasmBindgenVersion": "0.2.127",
   "services": [
     "memory",
@@ -22,6 +22,7 @@
     "metadata": "ODM1"
   },
   "localErrorKinds": {
-    "cancelled": 4101
+    "cancelled": 4101,
+    "resourceBusy": 4102
   }
 }
