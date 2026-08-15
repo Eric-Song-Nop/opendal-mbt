@@ -9,8 +9,8 @@
         "patch": 0
       },
       "archive_name": "opendal-mbt-0.2.0-r2-standard-aarch64-apple-darwin.tar.gz",
-      "archive_sha256": "543a65f2b16261dd6f92556dbea091d65bef6dbff2d4c7b6fd40bed14ac9aa90",
-      "archive_size": 15518953,
+      "archive_sha256": "fc145a28cd3b75f7fe3b3d887fdc95c8b921f6fc7f62060f562e2414463d97b2",
+      "archive_size": 15518857,
       "artifact": "opendal-mbt-0.2.0-r2-standard-aarch64-apple-darwin",
       "artifact_revision": "r2",
       "binding_version": "0.2.0",
@@ -41,8 +41,8 @@
         "s3"
       ],
       "static_library": "lib/libopendal_mbt_native.a",
-      "static_library_sha256": "87ea70b3adaf0bce4a8a65c96db94a98cee4c12ac436a379bbfee643290d77bf",
-      "static_library_size": 46094696,
+      "static_library_sha256": "bf9b2bc3b5630aa6f30034494e509657e4d69982b0fa1a44105b87320252e85a",
+      "static_library_size": 46114448,
       "system_link_flags": [
         "-framework",
         "Security",
@@ -62,8 +62,8 @@
         "patch": 0
       },
       "archive_name": "opendal-mbt-0.2.0-r2-standard-aarch64-unknown-linux-gnu.tar.gz",
-      "archive_sha256": "0adc4fbc76eb0cbcb6628d68f802563f3dfc1ac2aeaef6acfd22c74fbf78272c",
-      "archive_size": 17376707,
+      "archive_sha256": "afed28ec527d38da2ed90f88a4cbe552c4d68edd0d51ad31966d5ab9ca8cc8df",
+      "archive_size": 17362670,
       "artifact": "opendal-mbt-0.2.0-r2-standard-aarch64-unknown-linux-gnu",
       "artifact_revision": "r2",
       "binding_version": "0.2.0",
@@ -94,8 +94,8 @@
         "s3"
       ],
       "static_library": "lib/libopendal_mbt_native.a",
-      "static_library_sha256": "b5391b508fb47feb5f491c0a45d4a360b6d4dc1f89d65ccfccce286e0659184b",
-      "static_library_size": 66790238,
+      "static_library_sha256": "cc9ba1da70d69f9635d41ab314a3cd1a0c8145d34b522073cac0b1e0b787fad1",
+      "static_library_size": 66794136,
       "system_link_flags": [
         "-lgcc_s",
         "-lutil",
@@ -114,8 +114,8 @@
         "patch": 0
       },
       "archive_name": "opendal-mbt-0.2.0-r2-standard-x86_64-unknown-linux-gnu.tar.gz",
-      "archive_sha256": "a5885fdf235198b66e05c566e28baf32ca386e1f29da8ed188f5d2d2f298d432",
-      "archive_size": 17346907,
+      "archive_sha256": "ecf477321e1ff20fe2d0a5505be33d5f1802aa88b9187ec97de5db9cabfb6f27",
+      "archive_size": 17343956,
       "artifact": "opendal-mbt-0.2.0-r2-standard-x86_64-unknown-linux-gnu",
       "artifact_revision": "r2",
       "binding_version": "0.2.0",
@@ -146,8 +146,8 @@
         "s3"
       ],
       "static_library": "lib/libopendal_mbt_native.a",
-      "static_library_sha256": "d7d43891ccfdb10cdd26145f288eb798c53e6e922fba31897f0ab98bcee4046b",
-      "static_library_size": 66181910,
+      "static_library_sha256": "ba124acb01b4a897ffbf9c4fd7e6de768e0d30f89526d917e44fdeacf2b88094",
+      "static_library_size": 66154390,
       "system_link_flags": [
         "-lgcc_s",
         "-lutil",
