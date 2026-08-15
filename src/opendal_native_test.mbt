@@ -18,6 +18,33 @@ test "native memory: binary whole-object roundtrip" {
 }
 
 ///|
+test "native memory: operator close is idempotent and preserves info" {
+  let operator = @opendal.Operator::new("memory")
+  let before = operator.info()
+  operator.close()
+  operator.close()
+  let after = operator.info()
+  assert_eq(after.scheme, before.scheme)
+  assert_eq(after.root, before.root)
+  assert_eq(after.name, before.name)
+  assert_eq(after.capability.can_read(), before.capability.can_read())
+  assert_eq(after.capability.can_write(), before.capability.can_write())
+  assert_eq(
+    after.capability.delete_max_size(),
+    before.capability.delete_max_size(),
+  )
+  try operator.read("closed.bin") catch {
+    OpenDalError(info) => {
+      assert_true(info.kind is ResourceClosed)
+      assert_true(info.operation is Read)
+      assert_eq(info.path, Some("closed.bin"))
+    }
+  } noraise {
+    _ => fail("expected read after operator close to raise")
+  }
+}
+
+///|
 test "native memory: whole-object and reusable readers support byte ranges" {
   let operator = @opendal.Operator::new("memory")
   operator.write("reader/value.bin", b"0123456789") |> ignore

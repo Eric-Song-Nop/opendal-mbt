@@ -18,6 +18,20 @@ There is no public runtime profile selector. A package release selects exactly
 one compatible artifact table. Passing `"s3"` to the published `0.1.0` local
 archive cannot download or enable S3 dynamically.
 
+The target and service matrices are separate:
+
+| Service | Native | Browser JS | Primary configuration |
+| --- | --- | --- | --- |
+| `memory` | Yes | Yes | None; ephemeral per operator/runtime |
+| `fs` | Yes | No | Host-directory `root` |
+| `opfs` | No | Yes | Origin-private `root`; HTTPS or localhost required |
+| `s3` | Yes | Yes | Native typed API; browser copied string map plus endpoint CORS |
+
+Both builds import `Eric-Song-Nop/opendal`. Select native or JavaScript with
+`--target native` or `--target js`; the target determines the public methods
+at compile time. See [Using OpenDAL in a browser](browser-guide.mbt.md) for the
+portable/JS-extension boundary and complete OPFS and browser S3 guidance.
+
 The generic constructor remains useful for compiled services and advanced
 string options:
 
@@ -34,6 +48,7 @@ are rejected before crossing the native boundary.
 
 ```mbt check
 ///|
+#cfg(target="native")
 test "connecting: memory operator" {
   let operator = @opendal.Operator::new("memory")
   operator.check()
@@ -55,6 +70,7 @@ The `root` is the boundary beneath which OpenDAL resolves operation paths:
 
 ```mbt check
 ///|
+#cfg(target="native")
 test "connecting: filesystem operator" {
   guard @env.current_dir() is Some(cwd) else {
     fail("current working directory is unavailable")
@@ -90,6 +106,7 @@ S3-compatible endpoint but performs no network request:
 
 ```mbt check
 ///|
+#cfg(target="native")
 test "connecting: typed S3 operator" {
   let auth = @opendal.S3Auth::static_credentials(
     access_key_id="example-access-key",
@@ -114,6 +131,7 @@ policies are explicit and opaque—none derives `Debug` or `Show`:
 
 ```mbt check
 ///|
+#cfg(target="native")
 test "connecting: typed S3 authentication policies" {
   let default_chain = @opendal.S3Auth::default_chain(disable_ec2_metadata=true)
   let session = @opendal.S3Auth::static_credentials(
@@ -125,6 +143,9 @@ test "connecting: typed S3 authentication policies" {
     access_key_id="source-access-key",
     secret_access_key="source-secret-key",
   )
+  let inherited_source = @opendal.S3CredentialSource::default_chain(
+    disable_ec2_metadata=true,
+  )
   let assumed = @opendal.S3Auth::assume_role(
     role_arn="arn:aws:iam::123456789012:role/example",
     source~,
@@ -135,6 +156,7 @@ test "connecting: typed S3 authentication policies" {
 
   ignore(default_chain)
   ignore(session)
+  ignore(inherited_source)
   ignore(assumed)
   ignore(unsigned)
 }
@@ -171,6 +193,7 @@ that vary by backend or configuration:
 
 ```mbt check
 ///|
+#cfg(target="native")
 test "connecting: inspect capabilities" {
   let operator = @opendal.Operator::new("memory")
   let capability = operator.info().capability
@@ -186,6 +209,36 @@ test "connecting: inspect capabilities" {
 ABI feature presence and backend capability are distinct. For example, the
 standard ABI can expose `open_copier` while memory correctly raises
 `Unsupported` for that operation.
+
+## Release a native operator early
+
+Native operators are garbage-collected, but long-lived applications can
+release a storage handle deterministically. `Operator::close` is synchronous
+and idempotent; its immutable `info` snapshot remains readable while later
+storage operations raise `ResourceClosed`:
+
+```mbt check
+///|
+#cfg(target="native")
+test "connecting: close an operator explicitly" {
+  let operator = @opendal.Operator::new("memory")
+  let scheme = operator.info().scheme
+  operator.close()
+  operator.close()
+  assert_eq(operator.info().scheme, scheme)
+
+  try operator.read("after-close.bin") catch {
+    error =>
+      match @opendal.OpenDalError::from_error(error) {
+        Some(storage_error) =>
+          assert_true(storage_error.kind() is ResourceClosed)
+        None => fail("expected an OpenDAL error")
+      }
+  } noraise {
+    _ => fail("expected a closed operator to reject I/O")
+  }
+}
+```
 
 ## Host and service limits
 

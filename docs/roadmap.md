@@ -1,9 +1,26 @@
 # OpenDAL MoonBit Binding Roadmap
 
-> **Before starting implementation:** Use the Skill tool to load the
-> `moonbit-c-binding` skill, which provides comprehensive guidance on FFI
-> declarations, ownership annotations, C stubs, and AddressSanitizer
-> validation.
+## Current source status
+
+The current tree is a pinned but unpublished `v0.2.0` candidate. In addition to
+the complete native Phase 5 stack, it contains a complete Browser JS delivery
+stack:
+
+| Browser area | Current state |
+| --- | --- |
+| Root-package target selection | Native default plus explicit `--target js`; no promise for other MoonBit Wasm targets |
+| Portable async API | Same constructor, whole read/write, bounded stream, Writer, error, and close shape on native and JavaScript |
+| Browser runtime | Rust OpenDAL Wasm ABI 1.7, Promise/`AbortSignal` facade, structured errors, bounded resources, `memory`/`opfs`/`s3` |
+| Browser extensions | Async stat/exists/create/delete/list/lister/copy/rename and explicit `Runtime`/`BrowserAssets` |
+| Distribution | Version-matched bridge, wasm-bindgen glue, and Promise runtime embedded in the Moon package |
+| Acceptance | Moon JS checks/tests, Rust bridge tests, real Chrome canary/demo, embedded-snapshot check, and clean packaged-browser consumer |
+
+The embedded Rust WebAssembly bridge is an implementation of the JavaScript
+target, not support for MoonBit's `wasm` or `wasm-gc` backends. Native async
+operations run real OpenDAL futures on Rust Tokio tasks and wake the suspended
+MoonBit scheduler through a nonblocking completion pipe; they do not wrap the
+blocking Operator. JavaScript operations use Promises and cancellation through
+`AbortSignal`.
 
 ## Direction
 
@@ -19,22 +36,23 @@ MoonBit public contract and acceptance examples
   -> native debug/release tests and sanitizers
 ```
 
-The intended architecture is:
+The implemented target-specific architecture is:
 
 ```text
-safe MoonBit API
-  -> private native FFI
-  -> thin MoonBit runtime C stub
-  -> project-owned, versioned Rust C ABI
-  -> pinned OpenDAL Rust crate
+portable MoonBit async API
+  +-> native: Tokio task -> nonblocking completion pipe -> native ABI 1.7
+  +-> JS: Promise/AbortSignal -> scalar browser Wasm ABI 1.7
+
+native blocking API -> private FFI -> project-owned C ABI
+browser JS extensions -> embedded Rust OpenDAL Wasm runtime
 ```
 
 The upstream experimental C binding may be used as a behavioral reference or
 test oracle, but is not the public or long-term ABI of this project.
 
-## Baseline decisions
+## Historical baseline decisions
 
-- Start with a synchronous, native-only binding.
+- Start the first released baseline as a synchronous, native-only binding.
 - Pin the OpenDAL crate exactly and commit `Cargo.lock`.
 - Start with the `memory` and `fs` services.
 - Keep all raw FFI declarations private.
@@ -58,8 +76,10 @@ test oracle, but is not the public or long-term ABI of this project.
 | Typed S3 and the `standard` profile | Pinned in `v0.2.0` candidate; publication pending | Phase 5B, ABI `1.2` |
 | Presign and explicit operational layers | Pinned in `v0.2.0` candidate; publication pending | Phase 5C, ABI `1.3`-`1.5` |
 | Batch delete and managed Copier | Pinned in `v0.2.0` candidate; publication pending | Phase 5D, ABI `1.6` |
-| Initial MoonBit async facade | Pinned in `v0.2.0` candidate; publication pending | Phase 5E, ABI `1.7` |
+| Portable MoonBit async facade | Pinned in `v0.2.0` candidate; publication pending | Phase 5E, native ABI `1.7` plus Browser JS implementation |
 | Standard native host expansion | Pinned in `v0.2.0` candidate; publication pending | macOS arm64, Linux x86-64, Linux arm64 |
+| Browser Promise runtime and extensions | Complete in the `v0.2.0` source candidate | Browser Wasm ABI `0x0001_0007`; `memory`/`opfs`/`s3` |
+| Embedded browser distribution | Complete in the `v0.2.0` source candidate | One-command Moon package; real Chrome and clean-package gates |
 
 `v0.1.0` remains the published compatibility baseline. This tree is the fully
 pinned `v0.2.0` standard release candidate across three target-native hosts.
@@ -70,8 +90,9 @@ Eric-Song-Nop/opendal@0.1.0` still provides only the released local surface and
 native archive.
 
 The source implementation preserves the old local behavior while adding
-public methods, optional ABI groups, the `standard` service profile, and one
-new host. It does not silently install retry, timeout, or concurrency policy.
+public methods, optional ABI groups, the `standard` native service profile,
+one new native host, and the Browser JS stack summarized above. It does not
+silently install retry, timeout, or concurrency policy.
 
 Roadmap status words have the following meaning:
 
@@ -675,20 +696,33 @@ reports finish or abort success.
 
 #### Phase 5E: Public MoonBit async API
 
-Status: the first public async slice is included in the pinned but unpublished
-`v0.2.0` candidate; full blocking API parity is intentionally deferred.
+Status: the first portable public async slice is included in the pinned but
+unpublished `v0.2.0` candidate; full native blocking-API parity is
+intentionally deferred.
 
-`Operator::as_async()` creates a lightweight view. The current async surface
-contains whole/ranged `read`, bounded `open_read_stream`/`next`/`close`, and
+The root package is selected at compile time for native or JavaScript, with
+native as the default and explicit `--target js` for browsers. Other MoonBit
+Wasm targets are not part of the supported facade.
+`AsyncOperator::new` is the shared constructor; `AsyncOperator::close` is
+idempotent and non-raising. `Operator::as_async()` remains a lightweight native
+view. The portable surface contains whole `write`, whole/ranged `read`, bounded
+`open_read_stream`/`next`/`close`, and
 `open_writer`/`write`/`finish`/`abort`. It uses ordinary MoonBit `async fn`
-methods, not public callbacks or native task handles.
+methods, not public callbacks or native task handles. Native whole writes are
+composed from the true async Writer and never run the synchronous API on an
+executor thread.
 
-Each native operation owns copied inputs and its result. A worker publishes
-the result, then writes one byte to a private pipe watched by MoonBit's async
-runtime; it never invokes MoonBit or retains a MoonBit reference from a foreign
-thread. Cancelling the MoonBit operation requests native cancellation through
-the task finalizer. Completion and cancellation contend under one native task
-state so only one terminal result and one wake signal can win.
+Each native operation launches the real OpenDAL async future on a Rust Tokio
+task; it never disguises a call to the blocking Operator as async work. The
+worker owns copied inputs and its result, publishes the result, then writes one
+byte to a nonblocking private pipe watched by MoonBit's async runtime. The
+MoonBit scheduler suspends instead of blocking an executor thread, and the
+worker never invokes MoonBit or retains a MoonBit reference. Cancelling the
+MoonBit operation requests native cancellation through the task finalizer.
+Completion and cancellation contend under one native task state so only one
+terminal result and one wake signal can win. JavaScript performs the same
+portable operations through Promises and connects cancellation through
+`AbortSignal`.
 
 Streams and writers admit one in-flight operation. Cancelling `next`, `write`,
 `finish`, or `abort` makes that stateful resource terminal when progress or
@@ -699,8 +733,10 @@ output-bounded `Bytes` value. Neither guarantee bounds one raw buffer allocated
 inside OpenDAL or the backend.
 
 Async stat, list/lister, delete, copy/Copier, presign, and separate public task
-handles are not part of this first slice. Callers can configure an immutable
-Operator first and then obtain its async view.
+handles are not part of the portable native slice. The JavaScript target has
+additional capability-checked Promise operations and `AsyncLister`; portable
+parity for those operations requires corresponding non-blocking native ABI
+operations in a later slice.
 
 ##### 5E exit criteria
 
@@ -719,6 +755,53 @@ Operator first and then obtain its async view.
   gates.
 - [ ] Reproduce those pins and run fresh registry consumers from the `v0.2.0`
   tag; expand the async surface only in later independent slices.
+
+### Browser JavaScript delivery stack
+
+Status: complete in the current source candidate; publication follows the same
+`v0.2.0` Moon package release as the portable facade.
+
+The Browser stack adds a target-specific implementation and extensions without
+changing the portable native contract:
+
+- one Rust OpenDAL WebAssembly instance and linear memory per embedded
+  `Runtime`; explicit asset loading permits one runtime per bridge module URL
+  for the page lifetime because the browser caches wasm-bindgen modules;
+- private scalar Browser ABI `0x0001_0007`, generation-checked handles,
+  asynchronous task/completion state, structured error/metadata snapshots, and
+  hard transfer/list/configuration bounds;
+- a JavaScript Promise facade that maps MoonBit scheduler cancellation through
+  `AbortSignal`, makes late completion inert, and keeps storage failures as
+  structured outcomes;
+- browser-compatible `memory`, `opfs`, and `s3` services;
+- async stat, exists, create/delete, eager and streaming list, copy, and rename
+  as JavaScript-only extensions;
+- an embedded distribution containing the version-matched Rust Wasm,
+  wasm-bindgen glue, and Promise runtime, so consumers need no Rust, npm,
+  bundler, CDN, or separately served Wasm asset.
+
+The Browser ABI is independent of the native C ABI even though both currently
+have a 1.7 version. The only supported MoonBit target for this browser path is
+`js`; the Rust bridge's internal Wasm does not imply `wasm` or `wasm-gc`
+support.
+
+Exit criteria:
+
+- [x] Moon JS surface and implementation tests pass with denied warnings.
+- [x] Rust bridge state-machine, snapshot, panic, bounds, and ownership tests
+  pass.
+- [x] A real Chrome canary exercises Promise readiness and cancellation.
+- [x] The checked-in embedded snapshot is source-fingerprinted and ABI-checked
+  against a current bridge build.
+- [x] A clean packaged consumer runs the embedded browser demo with Rust,
+  wasm-bindgen, npm, and bundlers unavailable.
+- [ ] Publish the exact source package and validate a fresh registry consumer
+  from the `v0.2.0` tag.
+
+See [Browser Runtime and Wasm ABI](design/browser-runtime.md) for the private
+runtime contract and the
+[Browser and JavaScript API reference](reference/browser-api.md) for the
+target-specific public map.
 
 ### Parallel track A: Platform and artifact expansion
 
@@ -787,7 +870,7 @@ if a milestone cannot satisfy its exit criteria independently.
 | Release line | Intended content |
 | --- | --- |
 | Published `0.1.x` | Immutable `local` profile: memory/fs, original blocking facade, macOS arm64 and Linux x86-64 |
-| Pinned, unpublished `0.2.0` release candidate | Phase 5A-E, `standard` memory/fs/S3 profile, and Linux arm64 |
+| Pinned, unpublished `0.2.0` release candidate | Phase 5A-E, `standard` native memory/fs/S3 profile, Linux arm64, and the embedded Browser JS `memory`/`opfs`/`s3` stack |
 | Later releases | Additional async operations, services, targets, recursive/cross-service transfer only after separate contracts |
 
 Each release tag must build its native artifacts and Moon package from the same
@@ -822,7 +905,7 @@ an existing immutable identity without an explicit recovery procedure.
   intentionally public package, never behind an `internal/*` re-export whose
   constructors or methods downstream users cannot resolve reliably.
 - Published documentation and capability claims describe only functionality
-  present in the selected native service profile.
+  present in the selected target and service profile.
 - New profiles and targets pass deterministic packaging, cache-integrity,
   offline reuse, and clean-consumer tests before release.
 - Each feature lands as a complete vertical slice rather than as a large batch
@@ -863,6 +946,8 @@ A feature is not complete when the Rust method exists. Every slice includes:
 | Batch result shape | Resolved | All-or-error `Unit`, possible partial remote effects, no fabricated ordered per-path result |
 | Copier scope | Resolved | Managed same-Operator one-object copy; not recursive or cross-service |
 | Initial async shape | Resolved | MoonBit `async fn` facade using owned native tasks and a pipe wakeup; no public callbacks/task handles |
+| Browser runtime shape | Resolved | JavaScript Promise/`AbortSignal` facade over scalar Browser Wasm ABI 1.7; embedded runtimes own one instance and memory, while explicit asset loads are single-use per bridge module URL |
+| Browser distribution | Resolved | Version-matched bridge, wasm-bindgen glue, and Promise runtime embedded in the Moon package and proven in clean Chrome consumers |
 | Standard release trust roots | Pinned candidate; tag verification pending | `artifacts-standard.json` is populated and selected atomically; publish the exact bytes and verify fresh registry consumers from `v0.2.0` |
 | Additional services and async parity | Deferred | Add only as independent, capability-honest vertical slices |
 | Intel macOS, musl, and Windows | Deferred | Require installable MoonBit toolchains plus target-native build/link/consumer evidence |

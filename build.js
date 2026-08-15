@@ -14,6 +14,8 @@ const DOWNLOAD_ATTEMPTS = 3;
 const DOWNLOAD_IDLE_TIMEOUT_MS = 30_000;
 const LOCK_WAIT_TIMEOUT_MS = 120_000;
 const STALE_LOCK_AGE_MS = 15 * 60_000;
+const MOON_TARGETS = new Set(['native', 'js', 'wasm', 'wasm-gc', 'llvm', 'all']);
+const PORTABLE_TARGETS = new Set(['js', 'wasm', 'wasm-gc']);
 const EXPECTED_ARCHIVE_ENTRIES = Object.freeze([
   'LICENSE',
   'lib',
@@ -77,6 +79,80 @@ async function readBuildInput() {
     input.env = { ...process.env };
   }
   return input;
+}
+
+function normalizeMoonTarget(value) {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const normalized = value.trim().toLowerCase();
+  return MOON_TARGETS.has(normalized) ? normalized : null;
+}
+
+function parseMoonTarget(commandLine) {
+  if (typeof commandLine !== 'string' || commandLine.length === 0) {
+    return null;
+  }
+  const command = commandLine.split(/\s--\s/, 1)[0];
+  const match = command.match(
+    /(?:^|\s)--target(?:=|\s+)(?:['"])?(native|js|wasm-gc|wasm|llvm|all)(?:['"])?(?=\s|$)/i,
+  );
+  return match ? normalizeMoonTarget(match[1]) : null;
+}
+
+function readParentCommandLine(dependencies = {}) {
+  if (!Number.isSafeInteger(process.ppid) || process.ppid <= 0) {
+    return '';
+  }
+  const run = dependencies.spawnSync || spawnSync;
+  const platform = dependencies.platform || process.platform;
+  const command =
+    platform === 'win32'
+      ? [
+          'powershell.exe',
+          [
+            '-NoProfile',
+            '-NonInteractive',
+            '-Command',
+            `(Get-CimInstance Win32_Process -Filter "ProcessId = ${process.ppid}").CommandLine`,
+          ],
+        ]
+      : ['ps', ['-ww', '-o', 'command=', '-p', String(process.ppid)]];
+  const result = run(command[0], command[1], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'ignore'],
+  });
+  if (result.error || result.status !== 0 || typeof result.stdout !== 'string') {
+    return '';
+  }
+  return result.stdout.trim();
+}
+
+function resolveMoonTarget(input, dependencies = {}) {
+  // Moon's module-prebuild JSON is target-independent today. Accept target
+  // fields if the protocol grows them, then recover only the explicit
+  // `--target` option from the direct Moon parent process.
+  const candidates = [
+    input.target,
+    input.backend,
+    input.build_target,
+    input.paths?.target,
+    input.env.OPENDAL_MBT_TARGET,
+  ];
+  for (const candidate of candidates) {
+    const target = normalizeMoonTarget(candidate);
+    if (target) {
+      return target;
+    }
+  }
+  const parentCommandLine = Object.hasOwn(dependencies, 'parentCommandLine')
+    ? dependencies.parentCommandLine
+    : readParentCommandLine(dependencies);
+  return parseMoonTarget(parentCommandLine);
+}
+
+function makeNoopBuildOutput() {
+  return { vars: {}, link_configs: [] };
 }
 
 function resolveMoonHome(input) {
@@ -854,6 +930,11 @@ async function main() {
     throw new Error(`Node.js 18 or newer is required; found ${process.versions.node}`);
   }
   const input = await readBuildInput();
+  const moonTarget = resolveMoonTarget(input);
+  if (PORTABLE_TARGETS.has(moonTarget)) {
+    process.stdout.write(`${JSON.stringify(makeNoopBuildOutput())}\n`);
+    return;
+  }
   const selected = loadSelectedArtifacts();
   const hostKey = `${process.platform}-${process.arch}`;
   const fallbackArtifact = selected.artifacts[hostKey];
@@ -886,8 +967,12 @@ module.exports = {
   loadDistributionProfile,
   loadSelectedArtifacts,
   makeBuildOutput,
+  makeNoopBuildOutput,
   makeSourceBuildOutput,
+  normalizeMoonTarget,
+  parseMoonTarget,
   parseMaintainerLinkFlags,
+  resolveMoonTarget,
   resolveSystemLinkFlags,
   resolveLocalOverride,
   selectArtifact,

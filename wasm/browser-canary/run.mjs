@@ -115,6 +115,7 @@ async function main() {
     bridgeDirectoryArgument ?? join(repositoryRoot, "target/browser-js/debug"),
   );
   const runtimePath = join(repositoryRoot, "wasm/browser-runtime/index.mjs");
+  const contractPath = join(repositoryRoot, "wasm/browser-runtime/contract.json");
   const gluePath = join(bridgeDirectory, `${BRIDGE_STEM}.mjs`);
   const bridgePath = join(bridgeDirectory, `${BRIDGE_STEM}_bg.wasm`);
 
@@ -130,6 +131,10 @@ async function main() {
     [
       "/browser-runtime.mjs",
       ["text/javascript; charset=utf-8", await readFile(runtimePath)],
+    ],
+    [
+      "/browser-contract.json",
+      ["application/json; charset=utf-8", await readFile(contractPath)],
     ],
     [
       `/${BRIDGE_STEM}.mjs`,

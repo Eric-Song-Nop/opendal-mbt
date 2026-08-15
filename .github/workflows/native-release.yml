@@ -7,6 +7,8 @@ on:
       - build.js
       - Cargo.lock
       - Cargo.toml
+      - Makefile
+      - examples/browser/**
       - integration/consumer/**
       - moon.mod
       - native/artifact-selection.json
@@ -101,6 +103,11 @@ jobs:
             target/native-release/native-static-libs.log
           actual_target=$(rustc -vV | sed -n 's/^host: //p')
           test "$actual_target" = '${{ matrix.rust_target }}'
+      - name: Verify portable and genuinely nonblocking native async I/O
+        env:
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos_deployment_target }}
+        run: |
+          make native-async-nonblocking RUST_PROFILE=release
       - name: Package standard native artifact
         shell: bash
         run: |

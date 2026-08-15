@@ -1,6 +1,12 @@
-# Memory service C example
+# C ABI examples
 
-`memory.c` is a real consumer of the versioned OpenDAL MoonBit C ABI. It:
+This directory contains two direct consumers of the versioned OpenDAL MoonBit
+C ABI. They validate the public header independently of MoonBit and use only
+the negotiated function-table prefix supported by the loaded library.
+
+## Memory round trip
+
+[`memory.c`](memory.c) exercises the local data and ownership path. It:
 
 - negotiates ABI major v1 and checks both feature bits and each function's
   `OPENDAL_MBT_API_V1_FIELD_END` boundary;
@@ -15,6 +21,33 @@
 - releases every Rust-owned handle, snapshot, error, and buffer through its
   paired ABI function.
 
+The program prints one **expected** not-found error before reporting a
+successful binary round trip. Any unexpected transport status, missing output,
+ABI field, invalid borrowed view, ownership inconsistency, or byte mismatch
+causes a nonzero exit.
+
+## Typed S3 construction
+
+[`s3.c`](s3.c) exercises the append-only S3 ABI group without making network
+requests. It:
+
+- negotiates ABI major v1 and verifies both the S3 feature bit and the
+  `operator_s3` function-table boundary;
+- fills a versioned `opendal_mbt_s3_options_v1_t` with an unsigned auth policy,
+  bucket, region, and local example endpoint;
+- constructs the typed S3 Operator and verifies its owned `OperatorInfo`
+  reports scheme `s3`; and
+- frees the Operator, info snapshot, and any owned error through their paired
+  functions.
+
+With the `standard` profile it prints
+`constructed unsigned S3 operator without I/O`. A `local` profile does not
+advertise S3, so the example reports that it was skipped and exits successfully.
+The endpoint is illustrative and no server or credentials are needed because
+Operator construction performs no object I/O.
+
+## Build and run
+
 Run the warning-clean header/syntax check without a native library:
 
 ```sh
@@ -28,7 +61,8 @@ cargo build --release --locked
 cargo rustc -p opendal-mbt-native --release -- --print native-static-libs
 ```
 
-Then pass the bridge artifact and the printed libraries explicitly:
+Then pass the bridge artifact and the printed libraries explicitly. The `run`
+target builds and executes both `memory` and `s3`:
 
 ```sh
 make -C examples/c run \
@@ -43,6 +77,5 @@ list from another operating system. The main native build should publish both
 the artifact path and that linker output.
 
 The program prints one **expected** not-found error before reporting a
-successful binary round trip. Any unexpected transport status, missing output,
-ABI field, invalid borrowed view, ownership inconsistency, or byte mismatch
-causes a nonzero exit.
+successful binary round trip, followed by either successful S3 construction or
+the profile-honest S3 skip message.
