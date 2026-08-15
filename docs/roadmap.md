@@ -82,8 +82,9 @@ test oracle, but is not the public or long-term ABI of this project.
 
 `v0.1.0` remains the immutable compatibility baseline. The `v0.2.0` release
 ships the fully pinned standard profile across three target-native hosts. Its
-tag workflow reproduces the committed digests, uploads those assets, publishes
-the same source to mooncakes.io, and passes a fresh registry consumer.
+tag workflow reproduced the committed digests, published the
+[GitHub Release](https://github.com/Eric-Song-Nop/opendal-mbt/releases/tag/v0.2.0)
+and matching Moon package, and passed a fresh registry consumer.
 
 The source implementation preserves the old local behavior while adding
 public methods, optional ABI groups, the `standard` native service profile,
@@ -468,7 +469,7 @@ Land Phase 5A as reviewable vertical slices:
   source slice.
 - [x] Source/native tests cover the Phase 5A semantics, while every pinned
   candidate passes release-build, identity, and clean packaged-consumer gates.
-- [ ] The `v0.2.0` tag workflow and fresh registry consumers must repeat the
+- [x] The `v0.2.0` tag workflow and a fresh registry consumer repeated the
   release gates after publication.
 
 #### Phase 5B: Ship the first cloud service profile
@@ -552,8 +553,8 @@ The S3 contract provides:
   identities; the immutable local pins are unchanged.
 - [x] Pin the exact standard candidate artifacts and pass clean packaged
   consumers on every advertised host.
-- [ ] Publish those exact assets and prove fresh registry consumers from the
-  `v0.2.0` tag.
+- [x] Published those exact assets and proved a fresh registry consumer from
+  the `v0.2.0` tag.
 
 #### Phase 5C: Presigned operations and explicit layers
 
@@ -634,9 +635,9 @@ first retry/timeout slice.
 - [x] Default operators retain `v0.1.0` no-implicit-retry behavior.
 - [x] Source/native end-to-end tests cover the Phase 5C semantics, while every
   pinned candidate passes release identity and clean packaged-consumer gates.
-- [ ] Reproduce those pins and run fresh registry consumers from the `v0.2.0`
-  tag; broader deterministic network fault injection remains a hardening item
-  rather than a release-surface expansion.
+- [x] Reproduced those pins and ran a fresh registry consumer from the
+  `v0.2.0` tag; broader deterministic network fault injection remains a
+  hardening item rather than a release-surface expansion.
 
 #### Phase 5D: Batch deletion and copier tasks
 
@@ -683,8 +684,8 @@ reports finish or abort success.
   batch delete and Copier against MinIO.
 - [x] Source/native and MinIO tests cover the Phase 5D lifecycle, while every
   pinned candidate passes release identity and clean packaged-consumer gates.
-- [ ] Reproduce those pins and run fresh registry consumers from the `v0.2.0`
-  tag. Recursive and cross-backend copying remain out of scope.
+- [x] Reproduced those pins and ran a fresh registry consumer from the
+  `v0.2.0` tag. Recursive and cross-backend copying remain out of scope.
 
 #### Phase 5E: Public MoonBit async API
 
@@ -744,8 +745,8 @@ operations in a later slice.
 - [x] Source/native tests cover async runtime and cancellation semantics, while
   every pinned candidate passes release identity and clean packaged-consumer
   gates.
-- [ ] Reproduce those pins and run fresh registry consumers from the `v0.2.0`
-  tag; expand the async surface only in later independent slices.
+- [x] Reproduced those pins and ran a fresh registry consumer from the
+  `v0.2.0` tag; expand the async surface only in later independent slices.
 
 ### Browser JavaScript delivery stack
 
@@ -785,8 +786,8 @@ Exit criteria:
   against a current bridge build.
 - [x] A clean packaged consumer runs the embedded browser demo with Rust,
   wasm-bindgen, npm, and bundlers unavailable.
-- [ ] Publish the exact source package and validate a fresh registry consumer
-  from the `v0.2.0` tag.
+- [x] Published the exact source package and validated a fresh registry
+  consumer from the `v0.2.0` tag.
 
 See [Browser Runtime and Wasm ABI](design/browser-runtime.md) for the private
 runtime contract and the
