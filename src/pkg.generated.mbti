@@ -11,6 +11,7 @@ import {
 pub suberror OpenDalError {
   OpenDalError(ErrorInfo)
 } derive(Eq, @debug.Debug)
+pub fn OpenDalError::from_error(Error) -> Self?
 pub fn OpenDalError::info(Self) -> ErrorInfo
 pub fn OpenDalError::is_persistent(Self) -> Bool
 pub fn OpenDalError::is_temporary(Self) -> Bool
@@ -22,9 +23,12 @@ pub impl Show for OpenDalError
 pub struct AsyncOperator {
   // private fields
 }
+pub fn AsyncOperator::close(Self) -> Unit
+pub async fn AsyncOperator::new(StringView, config? : Map[String, String]) -> Self
 pub async fn AsyncOperator::open_read_stream(Self, StringView, range? : ByteRange, chunk_size? : Int, version? : StringView, if_match? : StringView, if_none_match? : StringView) -> AsyncReadStream
 pub async fn AsyncOperator::open_writer(Self, StringView, append? : Bool, content_type? : StringView, content_disposition? : StringView, content_encoding? : StringView, cache_control? : StringView, if_match? : StringView, if_none_match? : StringView) -> AsyncWriter
 pub async fn AsyncOperator::read(Self, StringView, range? : ByteRange, version? : StringView, if_match? : StringView, if_none_match? : StringView) -> Bytes
+pub async fn AsyncOperator::write(Self, StringView, BytesView, append? : Bool, content_type? : StringView, content_disposition? : StringView, content_encoding? : StringView, cache_control? : StringView, if_match? : StringView, if_none_match? : StringView) -> Metadata
 
 pub struct AsyncReadStream {
   // private fields
@@ -160,6 +164,7 @@ pub enum Operation {
 pub type Operator
 pub fn Operator::as_async(Self) -> AsyncOperator
 pub fn Operator::check(Self) -> Unit raise OpenDalError
+pub fn Operator::close(Self) -> Unit
 pub fn Operator::copy(Self, StringView, StringView) -> Metadata raise OpenDalError
 pub fn Operator::create_dir(Self, StringView) -> Unit raise OpenDalError
 pub fn Operator::delete(Self, StringView, version? : StringView, recursive? : Bool) -> Unit raise OpenDalError

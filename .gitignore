@@ -4,3 +4,4 @@ target/
 .mooncakes/
 .DS_Store
 /examples/c/memory
+/trace.json

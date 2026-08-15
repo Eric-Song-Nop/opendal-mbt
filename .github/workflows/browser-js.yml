@@ -3,29 +3,47 @@ name: Browser JS
 on:
   pull_request:
     paths:
+      - ".gitattributes"
+      - ".gitignore"
       - ".github/workflows/browser-js.yml"
       - "Cargo.lock"
       - "Cargo.toml"
       - "Makefile"
       - "build.js"
+      - "docs/**"
+      - "examples/browser/**"
       - "moon.mod"
+      - "moon.work"
       - "rust-toolchain.toml"
+      - "scripts/check-package.sh"
+      - "scripts/check-docs.mjs"
+      - "scripts/check-packaged-browser.sh"
+      - "scripts/generate-browser-embed.mjs"
       - "scripts/test-native-resolver.js"
-      - "src/browser/**"
+      - "src/**"
       - "wasm/**"
   push:
     branches:
       - main
     paths:
+      - ".gitattributes"
+      - ".gitignore"
       - ".github/workflows/browser-js.yml"
       - "Cargo.lock"
       - "Cargo.toml"
       - "Makefile"
       - "build.js"
+      - "docs/**"
+      - "examples/browser/**"
       - "moon.mod"
+      - "moon.work"
       - "rust-toolchain.toml"
+      - "scripts/check-package.sh"
+      - "scripts/check-docs.mjs"
+      - "scripts/check-packaged-browser.sh"
+      - "scripts/generate-browser-embed.mjs"
       - "scripts/test-native-resolver.js"
-      - "src/browser/**"
+      - "src/**"
       - "wasm/**"
 
 permissions:
@@ -61,9 +79,23 @@ jobs:
           make moon-deps
           make moon-browser-check
           make moon-browser-test
+      - name: Prove portable and non-blocking async I/O in Chrome
+        run: make portable-async-example-browser
       - name: Check browser bridge
         run: make browser-rust-check
       - name: Test bridge state machines and snapshots
         run: make browser-rust-test
       - name: Run browser integration canary
         run: make browser-js-canary RUST_PROFILE=release
+      - name: Verify embedded browser distribution
+        run: |
+          make browser-embed-check
+          make packaged-browser
+      - name: Upload embedded distribution diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: browser-embed-diagnostics
+          path: target/browser-embed/release/opendal_mbt_browser_bridge*
+          if-no-files-found: ignore
+          retention-days: 1

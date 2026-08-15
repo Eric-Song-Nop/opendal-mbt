@@ -70,5 +70,6 @@ test "browser public surface type-checks from a black-box test" {
     "https://example.invalid/bridge.wasm",
   )
   assert_eq(assets.runtime_module_url, "https://example.invalid/runtime.mjs")
+  ignore(Runtime::new)
   ignore(Runtime::load)
 }

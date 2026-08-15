@@ -1,4 +1,12 @@
 ///|
+extern "js" fn delayed_fake_runtime() -> @js_async.Promise[JsRuntime] =
+  #| () => new Promise((resolve) => setTimeout(() => resolve({}), 250))
+
+///|
+extern "js" fn rejected_fake_runtime() -> @js_async.Promise[JsRuntime] =
+  #| () => Promise.reject(new Error("fixture bootstrap rejection"))
+
+///|
 extern "js" fn fake_js_runtime() -> JsRuntime =
   #| () => {
   #|   const metadata = (length = 2n) => ({
@@ -297,6 +305,42 @@ async test "browser facade preserves structured errors and rejection boundary" {
     _ => fail("expected a structured PermissionDenied error")
   } noraise {
     _ => fail("exists must retain errors other than NotFound")
+  }
+}
+
+///|
+async test "browser runtime bootstrap preserves scheduler cancellation" {
+  @async.with_task_group() <| group => {
+    let task = group.spawn(() => {
+      ignore(
+        await_runtime_bootstrap(
+          delayed_fake_runtime(),
+          "bootstrap cancellation was remapped",
+        ),
+      )
+    })
+    @async.sleep(1)
+    task.cancel()
+    try task.wait() catch {
+      OpenDalError(_) => fail("scheduler cancellation became OpenDalError")
+      error => assert_eq(@debug.to_string(error), "Cancelled")
+    } noraise {
+      _ => fail("cancelled bootstrap unexpectedly completed")
+    }
+  }
+  try
+    await_runtime_bootstrap(
+      rejected_fake_runtime(),
+      "fixture bootstrap rejected",
+    )
+  catch {
+    OpenDalError(info) => {
+      assert_true(info.kind is AbiMismatch)
+      assert_eq(info.operation, LoadRuntime)
+    }
+    _ => fail("ordinary bootstrap rejection did not become OpenDalError")
+  } noraise {
+    _ => fail("rejected bootstrap unexpectedly completed")
   }
 }
 
