@@ -1907,7 +1907,7 @@ fn push_operator_config(
 }
 
 fn build_operator(builder: OperatorBuilder) -> Result<Operator, BridgeError> {
-    opendal::init_default_registry();
+    opendal::install_default();
     Operator::via_iter(&builder.scheme, builder.config)
         .map_err(BridgeError::from_construction_error)
 }
@@ -3692,6 +3692,15 @@ pub extern "C" fn opendal_mbt_wasm_error_release(handle: u32) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(target_arch = "wasm32"))]
+    use std::io::{Read, Write};
+    #[cfg(not(target_arch = "wasm32"))]
+    use std::net::TcpListener;
+    #[cfg(not(target_arch = "wasm32"))]
+    use std::thread;
+    #[cfg(not(target_arch = "wasm32"))]
+    use std::time::{Duration, Instant};
+
     use super::*;
 
     #[derive(Debug, PartialEq, Eq)]
@@ -4269,6 +4278,90 @@ mod tests {
         assert_eq!(opendal_mbt_wasm_operator_release(operator), STATUS_OK);
         assert_eq!(opendal_mbt_wasm_live_handle_count(), 0);
         reset_state();
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn generic_builder_installs_default_http_transport_for_s3_requests() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let (mut stream, _) = loop {
+                match listener.accept() {
+                    Ok(connection) => break connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(
+                            Instant::now() < deadline,
+                            "S3 request never reached the default HTTP transport"
+                        );
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("local S3 fixture could not accept a request: {error}"),
+                }
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut request = Vec::new();
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let mut chunk = [0_u8; 1024];
+                let length = stream.read(&mut chunk).unwrap();
+                assert_ne!(length, 0, "S3 request ended before its headers");
+                request.extend_from_slice(&chunk[..length]);
+                assert!(
+                    request.len() <= 16 * 1024,
+                    "S3 request headers are too large"
+                );
+            }
+            let request = std::str::from_utf8(&request).unwrap();
+            assert!(
+                request.starts_with("GET /probe-bucket/delayed-missing.txt HTTP/1.1\r\n"),
+                "unexpected S3 request: {request}"
+            );
+            let body = concat!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
+                "<Error><Code>NoSuchKey</Code><Message>missing probe object</Message>",
+                "<Key>delayed-missing.txt</Key><RequestId>probe-request</RequestId>",
+                "<HostId>probe-host</HostId></Error>"
+            );
+            write!(
+                stream,
+                "HTTP/1.1 404 Not Found\r\nContent-Type: application/xml\r\nContent-Length: {}\r\nx-amz-request-id: probe-request\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        });
+        let operator = build_operator(OperatorBuilder {
+            scheme: "s3".to_owned(),
+            config: vec![
+                ("bucket".to_owned(), "probe-bucket".to_owned()),
+                ("region".to_owned(), "us-east-1".to_owned()),
+                ("endpoint".to_owned(), format!("http://{address}")),
+                ("access_key_id".to_owned(), "probe-access-key".to_owned()),
+                (
+                    "secret_access_key".to_owned(),
+                    "probe-secret-key".to_owned(),
+                ),
+                ("disable_config_load".to_owned(), "true".to_owned()),
+                ("disable_ec2_metadata".to_owned(), "true".to_owned()),
+            ],
+            config_bytes: 0,
+        })
+        .unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let result = runtime.block_on(operator.read("delayed-missing.txt"));
+
+        server.join().unwrap();
+        assert!(
+            matches!(result, Err(ref error) if error.kind() == ErrorKind::NotFound),
+            "S3 read did not use the installed default HTTP transport: {result:?}"
+        );
     }
 
     #[test]

@@ -41,6 +41,25 @@ and `wasm-gc` targets are not supported or treated as browser aliases. The
 browser architecture is a JavaScript-target Moon application hosting the
 embedded OpenDAL core Wasm runtime.
 
+The runnable [`examples/browser`](../examples/browser/README.md) program keeps
+its portable application and delayed-I/O proof in shared MoonBit files, then
+executes them as a native executable or inside real Chrome:
+
+```sh
+moon -C examples/browser run --target native --release .
+moon -C examples/browser run --target js --release .
+```
+
+The browser command also uses a separate local origin for a strict CORS and
+SigV4-shaped S3 fixture. The native maintainer command
+`make native-async-nonblocking` invokes the same delayed-I/O MoonBit function
+against its own fixture. The function arms a heartbeat before the S3 read and
+requires it to resume before the operation ends with a valid `NotFound`; each
+fixture holds an accepted GET for 750 ms. This is a black-box proof that a
+pending OpenDAL read yields to MoonBit's scheduler, rather than merely proving
+that the scheduler can yield on its own. It is not a cryptographic verifier for
+the SigV4 signature.
+
 The portable API has the same async calling convention but different
 target-native execution engines:
 
@@ -301,12 +320,21 @@ async fn use_external_browser_assets(
 
 Do not mix files from different package releases: `Runtime::load` validates
 the ABI and required feature flags and reports mismatches as `AbiMismatch`.
+Call `Runtime::load` at most once for a given `bridge_module_url` during the
+lifetime of a page. Browser module loading caches the initialized wasm-bindgen
+exports by URL, and closing the runtime permanently tears that instance down.
+Share the returned runtime between operators; do not load the same bridge
+module URL concurrently or again after close. Use embedded `Runtime::new`
+through `AsyncOperator::new` when independently owned runtimes are needed.
 Close all child streams, writers, listers, and operators before their shared
 runtime. Closing an `AsyncOperator` created by `AsyncOperator::new` also closes
 its privately owned runtime; closing an operator obtained from `Runtime` does
 not close that shared runtime. Wait for in-flight calls before closing a parent;
 behavior of outstanding child work after parent close is deliberately not a
 portable cascade or cancellation guarantee.
+
+For a signature-by-signature target map, see the
+[Browser and JavaScript API reference](../docs/reference/browser-api.md).
 
 ## Browser and hosting requirements
 
