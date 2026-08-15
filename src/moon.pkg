@@ -1,6 +1,7 @@
-supported_targets = "native"
+supported_targets = "+native+js"
 
 import {
+  "Eric-Song-Nop/opendal/browser",
   "moonbitlang/async",
   "moonbitlang/async/pipe",
   "moonbitlang/core/debug",
@@ -13,4 +14,38 @@ import {
 
 options(
   "native-stub": [ "opendal_stub.c" ],
+  targets: {
+    "async.mbt": [ "native" ],
+    "async_contract_wbtest.mbt": [ "native" ],
+    "async_native_ffi.mbt": [ "native" ],
+    "async_native_test.mbt": [ "native" ],
+    "batch.mbt": [ "native" ],
+    "batch_contract_test.mbt": [ "native" ],
+    "capability.mbt": [ "native" ],
+    "copier.mbt": [ "native" ],
+    "copier_contract_test.mbt": [ "native" ],
+    "error.mbt": [ "native" ],
+    "error_wbtest.mbt": [ "native" ],
+    "layers.mbt": [ "native" ],
+    "layers_wbtest.mbt": [ "native" ],
+    "listing.mbt": [ "native" ],
+    "metadata.mbt": [ "native" ],
+    "native_ffi.mbt": [ "native" ],
+    "opendal_difficult_test.mbt": [ "native" ],
+    "opendal_easy_test.mbt": [ "native" ],
+    "opendal_mid_test.mbt": [ "native" ],
+    "opendal_native_test.mbt": [ "native" ],
+    "opendal_types.mbt": [ "native" ],
+    "operator.mbt": [ "native" ],
+    "phase5d_wbtest.mbt": [ "native" ],
+    "portable_facade.js.mbt": [ "js" ],
+    "portable_facade.native.mbt": [ "native" ],
+    "presign.mbt": [ "native" ],
+    "presign_wbtest.mbt": [ "native" ],
+    "read_stream.mbt": [ "native" ],
+    "reader.mbt": [ "native" ],
+    "s3.mbt": [ "native" ],
+    "s3_wbtest.mbt": [ "native" ],
+    "writer.mbt": [ "native" ],
+  },
 )

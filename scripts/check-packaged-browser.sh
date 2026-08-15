@@ -24,6 +24,8 @@ mkdir "$stage_dir"
 unzip -q "$package_archive" -d "$stage_dir"
 
 for required in \
+  src/moon.pkg \
+  src/portable_facade.js.mbt \
   src/browser/embedded_runtime.generated.mbt \
   src/browser/embedded.mbt \
   src/browser_demo/moon.pkg \
@@ -85,7 +87,8 @@ if output=$(
   PATH="$clean_bin"
   MOON_HOME="$test_moon_home"
   export PATH MOON_HOME
-  unset CARGO_HOME RUSTUP_HOME FORCE_COLOR OPENDAL_MBT_NATIVE_LIB
+  unset CARGO_HOME RUSTUP_HOME FORCE_COLOR OPENDAL_MBT_NATIVE_LIB \
+    OPENDAL_MBT_TARGET
   for runtime_tool in readlink dirname mkdir touch cat; do
     if ! command -v "$runtime_tool" >/dev/null 2>&1; then
       echo "$runtime_tool is unavailable to the Chrome launcher" >&2
@@ -99,6 +102,10 @@ if output=$(
     fi
   done
   test ! -e .mooncakes
+  moon check --target js src src/browser src/browser_demo \
+    --warn-list '+73' --deny-warn
+  moon test --target js src src/browser \
+    --warn-list '-68+73' --deny-warn
   moon run --target js --release src/browser_demo 2>&1
 ); then
   status=0

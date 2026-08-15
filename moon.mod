@@ -12,6 +12,8 @@ readme = "README.mbt.md"
 
 preferred_target = "native"
 
+supported_targets = "+native+js"
+
 description = "MoonBit bindings for Apache OpenDAL"
 
 import {
@@ -36,7 +38,11 @@ options(
     "wasm",
     "native/distribution-profile.json",
     "native/distribution-profiles",
-    "examples",
+    "examples/c",
+    "examples/browser/.mooncakes",
+    "examples/browser/_build",
+    "examples/browser/__pycache__",
+    "examples/browser/pkg.generated.mbti",
     "tests",
     "scripts",
     "skills-lock.json",

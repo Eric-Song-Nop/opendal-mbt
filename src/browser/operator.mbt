@@ -98,7 +98,8 @@ pub async fn AsyncOperator::create_dir(
 ///|
 /// Write an entire byte view and return the resulting owned metadata.
 ///
-/// The selected view is copied into the bridge before asynchronous work starts.
+/// The selected view is copied into the bridge before asynchronous work starts
+/// and must not exceed the portable 64 MiB whole-object limit.
 pub async fn AsyncOperator::write(
   self : AsyncOperator,
   path : StringView,
@@ -113,6 +114,13 @@ pub async fn AsyncOperator::write(
 ) -> Metadata {
   let path = path.to_owned()
   let context = error_context(Write, path~)
+  if data.length() > 64 * 1024 * 1024 {
+    raise local_error(
+      BufferTooLarge,
+      "portable whole-object write must not exceed 64 MiB",
+      context,
+    )
+  }
   self.ensure_open(context)
   let (has_content_type, content_type) = normalize_optional_text(content_type)
   let (has_content_disposition, content_disposition) = normalize_optional_text(
@@ -160,6 +168,8 @@ pub async fn AsyncOperator::write(
 ///
 /// Cancellation activates the JavaScript `AbortSignal`. Storage work already
 /// dispatched by a backend may still complete, but its late result is discarded.
+/// The portable whole-object result limit is 64 MiB; use a read stream for
+/// larger values.
 pub async fn AsyncOperator::read(
   self : AsyncOperator,
   path : StringView,

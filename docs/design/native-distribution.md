@@ -74,8 +74,11 @@ three target-native builders:
 
 Every `standard` archive is built and linked on a GitHub-hosted runner with
 the same architecture; no cross-compiled archive is presented as target-native
-validation. The module and package remain native-only. Unsupported hosts fail
-before downloading with a message listing the selected profile's matrix.
+validation. These artifact and host constraints apply only when the
+cross-target module is compiled for native; explicit JavaScript builds use the
+embedded browser runtime and do not resolve this table. Unsupported native
+hosts fail before downloading with a message listing the selected profile's
+matrix.
 On Linux arm64, Rust reports the unwind dependency as `-lgcc_s`, while the
 MoonBit native linker cannot discover the unversioned development symlink.
 The resolver therefore replaces only that flag with a verified, versioned

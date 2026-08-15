@@ -166,12 +166,10 @@ pub async fn AsyncReadStream::next(self : AsyncReadStream) -> Bytes? {
 
 ///|
 /// Release the cursor early. Closing more than once is harmless.
-pub fn AsyncReadStream::close(
-  self : AsyncReadStream,
-) -> Unit raise OpenDalError {
+pub fn AsyncReadStream::close(self : AsyncReadStream) -> Unit {
   if !self.closed {
     self.closed = true
-    outcome_unit(self.js.close(), error_context(Read, path=self.path))
+    ignore(self.js.close())
   }
 }
 

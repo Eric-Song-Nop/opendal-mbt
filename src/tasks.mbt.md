@@ -13,6 +13,7 @@ an owned `Bytes` value.
 
 ```mbt check
 ///|
+#cfg(target="native")
 test "tasks: whole-object write and read" {
   let operator = @opendal.Operator::new("memory")
   let storage = b"__hello, OpenDAL__"
@@ -38,6 +39,7 @@ copy bound.
 
 ```mbt check
 ///|
+#cfg(target="native")
 test "tasks: independent byte ranges" {
   let operator = @opendal.Operator::new("memory")
   operator.write("numbers.bin", b"0123456789") |> ignore
@@ -65,6 +67,7 @@ remainder is delivered.
 
 ```mbt check
 ///|
+#cfg(target="native")
 test "tasks: bounded sequential read" {
   let operator = @opendal.Operator::new("memory")
   operator.write("video.bin", b"0123456789") |> ignore
@@ -98,6 +101,7 @@ independent range. Close it when it is no longer needed.
 
 ```mbt check
 ///|
+#cfg(target="native")
 test "tasks: random-access reader" {
   let operator = @opendal.Operator::new("memory")
   operator.write("archive.bin", b"abcdefghij") |> ignore
@@ -122,6 +126,7 @@ finalization does not silently finish or abort it.
 
 ```mbt check
 ///|
+#cfg(target="native")
 test "tasks: chunked writer" {
   let operator = @opendal.Operator::new("memory")
   let writer = operator.open_writer(
@@ -144,6 +149,7 @@ does not promise rollback of remote effects already made visible.
 
 ```mbt check
 ///|
+#cfg(target="native")
 test "tasks: abort chunked writer" {
   let operator = @opendal.Operator::new("memory")
   let writer = operator.open_writer("uploads/discarded.bin")
@@ -165,6 +171,7 @@ errors. `stat` returns an immutable snapshot.
 
 ```mbt check
 ///|
+#cfg(target="native")
 test "tasks: exists and stat" {
   let operator = @opendal.Operator::new("memory")
   assert_false(operator.exists("images/logo.bin"))
@@ -187,6 +194,7 @@ Optional metadata such as `etag`, `content_type`, `last_modified`, and
 
 ```mbt check
 ///|
+#cfg(target="native")
 test "tasks: eager recursive listing" {
   let operator = @opendal.Operator::new("memory")
   operator.write("logs/one.txt", b"one") |> ignore
@@ -209,6 +217,7 @@ end-of-stream marker; an I/O error is terminal.
 
 ```mbt check
 ///|
+#cfg(target="native")
 test "tasks: listing cursor" {
   let operator = @opendal.Operator::new("memory")
   operator.write("queue/a.bin", b"a") |> ignore
@@ -237,6 +246,7 @@ Deleting a missing path succeeds.
 
 ```mbt check
 ///|
+#cfg(target="native")
 test "tasks: directories and recursive delete" {
   let operator = @opendal.Operator::new("memory")
   operator.create_dir("workspace/nested/")
@@ -255,6 +265,7 @@ batch succeeds.
 
 ```mbt check
 ///|
+#cfg(target="native")
 test "tasks: all-or-error batch delete" {
   let operator = @opendal.Operator::new("memory")
   operator.write("batch/one.bin", b"one") |> ignore
@@ -281,6 +292,7 @@ emulates rename as copy followed by delete.
 
 ```mbt check
 ///|
+#cfg(target="native")
 test "tasks: filesystem copy and rename" {
   guard @env.current_dir() is Some(cwd) else {
     fail("current working directory is unavailable")
@@ -308,6 +320,7 @@ source and destination are paths on the same Operator:
 
 ```mbt check
 ///|
+#cfg(target="native")
 test "tasks: managed same-Operator Copier" {
   guard @env.current_dir() is Some(cwd) else {
     fail("current working directory is unavailable")
@@ -330,6 +343,10 @@ test "tasks: managed same-Operator Copier" {
     operator.read("destination.bin"),
     b"copy through a managed resource",
   )
+
+  let discarded = operator.open_copier("source.bin", "discarded.bin")
+  discarded.abort()
+  discarded.abort()
   operator.delete_many(["source.bin", "destination.bin"])
 }
 ```
@@ -348,21 +365,37 @@ an HTTP client and sends the method, URI, and every header exactly.
 
 ```mbt check
 ///|
-test "tasks: create an owned presigned read request" {
+#cfg(target="native")
+test "tasks: create owned presigned request snapshots" {
   let operator = @opendal.Operator::s3(
     "example-bucket",
     region="us-east-1",
     endpoint="http://127.0.0.1:9000",
     auth=@opendal.S3Auth::unsigned(),
   )
-  let request = operator.presign_read(
+  let read_request = operator.presign_read(
     "manual/object.bin",
     expires_in_seconds=60UL,
     range=Range(offset=0UL, length=16UL),
   )
+  let write_request = operator.presign_write(
+    "manual/object.bin",
+    expires_in_seconds=60UL,
+    content_type="application/octet-stream",
+  )
+  let stat_request = operator.presign_stat(
+    "manual/object.bin",
+    expires_in_seconds=60UL,
+  )
 
-  assert_eq(request.http_method, "GET")
-  assert_true(request.uri.length() > 0)
+  assert_eq(read_request.http_method, "GET")
+  assert_eq(write_request.http_method, "PUT")
+  assert_eq(stat_request.http_method, "HEAD")
+  assert_true(read_request.uri.length() > 0)
+  for header in write_request.headers {
+    assert_true(header.name.length() > 0)
+    ignore(header.value.length())
+  }
 }
 ```
 
@@ -381,6 +414,7 @@ then the outermost concurrency limit:
 
 ```mbt check
 ///|
+#cfg(target="native")
 test "tasks: compose immutable operational layers" {
   let base = @opendal.Operator::new("memory")
   base.write("layers/value.bin", b"value") |> ignore
@@ -406,16 +440,18 @@ does not promise exactly-once stateful writes or appends after an uncertain
 remote commit. Operation permits remain held for body-style resource
 lifetimes; the optional HTTP permit remains held until a response body drops.
 
-## Use the initial async facade
+## Use the portable async facade
 
-`Operator::as_async()` shares the configured operator. Call async methods
-directly from an async context—there is no `await` keyword:
+`AsyncOperator::new` is the shared native/browser constructor. Call async
+methods directly from an async context—there is no `await` keyword:
 
 ```mbt check
 ///|
 async test "tasks: async writer and bounded reader" {
-  let operator = @opendal.Operator::new("memory")
-  let async_operator = operator.as_async()
+  let async_operator = @opendal.AsyncOperator::new("memory")
+  defer async_operator.close()
+  async_operator.write("async/whole.bin", b"whole") |> ignore
+  assert_eq(async_operator.read("async/whole.bin"), b"whole")
   let writer = async_operator.open_writer(
     "async/value.bin",
     content_type="application/octet-stream",
@@ -443,11 +479,52 @@ async test "tasks: async writer and bounded reader" {
 }
 ```
 
-The first async slice includes whole/ranged read, bounded read streams, and
-chunked writers with explicit `finish`/`abort`. Streams and writers allow one
-in-flight operation. Cancellation of a stateful operation makes the resource
-terminal when cursor or commit progress may be unknown; remote effects are not
-rolled back. `AsyncReadStream::close` is synchronous and idempotent.
+Native callers that need synchronous configuration or layers can still call
+`Operator::as_async()` to share that configured operator. The portable slice
+includes whole write, whole/ranged read, read streams and writer chunks bounded
+to 256 KiB, and explicit `finish`/`abort`; whole-object buffers are bounded to
+64 MiB. Streams and writers allow one in-flight operation. Cancellation of a
+stateful operation makes the resource terminal when cursor or commit progress
+may be unknown; remote effects are not rolled back. Resource `close` is
+synchronous, idempotent, and non-raising.
+
+## Use browser-only async operations
+
+The JS target additionally exposes Promise-backed `create_dir`, `stat`,
+`exists`, `list`, `open_lister`, `delete`, `copy`, and `rename`. This is an
+extension above the portable async contract, so shared source must place it
+behind `#cfg(target="js")`:
+
+```mbt check
+///|
+#cfg(target="js")
+async test "tasks: browser metadata, lister, and delete" {
+  let operator = @opendal.AsyncOperator::new("memory")
+  defer operator.close()
+  operator.write("js/items/one.bin", b"one") |> ignore
+
+  assert_true(operator.exists("js/items/one.bin"))
+  assert_eq(operator.stat("js/items/one.bin").content_length, 3UL)
+
+  let lister = operator.open_lister("js/", recursive=true)
+  let mut count = 0
+  while lister.next() is Some(_) {
+    count += 1
+  }
+  lister.close()
+  assert_true(count > 0)
+
+  operator.delete("js/", recursive=true)
+  assert_false(operator.exists("js/items/one.bin"))
+}
+```
+
+Check the originating `Operator::info().capability` before copy or rename;
+those operations are never emulated. `list` rejects a materialized result over
+65,536 entries or 16 MiB of encoded listing output (paths, names, and metadata
+snapshots). Use `open_lister` to hold only one decoded entry at a time. See
+[Using OpenDAL in a browser](browser-guide.mbt.md) for OPFS/S3 configuration,
+CORS/CSP, explicit runtimes, cancellation, and hosting.
 
 ## Handle typed errors
 
@@ -456,6 +533,7 @@ path, and optional destination path:
 
 ```mbt check
 ///|
+#cfg(target="native")
 test "tasks: inspect a typed error" {
   let operator = @opendal.Operator::new("memory")
   try operator.read("missing.bin") catch {
@@ -477,18 +555,43 @@ Temporary or persistent classification alone does not make an operation safe
 to retry. The binding never installs a retry layer implicitly; callers choose
 `with_retry` and accept its replay contract explicitly.
 
+Async catch clauses receive `Error` on both targets. Recover the binding's
+structured value before inspecting it:
+
+```mbt check
+///|
+async test "tasks: inspect a portable async error" {
+  let operator = @opendal.AsyncOperator::new("memory")
+  defer operator.close()
+  try operator.read("missing-async.bin") catch {
+    error =>
+      match @opendal.OpenDalError::from_error(error) {
+        Some(storage_error) => {
+          assert_true(storage_error.kind() is NotFound)
+          assert_true(storage_error.info().operation is Read)
+        }
+        None => fail("expected an OpenDAL error")
+      }
+  } noraise {
+    _ => fail("expected read to raise")
+  }
+}
+```
+
 ## Tasks from the Node.js guide that are not available
 
 The following upstream recipes cannot yet be translated faithfully:
 
-- async stat, list/lister, delete, copy/Copier, presign, and public task-handle
-  APIs beyond the first async slice;
+- portable native async stat, list/lister, delete, copy/Copier, presign, and
+  public task-handle APIs beyond the first async slice (the JavaScript target
+  already exposes capability-checked Promise extensions for several of these);
 - callback adapters or Node stream compatibility;
 - presigned delete and other methods beyond read/write/stat;
 - ordered per-path batch results or transactional batch rollback;
 - recursive or cross-Operator/cross-service Copier tasks;
 - logging, tracing, metrics, custom retry observers, and other callback layers;
-- recipes requiring services beyond `memory`, `fs`, and `s3`;
+- recipes requiring services beyond native `memory`/`fs`/`s3` or browser
+  `memory`/`opfs`/`s3`;
 - recipes requiring Intel macOS, Windows, or musl release artifacts.
 
 They are deliberate scope boundaries, not hidden APIs. The published `0.1.0`

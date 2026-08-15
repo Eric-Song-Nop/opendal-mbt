@@ -1036,6 +1036,7 @@ dependencies = [
  "gloo-timers",
  "opendal",
  "thiserror",
+ "tokio",
  "wasm-bindgen-futures",
 ]
 

@@ -29,9 +29,88 @@ pub struct AsyncWriter {
 }
 
 ///|
+/// Construct the target's OpenDAL operator behind one portable asynchronous
+/// entry point.
+///
+/// Native construction completes immediately; the JavaScript target performs
+/// its embedded runtime bootstrap. Call sites remain identical because both
+/// implementations are exposed as MoonBit `async fn`.
+#warnings("-unused_async")
+pub async fn AsyncOperator::new(
+  scheme : StringView,
+  config? : Map[String, String] = Map([]),
+) -> AsyncOperator {
+  Operator::new(scheme, config~).as_async()
+}
+
+///|
 /// Create a lightweight asynchronous view that shares this Operator.
 pub fn Operator::as_async(self : Operator) -> AsyncOperator {
   { native: self }
+}
+
+///|
+/// Release this asynchronous operator. Closing more than once is harmless.
+/// Finish or close every child resource and await in-flight calls first;
+/// behavior of outstanding work after parent close is not portable.
+pub fn AsyncOperator::close(self : AsyncOperator) -> Unit {
+  self.native.close()
+}
+
+///|
+/// Write an entire byte view without blocking the MoonBit scheduler.
+///
+/// This portable convenience method is implemented in terms of the native
+/// asynchronous writer, preserving cancellation and commit semantics rather
+/// than calling the synchronous whole-object API from an async function. Input
+/// is limited to 64 MiB and split into 256 KiB Writer calls.
+pub async fn AsyncOperator::write(
+  self : AsyncOperator,
+  path : StringView,
+  data : BytesView,
+  append? : Bool = false,
+  content_type? : StringView,
+  content_disposition? : StringView,
+  content_encoding? : StringView,
+  cache_control? : StringView,
+  if_match? : StringView,
+  if_none_match? : StringView,
+) -> Metadata {
+  if data.length() > 64 * 1024 * 1024 {
+    raise binding_error(
+      BufferTooLarge,
+      Write,
+      "portable whole-object write must not exceed 64 MiB",
+      Some(path.to_owned()),
+      None,
+    )
+  }
+  let writer = self.open_writer(
+    path,
+    append~,
+    content_type?,
+    content_disposition?,
+    content_encoding?,
+    cache_control?,
+    if_match?,
+    if_none_match?,
+  )
+  try {
+    let mut offset = 0
+    while offset < data.length() {
+      let next = Int::min(offset + 256 * 1024, data.length())
+      writer.write(data[offset:next])
+      offset = next
+    }
+    writer.finish()
+  } catch {
+    error => {
+      writer.abort() catch {
+        _ => ()
+      }
+      raise error
+    }
+  }
 }
 
 ///|
@@ -97,7 +176,8 @@ async fn await_native_result(
 /// Read one path or byte range into an owned Bytes value without blocking the
 /// MoonBit scheduler. Cancellation requests native cancellation; storage side
 /// effects already performed by the backend are not rolled back. Suffix ranges
-/// require the underlying Operator's native suffix capability.
+/// require the underlying Operator's native suffix capability. The portable
+/// whole-object result limit is 64 MiB; use a read stream for larger values.
 pub async fn AsyncOperator::read(
   self : AsyncOperator,
   path : StringView,
@@ -141,28 +221,39 @@ pub async fn AsyncOperator::read(
     raise error_from_native_result(result, Read, Some(path), None)
   }
   native_result_release(result)
+  if bytes.length() > 64 * 1024 * 1024 {
+    raise binding_error(
+      BufferTooLarge,
+      Read,
+      "portable whole-object read must not exceed 64 MiB",
+      Some(path),
+      None,
+    )
+  }
   bytes
 }
 
 ///|
 /// Open an output-bounded asynchronous sequential read stream.
 /// `chunk_size` bounds each returned value and binding copy, not a raw backend
-/// buffer. Suffix ranges require the underlying Operator's native capability.
+/// buffer. It must be positive and no larger than the portable 256 KiB
+/// transfer limit. Suffix ranges require the underlying Operator's native
+/// capability.
 pub async fn AsyncOperator::open_read_stream(
   self : AsyncOperator,
   path : StringView,
   range? : ByteRange = Full,
-  chunk_size? : Int = 1024 * 1024,
+  chunk_size? : Int = 256 * 1024,
   version? : StringView,
   if_match? : StringView,
   if_none_match? : StringView,
 ) -> AsyncReadStream {
   let path = path.to_owned()
-  if chunk_size <= 0 {
+  if chunk_size <= 0 || chunk_size > 256 * 1024 {
     raise binding_error(
       InvalidArgument,
       Read,
-      "async read stream chunk_size must be positive",
+      "async read stream chunk_size must be between 1 and 256 KiB",
       Some(path),
       None,
     )
@@ -307,9 +398,18 @@ pub async fn AsyncOperator::open_writer(
 }
 
 ///|
-/// Write one complete chunk. The selected byte view is copied before native
-/// work begins.
+/// Write one complete chunk of at most 256 KiB. The selected byte view is
+/// copied before native work begins.
 pub async fn AsyncWriter::write(self : AsyncWriter, chunk : BytesView) -> Unit {
+  if chunk.length() > 256 * 1024 {
+    raise binding_error(
+      BufferTooLarge,
+      Write,
+      "native writer chunk must not exceed 256 KiB",
+      Some(self.path),
+      None,
+    )
+  }
   let chunk = chunk.to_owned()
   let result = await_native_result(
     completion_fd => {
