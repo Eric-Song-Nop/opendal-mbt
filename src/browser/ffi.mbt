@@ -70,8 +70,12 @@ extern "js" fn JsOutcome::operator_info_value(
   #| (outcome) => outcome.value
 
 ///|
-extern "js" fn JsOutcome::schemes_value(self : JsOutcome) -> Array[String] =
+extern "js" fn JsOutcome::schemes_value_ffi(self : JsOutcome) -> FixedArray[String] =
   #| (outcome) => outcome.value
+
+fn JsOutcome::schemes_value(self : JsOutcome) -> Array[String] {
+  Array::from_fixed_array(JsOutcome::schemes_value_ffi(self))
+}
 
 ///|
 extern "js" fn JsOutcome::metadata_value(self : JsOutcome) -> JsMetadata =
@@ -82,8 +86,12 @@ extern "js" fn JsOutcome::bytes_value(self : JsOutcome) -> Bytes =
   #| (outcome) => outcome.value
 
 ///|
-extern "js" fn JsOutcome::entries_value(self : JsOutcome) -> Array[JsEntry] =
+extern "js" fn JsOutcome::entries_value_ffi(self : JsOutcome) -> FixedArray[JsEntry] =
   #| (outcome) => outcome.value
+
+fn JsOutcome::entries_value(self : JsOutcome) -> Array[JsEntry] {
+  Array::from_fixed_array(JsOutcome::entries_value_ffi(self))
+}
 
 ///|
 extern "js" fn JsOutcome::has_value(self : JsOutcome) -> Bool =
@@ -130,17 +138,26 @@ extern "js" fn JsRuntime::available_schemes(self : JsRuntime) -> JsOutcome =
   #| (runtime) => runtime.availableSchemes()
 
 ///|
-extern "js" fn JsRuntime::operator(
+extern "js" fn JsRuntime::operator_ffi(
   self : JsRuntime,
   scheme : String,
-  keys : Array[String],
-  values : Array[String],
+  keys : FixedArray[String],
+  values : FixedArray[String],
 ) -> JsOutcome =
   #| (runtime, scheme, keys, values) => {
   #|   const config = Object.create(null)
   #|   for (let i = 0; i < keys.length; i += 1) config[keys[i]] = values[i]
   #|   return runtime.operator(scheme, config)
   #| }
+
+fn JsRuntime::operator(
+  self : JsRuntime,
+  scheme : String,
+  keys : Array[String],
+  values : Array[String],
+) -> JsOutcome {
+  JsRuntime::operator_ffi(self, scheme, FixedArray::from_array(keys), FixedArray::from_array(values))
+}
 
 ///|
 extern "js" fn JsRuntime::close(self : JsRuntime) -> JsOutcome =
