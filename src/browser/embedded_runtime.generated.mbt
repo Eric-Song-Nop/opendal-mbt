@@ -25161,8 +25161,8 @@ extern "js" fn embedded_wasm_part_2() -> String =
   #| ].join("")
 
 ///|
-extern "js" fn load_embedded_js_runtime(
-  parts : Array[String],
+extern "js" fn load_embedded_js_runtime_ffi(
+  parts : FixedArray[String],
 ) -> @js_async.Promise[JsRuntime] =
   #| async (parts) => {
   #|   if (typeof DecompressionStream !== "function") {
@@ -28016,6 +28016,12 @@ extern "js" fn load_embedded_js_runtime(
   #|   const bridge = await wasm_bindgen({ module_or_path: wasmBytes })
   #|   return loadOpenDalBrowser({ bridge })
   #| }
+
+fn load_embedded_js_runtime(
+  parts : Array[String],
+) -> @js_async.Promise[JsRuntime] {
+  load_embedded_js_runtime_ffi(FixedArray::from_array(parts))
+}
 
 ///|
 fn embedded_runtime_parts() -> Array[String] {
